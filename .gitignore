@@ -52,3 +52,6 @@ celerybeat.pid
 build/
 dist/
 *.egg-info/
+
+# Codex
+!AGENTS.md
