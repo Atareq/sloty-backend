@@ -29,13 +29,16 @@ Current repo reality:
 - Current root URL config: `config/urls.py`
 - Current local apps package: `apps/`
 - Current implemented app: `apps/accounts/`
+- Current implemented domain apps: `apps/clubs/` and `apps/courts/`
 - Project docs live under `docs/`
 - Requirements are split into `requirements/base.txt` and `requirements/dev.txt`
 - Style tooling exists through `.pre-commit-config.yaml`, `pyproject.toml`, and
   `setup.cfg`
 - Sprint 1 implements backend foundation and the custom accounts user model
+- Sprint 2 implements club/court setup, assignment models, and setup API
+  scoping
 - Planned shared app name is `apps/common/`
-- Domain apps beyond `accounts` are not implemented yet
+- Domain apps beyond `accounts`, `clubs`, and `courts` are not implemented yet
 
 Planned project direction:
 
@@ -45,7 +48,7 @@ Planned project direction:
 - Add shared infrastructure only when repeated patterns justify it.
 - Planned app layout: `accounts`, `clubs`, `courts`, `bookings`,
   `transactions`, `settlements`, `pricing`, `audit`, and `common`.
-- Only `accounts` should exist for Sprint 1.
+- Only `accounts`, `clubs`, and `courts` should exist through Sprint 2.
 
 ## 3. Architecture Overview
 
@@ -64,6 +67,12 @@ Current implemented app:
 - `apps/accounts/` contains the custom user model and account-specific helpers.
 - It must not contain club, court, booking, transaction, settlement, pricing,
   staff shift, marketplace, or assignment business logic.
+- `apps/clubs/` contains club setup and club membership assignment logic for
+  owners and managers.
+- `apps/courts/` contains court setup, court working hours, and court staff
+  assignment logic.
+- Club/court scope must come from `ClubMembership` and
+  `CourtStaffAssignment`, not from direct club or court fields on `User`.
 
 Planned app pattern:
 
@@ -138,6 +147,23 @@ Rules for the flow:
 - Contains the custom `User` model, role helpers, account admin registration,
   and account permission helpers.
 - Do not place unrelated domain behavior here.
+
+`apps/clubs/`
+
+- Club setup app.
+- Contains `Club` and `ClubMembership`.
+- `ClubMembership` assigns `CLUB_OWNER` users as club owners and `MANAGER`
+  users as club managers.
+- Do not place court, booking, transaction, settlement, pricing, or audit
+  behavior here.
+
+`apps/courts/`
+
+- Court setup app.
+- Contains `Court`, `CourtWorkingHour`, and `CourtStaffAssignment`.
+- `CourtStaffAssignment` assigns `STAFF` users to one active court for MVP.
+- Do not place booking, transaction, settlement, pricing, or audit behavior
+  here.
 
 `apps/common/`
 
@@ -314,6 +340,12 @@ Run targeted tests:
 
 ```bash
 pytest tests/accounts
+```
+
+Run Sprint 2 setup tests:
+
+```bash
+pytest tests/clubs tests/courts
 ```
 
 Run all tests:

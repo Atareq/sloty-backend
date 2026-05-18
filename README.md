@@ -47,6 +47,14 @@ http://127.0.0.1:8000/api/docs/
 - `GET /api/users/` and `POST /api/users/` manage base user accounts for
   Platform Super Admin users.
 
+## Sprint 2 Setup Endpoints
+
+- `/api/clubs/`
+- `/api/club-memberships/`
+- `/api/courts/`
+- `/api/court-working-hours/`
+- `/api/court-staff-assignments/`
+
 Run tests:
 
 ```bash
