@@ -60,6 +60,20 @@ class UserRoleTests(TestCase):
 
         self.assertIsNone(user.created_by)
 
+    def test_created_by_can_point_to_another_user(self):
+        creator = self.create_user(
+            username="creator",
+            role=User.Role.PLATFORM_SUPER_ADMIN,
+        )
+
+        user = self.create_user(
+            username="created-by-user",
+            role=User.Role.STAFF,
+            created_by=creator,
+        )
+
+        self.assertEqual(user.created_by, creator)
+
     def test_phone_number_allows_null_and_blank(self):
         field = User._meta.get_field("phone_number")
 
@@ -117,9 +131,7 @@ class RolePermissionTests(TestCase):
     def test_permissions_reject_non_matching_authenticated_role(self):
         for role, permission_class in self.permission_cases:
             denied_role = next(
-                candidate
-                for candidate in User.Role.values
-                if candidate != role
+                candidate for candidate in User.Role.values if candidate != role
             )
 
             with self.subTest(role=role, denied_role=denied_role):

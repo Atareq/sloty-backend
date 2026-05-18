@@ -39,6 +39,14 @@ Swagger UI is available at:
 http://127.0.0.1:8000/api/docs/
 ```
 
+## Authentication Endpoints
+
+- `POST /api/auth/token/` obtains JWT access and refresh tokens.
+- `POST /api/auth/token/refresh/` refreshes an access token.
+- `GET /api/me/` returns the authenticated user's profile.
+- `GET /api/users/` and `POST /api/users/` manage base user accounts for
+  Platform Super Admin users.
+
 Run tests:
 
 ```bash
