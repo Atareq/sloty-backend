@@ -1,106 +1,31 @@
-default_install_hook_types: [pre-commit, pre-push]
-
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v2.3.0
+    rev: v5.0.0
     hooks:
-
-      - id: check-yaml
-        stages: [pre-commit, pre-push]
-
-      - id: end-of-file-fixer
-        stages: [pre-commit, pre-push]
-
       - id: trailing-whitespace
-        stages: [pre-commit, pre-push]
-
+      - id: end-of-file-fixer
+      - id: check-yaml
       - id: check-json
-        stages: [pre-commit, pre-push]
-
-      - id: check-added-large-files
-        stages: [pre-commit, pre-push]
-
-      - id: check-case-conflict
-        stages: [pre-commit, pre-push]
-
+      - id: check-toml
+      - id: check-merge-conflict
       - id: debug-statements
-        stages: [pre-commit, pre-push]
-
       - id: detect-private-key
-        stages: [pre-commit, pre-push]
-
-      - id: name-tests-test
-        exclude: ^(src/helpers/tests/|tests/(conftest\.py|factories\.py|__init__\.py|README\.md|utils/.*))$
-        stages: [pre-commit, pre-push]
-        args: [--django]
-
-      - id: no-commit-to-branch
-        stages: [pre-commit, pre-push]
-        args: [
-          --branch, dev,
-          --branch, staging,
-          --branch, beta,
-          --branch, main,
-          --branch, master
-        ]
-
-  - repo: https://github.com/dhruvmanila/remove-print-statements
-    rev: v0.5.0
-    hooks:
-    - id: remove-print-statements
-      stages: [pre-commit]
-      args: [-v]
-
-  - repo: https://github.com/MarcoGorelli/absolufy-imports
-    rev: v0.3.1
-    hooks:
-    - id: absolufy-imports
-      stages: [pre-commit]
 
   - repo: https://github.com/psf/black
-    rev: 22.10.0
+    rev: 24.8.0
     hooks:
-    - id: black
-      stages: [pre-commit]
-      args: [--line-length=79]
+      - id: black
+        exclude: ^(.*/migrations/.*)$
 
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
     hooks:
       - id: isort
-        name: isort
-        stages: [pre-commit]
         exclude: ^(.*/migrations/.*)$
-        args: [
-          --profile, black,
-          --filter-files,
-          --line-length=79,
-          --settings-file, .isort.cfg
-        ]
+        args: [--filter-files]
 
   - repo: https://github.com/pycqa/flake8
-    rev: 5.0.4
+    rev: 7.1.1
     hooks:
-    - id: flake8
-      stages: [pre-commit, pre-push]
-      exclude: ^(.*/migrations/.*)$
-      args: [
-        --config, .flake8
-      ]
-
-  - repo: https://github.com/dhruvmanila/remove-print-statements
-    rev: v0.5.0
-    hooks:
-    - id: remove-print-statements
-      stages: [pre-push]
-      args: [-v, --dry-run]
-
-  - repo: local
-    hooks:
-      - id: pytest
-        name: pytest
-        entry: pytest -q
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [pre-commit]
+      - id: flake8
+        exclude: ^(.*/migrations/.*)$

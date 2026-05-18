@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 load_dotenv(BASE_DIR / ".env")
 
@@ -114,7 +114,7 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-ROOT_URLCONF = "sloty.urls"
+ROOT_URLCONF = "config.urls"
 
 TEMPLATES = [
     {
@@ -132,7 +132,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = "sloty.wsgi.application"
+WSGI_APPLICATION = "config.wsgi.application"
 
 AUTH_PASSWORD_VALIDATORS = [
     {

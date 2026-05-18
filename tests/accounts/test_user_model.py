@@ -117,7 +117,9 @@ class RolePermissionTests(TestCase):
     def test_permissions_reject_non_matching_authenticated_role(self):
         for role, permission_class in self.permission_cases:
             denied_role = next(
-                candidate for candidate in User.Role.values if candidate != role
+                candidate
+                for candidate in User.Role.values
+                if candidate != role
             )
 
             with self.subTest(role=role, denied_role=denied_role):
