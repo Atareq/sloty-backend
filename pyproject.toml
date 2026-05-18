@@ -9,7 +9,7 @@ extend-exclude = '''
 
 [tool.isort]
 profile = "black"
-line_length = 79
+line_length = 85
 multi_line_output = 3
 order_by_type = true
 include_trailing_comma = true
