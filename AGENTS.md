@@ -143,6 +143,8 @@ Rules for the flow:
 
 - Planned pattern, not currently present.
 - Use only when shared behavior exists.
+- Base timestamp models are deferred until reusable model behavior exists; do
+  not create `apps/common/` only for planned base models.
 - Appropriate contents include base models, shared permissions, common viewsets
   or mixins, shared validators, and reusable utilities.
 
@@ -191,6 +193,8 @@ Rules for the flow:
 - Do not expose internal-only fields.
 - Use pagination consistently for list endpoints.
 - Use `django-filter` `FilterSet` classes when filtering becomes non-trivial.
+- Do not add global success response wrapping. A shared base error format or
+  custom exception handler is deferred until a simple, tested need exists.
 
 ## 8. Authentication and Permission Rules
 
