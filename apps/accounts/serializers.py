@@ -66,6 +66,9 @@ class UserCreateSerializer(serializers.ModelSerializer):
         password = validated_data.pop("password")
         return User.objects.create_user(password=password, **validated_data)
 
+    def to_representation(self, instance):
+        return UserListSerializer(instance, context=self.context).data
+
 
 class UserUpdateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -78,3 +81,6 @@ class UserUpdateSerializer(serializers.ModelSerializer):
             "phone_number",
             "is_active",
         )
+
+    def to_representation(self, instance):
+        return UserListSerializer(instance, context=self.context).data

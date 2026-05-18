@@ -118,6 +118,20 @@ class JWTAPITests(AccountAPITestCase):
 
 
 class PlatformUserManagementAPITests(AccountAPITestCase):
+    user_list_response_fields = {
+        "id",
+        "username",
+        "email",
+        "first_name",
+        "last_name",
+        "role",
+        "phone_number",
+        "is_active",
+        "is_staff",
+        "is_superuser",
+        "created_by",
+    }
+
     def setUp(self):
         self.platform_admin = self.create_user(
             username="platform-admin",
@@ -188,6 +202,10 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         self.assertEqual(user.created_by, self.platform_admin)
         self.assertFalse(user.is_staff)
         self.assertFalse(user.is_superuser)
+        self.assertEqual(set(response.data), self.user_list_response_fields)
+        self.assertEqual(response.data["created_by"], self.platform_admin.id)
+        self.assertFalse(response.data["is_staff"])
+        self.assertFalse(response.data["is_superuser"])
         self.assertNotIn("password", response.data)
 
     def test_create_payload_cannot_set_staff_or_superuser_flags(self):
@@ -209,6 +227,10 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         user = User.objects.get(username="flagged-user")
         self.assertFalse(user.is_staff)
         self.assertFalse(user.is_superuser)
+        self.assertEqual(set(response.data), self.user_list_response_fields)
+        self.assertFalse(response.data["is_staff"])
+        self.assertFalse(response.data["is_superuser"])
+        self.assertNotIn("password", response.data)
 
     def test_platform_super_admin_can_patch_safe_fields(self):
         self.authenticate_platform_admin()
@@ -235,6 +257,16 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
             str(self.non_platform_user.phone_number),
             "+201000000003",
         )
+        self.assertEqual(set(response.data), self.user_list_response_fields)
+        self.assertEqual(response.data["username"], self.non_platform_user.username)
+        self.assertEqual(response.data["email"], "updated@example.com")
+        self.assertEqual(response.data["first_name"], "Updated")
+        self.assertEqual(response.data["last_name"], "Owner")
+        self.assertEqual(response.data["role"], User.Role.MANAGER)
+        self.assertEqual(response.data["phone_number"], "+201000000003")
+        self.assertFalse(response.data["is_staff"])
+        self.assertFalse(response.data["is_superuser"])
+        self.assertNotIn("password", response.data)
 
     def test_platform_super_admin_can_deactivate_user(self):
         self.authenticate_platform_admin()
@@ -248,6 +280,8 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.non_platform_user.refresh_from_db()
         self.assertFalse(self.non_platform_user.is_active)
+        self.assertEqual(set(response.data), self.user_list_response_fields)
+        self.assertFalse(response.data["is_active"])
 
     def test_update_payload_cannot_set_staff_or_superuser_flags(self):
         self.authenticate_platform_admin()
@@ -265,6 +299,10 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         self.non_platform_user.refresh_from_db()
         self.assertFalse(self.non_platform_user.is_staff)
         self.assertFalse(self.non_platform_user.is_superuser)
+        self.assertEqual(set(response.data), self.user_list_response_fields)
+        self.assertFalse(response.data["is_staff"])
+        self.assertFalse(response.data["is_superuser"])
+        self.assertNotIn("password", response.data)
 
     def test_delete_user_is_not_allowed(self):
         self.authenticate_platform_admin()
