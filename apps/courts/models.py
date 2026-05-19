@@ -4,7 +4,6 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models
-from django.db.models import Q
 
 from apps.clubs.models import Club
 
@@ -106,47 +105,3 @@ class CourtWorkingHour(models.Model):
 
     def __str__(self) -> str:
         return f"{self.court} - {self.get_weekday_display()}"
-
-
-class CourtStaffAssignment(models.Model):
-    court = models.ForeignKey(
-        Court,
-        on_delete=models.CASCADE,
-        related_name="staff_assignments",
-    )
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="court_staff_assignments",
-    )
-    is_active = models.BooleanField(default=True)
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        blank=True,
-        null=True,
-        on_delete=models.SET_NULL,
-        related_name="created_court_staff_assignments",
-    )
-    created = models.DateTimeField(auto_now_add=True)
-    modified = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=["court", "user"],
-                condition=Q(is_active=True),
-                name="unique_active_court_staff_assignment",
-            ),
-            models.UniqueConstraint(
-                fields=["user"],
-                condition=Q(is_active=True),
-                name="unique_active_staff_court_assignment",
-            ),
-        ]
-        indexes = [
-            models.Index(fields=["court", "is_active"]),
-            models.Index(fields=["user", "is_active"]),
-        ]
-
-    def __str__(self) -> str:
-        return f"{self.user} - {self.court}"

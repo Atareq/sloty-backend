@@ -1,11 +1,27 @@
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
+from django.utils.text import slugify
 from phonenumber_field.modelfields import PhoneNumberField
+
+
+def generate_unique_club_slug(name: str, *, exclude_pk=None) -> str:
+    base_slug = slugify(name) or "club"
+    slug = base_slug
+    suffix = 2
+    queryset = Club.objects.all()
+    if exclude_pk is not None:
+        queryset = queryset.exclude(pk=exclude_pk)
+    while queryset.filter(slug=slug).exists():
+        slug = f"{base_slug}-{suffix}"
+        suffix += 1
+    return slug
 
 
 class Club(models.Model):
     name = models.CharField(max_length=255, db_index=True)
+    slug = models.SlugField(max_length=120, unique=True, db_index=True)
     city = models.CharField(max_length=120, db_index=True)
     area = models.CharField(max_length=120)
     address = models.TextField(blank=True)
@@ -34,11 +50,17 @@ class Club(models.Model):
     def __str__(self) -> str:
         return self.name
 
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = generate_unique_club_slug(self.name, exclude_pk=self.pk)
+        super().save(*args, **kwargs)
+
 
 class ClubMembership(models.Model):
     class Role(models.TextChoices):
         OWNER = "OWNER", "Owner"
         MANAGER = "MANAGER", "Manager"
+        STAFF = "STAFF", "Staff"
 
     club = models.ForeignKey(
         Club,
@@ -51,6 +73,13 @@ class ClubMembership(models.Model):
         related_name="club_memberships",
     )
     role = models.CharField(max_length=16, choices=Role.choices)
+    court = models.ForeignKey(
+        "courts.Court",
+        blank=True,
+        null=True,
+        on_delete=models.CASCADE,
+        related_name="memberships",
+    )
     is_active = models.BooleanField(default=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -66,19 +95,47 @@ class ClubMembership(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["club", "user", "role"],
-                condition=Q(is_active=True),
-                name="unique_active_club_membership",
+                condition=Q(
+                    is_active=True,
+                    role__in=("OWNER", "MANAGER"),
+                    court__isnull=True,
+                ),
+                name="unique_active_club_role_membership",
+            ),
+            models.UniqueConstraint(
+                fields=["club", "user", "role", "court"],
+                condition=Q(is_active=True, role="STAFF"),
+                name="unique_active_staff_membership",
             ),
             models.UniqueConstraint(
                 fields=["user", "role"],
                 condition=Q(is_active=True, role="MANAGER"),
                 name="unique_active_manager_club_membership",
             ),
+            models.UniqueConstraint(
+                fields=["user", "role"],
+                condition=Q(is_active=True, role="STAFF"),
+                name="unique_active_staff_club_membership",
+            ),
         ]
         indexes = [
             models.Index(fields=["club", "role", "is_active"]),
+            models.Index(fields=["court", "role", "is_active"]),
             models.Index(fields=["user", "role", "is_active"]),
         ]
 
     def __str__(self) -> str:
         return f"{self.user} - {self.club} ({self.role})"
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        if self.role in {self.Role.OWNER, self.Role.MANAGER} and self.court_id:
+            errors["court"] = "OWNER and MANAGER memberships cannot be court-scoped."
+        if self.role == self.Role.STAFF:
+            if not self.court_id:
+                errors["court"] = "STAFF memberships require a court."
+            elif self.club_id and self.court.club_id != self.club_id:
+                errors["court"] = "Staff membership court must belong to the club."
+        if errors:
+            raise ValidationError(errors)

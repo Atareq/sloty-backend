@@ -9,25 +9,30 @@ from rest_framework.test import APITestCase
 from apps.accounts.models import User
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
-from apps.courts.models import Court, CourtStaffAssignment, CourtWorkingHour
+from apps.courts.models import Court, CourtWorkingHour
 
 
 class BookingAPITestCase(APITestCase):
     password = "test-pass-123"
 
-    def create_user(self, username: str, role: str) -> User:
+    def create_user(self, username: str, **extra_fields) -> User:
         return User.objects.create_user(
             username=username,
             password=self.password,
-            role=role,
+            **extra_fields,
         )
 
-    def create_club(self, name: str, **extra_fields) -> Club:
+    def create_platform_admin(self, username="booking-admin") -> User:
+        return self.create_user(username=username, is_platform_admin=True)
+
+    def create_club(self, name: str, slug: str | None = None, **extra_fields) -> Club:
         data = {
             "name": name,
             "city": "Assiut",
             "area": "Downtown",
         }
+        if slug is not None:
+            data["slug"] = slug
         data.update(extra_fields)
         return Club.objects.create(**data)
 
@@ -41,15 +46,19 @@ class BookingAPITestCase(APITestCase):
         data.update(extra_fields)
         return Court.objects.create(**data)
 
-    def create_membership(self, club: Club, user: User, role: str):
+    def create_membership(
+        self,
+        user: User,
+        club: Club,
+        role: str,
+        court: Court | None = None,
+    ) -> ClubMembership:
         return ClubMembership.objects.create(
             club=club,
             user=user,
             role=role,
+            court=court,
         )
-
-    def create_staff_assignment(self, court: Court, user: User):
-        return CourtStaffAssignment.objects.create(court=court, user=user)
 
     def create_booking(self, court: Court, **extra_fields) -> Booking:
         start_time = extra_fields.pop("start_time", self.time_at(20))
@@ -89,9 +98,18 @@ class BookingAPITestCase(APITestCase):
         data.update(extra_fields)
         return data
 
-    def post_booking(self, court: Court, **extra_fields):
+    def booking_list_url(self, club):
+        return reverse("club-booking-list", kwargs={"club_slug": club.slug})
+
+    def booking_detail_url(self, club, booking):
+        return reverse(
+            "club-booking-detail",
+            kwargs={"club_slug": club.slug, "pk": booking.pk},
+        )
+
+    def post_booking(self, club: Club, court: Court, **extra_fields):
         return self.client.post(
-            reverse("booking-list"),
+            self.booking_list_url(club),
             self.booking_payload(court, **extra_fields),
             format="json",
         )
@@ -102,17 +120,23 @@ class BookingAPITestCase(APITestCase):
 
 class BookingCreationTests(BookingAPITestCase):
     def setUp(self):
-        self.platform_admin = self.create_user(
-            "booking-admin",
-            User.Role.PLATFORM_SUPER_ADMIN,
-        )
-        self.club = self.create_club("Booking Club")
+        self.platform_admin = self.create_platform_admin()
+        self.club = self.create_club("Booking Club", slug="booking-club")
+        self.other_club = self.create_club("Other Booking Club", slug="other-booking")
         self.court = self.create_court(self.club, "Booking Court")
+        self.other_court = self.create_court(self.other_club, "Other Booking Court")
+
+    def test_club_scoped_bookings_route_works(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.post_booking(self.club, self.court)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
     def test_booking_can_be_created_with_required_fields(self):
         self.client.force_authenticate(user=self.platform_admin)
 
-        response = self.post_booking(self.court)
+        response = self.post_booking(self.club, self.court)
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         booking = Booking.objects.get(id=response.data["id"])
@@ -122,7 +146,7 @@ class BookingCreationTests(BookingAPITestCase):
     def test_booking_defaults_to_hold_and_manual_source(self):
         self.client.force_authenticate(user=self.platform_admin)
 
-        response = self.post_booking(self.court)
+        response = self.post_booking(self.club, self.court)
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         booking = Booking.objects.get(id=response.data["id"])
@@ -133,6 +157,7 @@ class BookingCreationTests(BookingAPITestCase):
         self.client.force_authenticate(user=self.platform_admin)
 
         response = self.post_booking(
+            self.club,
             self.court,
             start_time=self.time_at(20).isoformat(),
             end_time=self.time_at(22).isoformat(),
@@ -144,20 +169,28 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(booking.total_price, Decimal("600.00"))
         self.assertEqual(response.data["total_price"], "600.00")
 
-    def test_club_is_copied_from_court(self):
+    def test_booking_club_is_set_from_url_slug_club(self):
         self.client.force_authenticate(user=self.platform_admin)
 
-        response = self.post_booking(self.court)
+        response = self.post_booking(self.club, self.court)
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         booking = Booking.objects.get(id=response.data["id"])
         self.assertEqual(booking.club, self.club)
         self.assertEqual(response.data["club"], self.club.id)
 
+    def test_court_from_another_club_is_rejected(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.post_booking(self.club, self.other_court)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_start_time_must_be_before_end_time(self):
         self.client.force_authenticate(user=self.platform_admin)
 
         response = self.post_booking(
+            self.club,
             self.court,
             start_time=self.time_at(21).isoformat(),
             end_time=self.time_at(20).isoformat(),
@@ -169,6 +202,7 @@ class BookingCreationTests(BookingAPITestCase):
         self.client.force_authenticate(user=self.platform_admin)
 
         response = self.post_booking(
+            self.club,
             self.court,
             start_time=self.time_at(20).isoformat(),
             end_time=self.time_at(20, 30).isoformat(),
@@ -186,6 +220,7 @@ class BookingCreationTests(BookingAPITestCase):
         self.client.force_authenticate(user=self.platform_admin)
 
         response = self.post_booking(
+            self.club,
             self.court,
             start_time=self.time_at(22).isoformat(),
             end_time=self.time_at(23).isoformat(),
@@ -196,71 +231,93 @@ class BookingCreationTests(BookingAPITestCase):
 
 class BookingScopeTests(BookingAPITestCase):
     def setUp(self):
-        self.platform_admin = self.create_user(
-            "scope-admin",
-            User.Role.PLATFORM_SUPER_ADMIN,
-        )
-        self.owner = self.create_user("scope-owner", User.Role.CLUB_OWNER)
-        self.manager = self.create_user("scope-manager", User.Role.MANAGER)
-        self.staff = self.create_user("scope-staff", User.Role.STAFF)
-        self.club = self.create_club("Scoped Club")
-        self.other_club = self.create_club("Other Scoped Club")
+        self.platform_admin = self.create_platform_admin("scope-admin")
+        self.owner = self.create_user("scope-owner")
+        self.manager = self.create_user("scope-manager")
+        self.staff = self.create_user("scope-staff")
+        self.club = self.create_club("Scoped Club", slug="scoped-club")
+        self.other_club = self.create_club("Other Scoped Club", slug="other-scoped")
         self.court = self.create_court(self.club, "Scoped Court")
+        self.same_club_other_court = self.create_court(self.club, "Scoped Other Court")
         self.other_court = self.create_court(self.other_club, "Other Scoped Court")
         self.booking = self.create_booking(self.court)
+        self.same_club_other_booking = self.create_booking(
+            self.same_club_other_court,
+            customer_phone="+201000000007",
+        )
         self.other_booking = self.create_booking(
             self.other_court,
             customer_phone="+201000000003",
         )
-        self.create_membership(self.club, self.owner, ClubMembership.Role.OWNER)
-        self.create_membership(self.club, self.manager, ClubMembership.Role.MANAGER)
-        self.create_staff_assignment(self.court, self.staff)
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
+        self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
 
     def test_anonymous_cannot_access_bookings(self):
-        response = self.client.get(reverse("booking-list"))
+        response = self.client.get(self.booking_list_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_platform_super_admin_can_list_all_bookings(self):
+    def test_platform_admin_lists_selected_club_bookings_only(self):
         self.client.force_authenticate(user=self.platform_admin)
 
-        response = self.client.get(reverse("booking-list"))
+        response = self.client.get(self.booking_list_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             self.list_ids(response),
-            {self.booking.id, self.other_booking.id},
+            {self.booking.id, self.same_club_other_booking.id},
         )
+        self.assertNotIn(self.other_booking.id, self.list_ids(response))
 
-    def test_owner_can_list_bookings_only_for_owned_clubs(self):
+    def test_owner_sees_bookings_in_selected_owned_club_only(self):
         self.client.force_authenticate(user=self.owner)
 
-        response = self.client.get(reverse("booking-list"))
+        response = self.client.get(self.booking_list_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(self.list_ids(response), {self.booking.id})
+        self.assertEqual(
+            self.list_ids(response),
+            {self.booking.id, self.same_club_other_booking.id},
+        )
 
-    def test_manager_can_list_bookings_only_for_assigned_club(self):
+    def test_owner_cannot_access_unrelated_club_bookings(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.booking_list_url(self.other_club))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_manager_sees_bookings_in_assigned_club_only(self):
         self.client.force_authenticate(user=self.manager)
 
-        response = self.client.get(reverse("booking-list"))
+        response = self.client.get(self.booking_list_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(self.list_ids(response), {self.booking.id})
+        self.assertEqual(
+            self.list_ids(response),
+            {self.booking.id, self.same_club_other_booking.id},
+        )
 
-    def test_staff_can_list_bookings_only_for_assigned_court(self):
+    def test_staff_sees_bookings_for_assigned_court_only(self):
         self.client.force_authenticate(user=self.staff)
 
-        response = self.client.get(reverse("booking-list"))
+        response = self.client.get(self.booking_list_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(self.list_ids(response), {self.booking.id})
+        self.assertNotIn(self.same_club_other_booking.id, self.list_ids(response))
 
     def test_owner_cannot_retrieve_unrelated_booking(self):
         self.client.force_authenticate(user=self.owner)
 
         response = self.client.get(
-            reverse("booking-detail", kwargs={"pk": self.other_booking.pk})
+            self.booking_detail_url(self.club, self.other_booking)
         )
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
@@ -269,7 +326,7 @@ class BookingScopeTests(BookingAPITestCase):
         self.client.force_authenticate(user=self.manager)
 
         response = self.client.get(
-            reverse("booking-detail", kwargs={"pk": self.other_booking.pk})
+            self.booking_detail_url(self.club, self.other_booking)
         )
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
@@ -278,7 +335,7 @@ class BookingScopeTests(BookingAPITestCase):
         self.client.force_authenticate(user=self.staff)
 
         response = self.client.get(
-            reverse("booking-detail", kwargs={"pk": self.other_booking.pk})
+            self.booking_detail_url(self.club, self.same_club_other_booking)
         )
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
@@ -286,96 +343,110 @@ class BookingScopeTests(BookingAPITestCase):
 
 class BookingCreationPermissionTests(BookingAPITestCase):
     def setUp(self):
-        self.platform_admin = self.create_user(
-            "create-admin",
-            User.Role.PLATFORM_SUPER_ADMIN,
-        )
-        self.owner = self.create_user("create-owner", User.Role.CLUB_OWNER)
-        self.manager = self.create_user("create-manager", User.Role.MANAGER)
-        self.staff = self.create_user("create-staff", User.Role.STAFF)
-        self.club = self.create_club("Create Club")
-        self.other_club = self.create_club("Other Create Club")
+        self.platform_admin = self.create_platform_admin("create-admin")
+        self.owner = self.create_user("create-owner")
+        self.manager = self.create_user("create-manager")
+        self.staff = self.create_user("create-staff")
+        self.club = self.create_club("Create Club", slug="create-club")
+        self.other_club = self.create_club("Other Create Club", slug="other-create")
         self.court = self.create_court(self.club, "Create Court")
+        self.same_club_other_court = self.create_court(
+            self.club,
+            "Same Club Other Court",
+        )
         self.other_court = self.create_court(self.other_club, "Other Create Court")
-        self.create_membership(self.club, self.owner, ClubMembership.Role.OWNER)
-        self.create_membership(self.club, self.manager, ClubMembership.Role.MANAGER)
-        self.create_staff_assignment(self.court, self.staff)
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
+        self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
 
-    def test_platform_super_admin_can_create_booking_on_any_active_court(self):
+    def test_platform_admin_can_create_booking_on_any_active_court_in_selected_club(
+        self,
+    ):
         self.client.force_authenticate(user=self.platform_admin)
 
-        response = self.post_booking(self.other_court)
+        response = self.post_booking(self.club, self.same_club_other_court)
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
     def test_owner_can_create_booking_inside_owned_club(self):
         self.client.force_authenticate(user=self.owner)
 
-        response = self.post_booking(self.court)
+        response = self.post_booking(self.club, self.court)
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
     def test_owner_cannot_create_booking_inside_unrelated_club(self):
         self.client.force_authenticate(user=self.owner)
 
-        response = self.post_booking(self.other_court)
+        response = self.post_booking(self.other_club, self.other_court)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_manager_can_create_booking_inside_assigned_club(self):
         self.client.force_authenticate(user=self.manager)
 
-        response = self.post_booking(self.court)
+        response = self.post_booking(self.club, self.court)
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
     def test_manager_cannot_create_booking_inside_unrelated_club(self):
         self.client.force_authenticate(user=self.manager)
 
-        response = self.post_booking(self.other_court)
+        response = self.post_booking(self.other_club, self.other_court)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_staff_can_create_booking_on_assigned_court(self):
         self.client.force_authenticate(user=self.staff)
 
-        response = self.post_booking(self.court)
+        response = self.post_booking(self.club, self.court)
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
-    def test_staff_cannot_create_booking_on_unrelated_court(self):
+    def test_staff_cannot_create_booking_on_another_court_in_same_club(self):
         self.client.force_authenticate(user=self.staff)
 
-        response = self.post_booking(self.other_court)
+        response = self.post_booking(self.club, self.same_club_other_court)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_staff_cannot_create_booking_on_unrelated_club_court(self):
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.post_booking(self.other_club, self.other_court)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class BookingSourceAndActiveTests(BookingAPITestCase):
     def setUp(self):
-        self.platform_admin = self.create_user(
-            "source-admin",
-            User.Role.PLATFORM_SUPER_ADMIN,
-        )
-        self.owner = self.create_user("source-owner", User.Role.CLUB_OWNER)
-        self.club = self.create_club("Source Club")
+        self.platform_admin = self.create_platform_admin("source-admin")
+        self.owner = self.create_user("source-owner")
+        self.club = self.create_club("Source Club", slug="source-club")
         self.court = self.create_court(self.club, "Source Court")
-        self.create_membership(self.club, self.owner, ClubMembership.Role.OWNER)
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
 
     def test_non_platform_users_cannot_create_admin_correction_booking(self):
         self.client.force_authenticate(user=self.owner)
 
         response = self.post_booking(
+            self.club,
             self.court,
             source=Booking.Source.ADMIN_CORRECTION,
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_platform_super_admin_can_create_admin_correction_booking(self):
+    def test_platform_admin_can_create_admin_correction_booking(self):
         self.client.force_authenticate(user=self.platform_admin)
 
         response = self.post_booking(
+            self.club,
             self.court,
             source=Booking.Source.ADMIN_CORRECTION,
         )
@@ -386,7 +457,7 @@ class BookingSourceAndActiveTests(BookingAPITestCase):
     def test_normal_booking_source_defaults_to_manual(self):
         self.client.force_authenticate(user=self.platform_admin)
 
-        response = self.post_booking(self.court)
+        response = self.post_booking(self.club, self.court)
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["source"], Booking.Source.MANUAL)
@@ -396,7 +467,7 @@ class BookingSourceAndActiveTests(BookingAPITestCase):
         self.court.save(update_fields=["is_active"])
         self.client.force_authenticate(user=self.platform_admin)
 
-        response = self.post_booking(self.court)
+        response = self.post_booking(self.club, self.court)
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
@@ -405,18 +476,15 @@ class BookingSourceAndActiveTests(BookingAPITestCase):
         self.club.save(update_fields=["is_active"])
         self.client.force_authenticate(user=self.platform_admin)
 
-        response = self.post_booking(self.court)
+        response = self.post_booking(self.club, self.court)
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
 class BookingOverlapTests(BookingAPITestCase):
     def setUp(self):
-        self.platform_admin = self.create_user(
-            "overlap-admin",
-            User.Role.PLATFORM_SUPER_ADMIN,
-        )
-        self.club = self.create_club("Overlap Club")
+        self.platform_admin = self.create_platform_admin("overlap-admin")
+        self.club = self.create_club("Overlap Club", slug="overlap-club")
         self.court = self.create_court(self.club, "Overlap Court")
         self.other_court = self.create_court(self.club, "Other Overlap Court")
         self.client.force_authenticate(user=self.platform_admin)
@@ -433,6 +501,7 @@ class BookingOverlapTests(BookingAPITestCase):
         self.create_existing_booking(status_value)
 
         response = self.post_booking(
+            self.club,
             self.court,
             start_time=self.time_at(20, 30).isoformat(),
             end_time=self.time_at(21, 30).isoformat(),
@@ -444,6 +513,7 @@ class BookingOverlapTests(BookingAPITestCase):
         self.create_existing_booking(status_value)
 
         response = self.post_booking(
+            self.club,
             self.court,
             start_time=self.time_at(20, 30).isoformat(),
             end_time=self.time_at(21, 30).isoformat(),
@@ -461,6 +531,7 @@ class BookingOverlapTests(BookingAPITestCase):
         self.create_existing_booking(Booking.Status.HOLD)
 
         response = self.post_booking(
+            self.club,
             self.court,
             start_time=self.time_at(19).isoformat(),
             end_time=self.time_at(20).isoformat(),
@@ -472,6 +543,7 @@ class BookingOverlapTests(BookingAPITestCase):
         self.create_existing_booking(Booking.Status.HOLD)
 
         response = self.post_booking(
+            self.club,
             self.court,
             start_time=self.time_at(21).isoformat(),
             end_time=self.time_at(22).isoformat(),
@@ -483,6 +555,7 @@ class BookingOverlapTests(BookingAPITestCase):
         self.create_existing_booking(Booking.Status.HOLD)
 
         response = self.post_booking(
+            self.club,
             self.other_court,
             start_time=self.time_at(20, 30).isoformat(),
             end_time=self.time_at(21, 30).isoformat(),
@@ -505,11 +578,8 @@ class BookingOverlapTests(BookingAPITestCase):
 
 class BookingUpdateTests(BookingAPITestCase):
     def setUp(self):
-        self.platform_admin = self.create_user(
-            "update-admin",
-            User.Role.PLATFORM_SUPER_ADMIN,
-        )
-        self.club = self.create_club("Update Club")
+        self.platform_admin = self.create_platform_admin("update-admin")
+        self.club = self.create_club("Update Club", slug="update-club")
         self.court = self.create_court(self.club, "Update Court")
         self.other_court = self.create_court(self.club, "Other Update Court")
         self.booking = self.create_booking(self.court)
@@ -517,7 +587,7 @@ class BookingUpdateTests(BookingAPITestCase):
 
     def test_allowed_user_can_patch_basic_details(self):
         response = self.client.patch(
-            reverse("booking-detail", kwargs={"pk": self.booking.pk}),
+            self.booking_detail_url(self.club, self.booking),
             {
                 "customer_name": "Updated Customer",
                 "customer_phone": "+201000000004",
@@ -534,7 +604,7 @@ class BookingUpdateTests(BookingAPITestCase):
 
     def test_cannot_patch_status_in_sprint_3(self):
         response = self.client.patch(
-            reverse("booking-detail", kwargs={"pk": self.booking.pk}),
+            self.booking_detail_url(self.club, self.booking),
             {"status": Booking.Status.CANCELLED},
             format="json",
         )
@@ -545,7 +615,7 @@ class BookingUpdateTests(BookingAPITestCase):
 
     def test_cannot_patch_total_price(self):
         response = self.client.patch(
-            reverse("booking-detail", kwargs={"pk": self.booking.pk}),
+            self.booking_detail_url(self.club, self.booking),
             {"total_price": "1.00"},
             format="json",
         )
@@ -559,7 +629,7 @@ class BookingUpdateTests(BookingAPITestCase):
         original_end = self.booking.end_time
 
         response = self.client.patch(
-            reverse("booking-detail", kwargs={"pk": self.booking.pk}),
+            self.booking_detail_url(self.club, self.booking),
             {
                 "court": self.other_court.id,
                 "start_time": self.time_at(22).isoformat(),
@@ -575,9 +645,7 @@ class BookingUpdateTests(BookingAPITestCase):
         self.assertEqual(self.booking.end_time, original_end)
 
     def test_delete_booking_is_not_allowed(self):
-        response = self.client.delete(
-            reverse("booking-detail", kwargs={"pk": self.booking.pk})
-        )
+        response = self.client.delete(self.booking_detail_url(self.club, self.booking))
 
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
@@ -586,7 +654,7 @@ class BookingUpdateTests(BookingAPITestCase):
         self.booking.save(update_fields=["status"])
 
         response = self.client.patch(
-            reverse("booking-detail", kwargs={"pk": self.booking.pk}),
+            self.booking_detail_url(self.club, self.booking),
             {"customer_name": "Should Not Change"},
             format="json",
         )
@@ -596,16 +664,13 @@ class BookingUpdateTests(BookingAPITestCase):
 
 class BookingFilterTests(BookingAPITestCase):
     def setUp(self):
-        self.platform_admin = self.create_user(
-            "filter-admin",
-            User.Role.PLATFORM_SUPER_ADMIN,
-        )
-        self.owner = self.create_user("filter-owner", User.Role.CLUB_OWNER)
-        self.club = self.create_club("Filter Club")
-        self.other_club = self.create_club("Other Filter Club")
+        self.platform_admin = self.create_platform_admin("filter-admin")
+        self.owner = self.create_user("filter-owner")
+        self.club = self.create_club("Filter Club", slug="filter-club")
+        self.other_club = self.create_club("Other Filter Club", slug="other-filter")
         self.court = self.create_court(self.club, "Filter Court")
         self.other_court = self.create_court(self.other_club, "Other Filter Court")
-        self.create_membership(self.club, self.owner, ClubMembership.Role.OWNER)
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
         self.booking = self.create_booking(
             self.court,
             start_time=self.time_at(20),
@@ -630,16 +695,11 @@ class BookingFilterTests(BookingAPITestCase):
         )
         self.client.force_authenticate(user=self.platform_admin)
 
-    def test_filter_by_court(self):
-        response = self.client.get(reverse("booking-list"), {"court": self.court.id})
-
-        self.assertEqual(
-            self.list_ids(response),
-            {self.booking.id, self.confirmed_booking.id},
+    def test_filter_by_court_inside_selected_club(self):
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"court": self.court.id},
         )
-
-    def test_filter_by_club(self):
-        response = self.client.get(reverse("booking-list"), {"club": self.club.id})
 
         self.assertEqual(
             self.list_ids(response),
@@ -648,7 +708,7 @@ class BookingFilterTests(BookingAPITestCase):
 
     def test_filter_by_status(self):
         response = self.client.get(
-            reverse("booking-list"),
+            self.booking_list_url(self.club),
             {"status": Booking.Status.CONFIRMED},
         )
 
@@ -656,23 +716,27 @@ class BookingFilterTests(BookingAPITestCase):
 
     def test_filter_by_source(self):
         response = self.client.get(
-            reverse("booking-list"),
+            self.booking_list_url(self.club),
             {"source": Booking.Source.ADMIN_CORRECTION},
         )
 
         self.assertEqual(self.list_ids(response), {self.confirmed_booking.id})
 
     def test_filter_by_date(self):
-        response = self.client.get(reverse("booking-list"), {"date": "2026-05-20"})
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"date": "2026-05-20"},
+        )
 
         self.assertEqual(
             self.list_ids(response),
-            {self.booking.id, self.confirmed_booking.id, self.other_booking.id},
+            {self.booking.id, self.confirmed_booking.id},
         )
+        self.assertNotIn(self.other_booking.id, self.list_ids(response))
 
     def test_filter_by_date_from_and_date_to(self):
         response = self.client.get(
-            reverse("booking-list"),
+            self.booking_list_url(self.club),
             {
                 "date_from": self.time_at(21, 30).isoformat(),
                 "date_to": self.time_at(22, 30).isoformat(),
@@ -681,10 +745,13 @@ class BookingFilterTests(BookingAPITestCase):
 
         self.assertEqual(self.list_ids(response), {self.confirmed_booking.id})
 
-    def test_filters_still_respect_user_scope(self):
+    def test_filters_still_respect_user_scope_inside_selected_club(self):
         self.client.force_authenticate(user=self.owner)
 
-        response = self.client.get(reverse("booking-list"), {"date": "2026-05-20"})
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"date": "2026-05-20"},
+        )
 
         self.assertEqual(
             self.list_ids(response),

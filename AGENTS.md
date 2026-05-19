@@ -36,8 +36,8 @@ Current repo reality:
 - Style tooling exists through `.pre-commit-config.yaml`, `pyproject.toml`, and
   `setup.cfg`
 - Sprint 1 implements backend foundation and the custom accounts user model
-- Sprint 2 implements club/court setup, assignment models, and setup API
-  scoping
+- Sprint 2 implements club/court setup, club membership assignment, and setup
+  API scoping
 - Sprint 3 implements booking creation, booking list/detail and schedule
   filters, and application-level overlap protection
 - Planned shared app name is `apps/common/`
@@ -69,15 +69,22 @@ Use a modular-monolith architecture:
 
 Current implemented app:
 
-- `apps/accounts/` contains the custom user model and account-specific helpers.
+- `apps/accounts/` contains the custom user model, identity fields, platform
+  authority flag, account admin registration, and account permission helpers.
+- `User` is identity plus platform authority only. It has
+  `is_platform_admin`; it does not store club-scoped OWNER, MANAGER, or STAFF
+  roles.
 - It must not contain club, court, booking, transaction, settlement, pricing,
   staff shift, marketplace, or assignment business logic.
-- `apps/clubs/` contains club setup and club membership assignment logic for
-  owners and managers.
-- `apps/courts/` contains court setup, court working hours, and court staff
-  assignment logic.
-- Club/court scope must come from `ClubMembership` and
-  `CourtStaffAssignment`, not from direct club or court fields on `User`.
+- `apps/clubs/` contains club setup, club membership assignment logic, and the
+  central `ClubAccessContext` club-scoped access layer.
+- `Club` has a unique `slug` used by club-scoped business API URLs.
+- `ClubMembership` is the single source of OWNER, MANAGER, and STAFF authority
+  inside a club. STAFF memberships are tied to a court through
+  `ClubMembership.court`.
+- `apps/courts/` contains court setup and court working hours logic.
+- Club/court scope must come from active `ClubMembership` rows, not from direct
+  club or court fields on `User`.
 - `apps/bookings/` contains booking creation, list/detail APIs, schedule-style
   filters, price snapshot calculation, and active booking overlap protection.
 - Booking outside working hours is allowed in Sprint 3, and no
@@ -85,6 +92,13 @@ Current implemented app:
 - Transactions, booking lifecycle actions, settlements, dashboards, and audit
   logs are future sprint work and must not be implemented in `bookings` during
   Sprint 3.
+- Business APIs for memberships, courts, working hours, and bookings are
+  club-scoped under `/api/clubs/{club_slug}/...`.
+- Login remains global. The frontend logs in, calls `/api/me/` to read active
+  memberships and club slugs, then sends selected-club requests to
+  `/api/clubs/{club_slug}/...`. Never trust frontend-selected club context
+  without backend verification.
+- Use “club-scoped access”, “club access”, or “club context” terminology only.
 
 Planned app pattern:
 
@@ -156,24 +170,36 @@ Rules for the flow:
 `apps/accounts/`
 
 - Current account app.
-- Contains the custom `User` model, role helpers, account admin registration,
-  and account permission helpers.
+- Contains the custom `User` model, `is_platform_admin`, account admin
+  registration, and account permission helpers.
+- `User.is_platform_super_admin()` is a temporary compatibility helper that
+  returns `is_platform_admin`.
+- Do not add or reintroduce club-scoped business roles on `User`.
 - Do not place unrelated domain behavior here.
 
 `apps/clubs/`
 
 - Club setup app.
 - Contains `Club` and `ClubMembership`.
-- `ClubMembership` assigns `CLUB_OWNER` users as club owners and `MANAGER`
-  users as club managers.
+- `Club.slug` is the stable club-scoped API identifier.
+- `ClubMembership` assigns active OWNER, MANAGER, and STAFF authority inside a
+  club.
+- OWNER and MANAGER memberships are club-level and must not have a court.
+- STAFF memberships are court-scoped and must point to a court in the same
+  club.
+- `apps/clubs/access.py` contains `ClubAccessContext`, the central source of
+  truth for club-scoped access checks and scoped querysets.
+- `apps/clubs/mixins.py` contains `ClubScopedAccessMixin` for club-scoped
+  ViewSets.
 - Do not place court, booking, transaction, settlement, pricing, or audit
   behavior here.
 
 `apps/courts/`
 
 - Court setup app.
-- Contains `Court`, `CourtWorkingHour`, and `CourtStaffAssignment`.
-- `CourtStaffAssignment` assigns `STAFF` users to one active court for MVP.
+- Contains `Court` and `CourtWorkingHour`.
+- `CourtStaffAssignment` has been removed. Staff access is represented by
+  `ClubMembership(role=STAFF, court=<court>)`.
 - Do not place booking, transaction, settlement, pricing, or audit behavior
   here.
 
@@ -188,6 +214,8 @@ Rules for the flow:
   slot duration; clients must not control booking price in Sprint 3.
 - Overlap protection is currently application-level: `HOLD` and `CONFIRMED`
   bookings block overlapping bookings on the same court.
+- Booking access is club-scoped through `ClubAccessContext`. Staff users can
+  list and create bookings only for their assigned court.
 - Do not place transaction, settlement, lifecycle action, dashboard, marketplace,
   notification, or audit-log behavior here in Sprint 3.
 
@@ -226,9 +254,8 @@ Rules for the flow:
 - Use `transaction.atomic()` for multi-model writes.
 - Use `select_for_update()` when concurrent updates can conflict.
 - Do not add club/court ownership, staff assignment, membership, marketplace, or
-  booking fields directly to the user table. Future relationships such as club
-  owners, managers, and staff should be represented by separate domain models,
-  for example `ClubMembership` or `CourtStaffAssignment`.
+  booking fields directly to the user table. Club owners, managers, and staff
+  must be represented by `ClubMembership`.
 
 ## 7. API Rules
 
@@ -247,6 +274,9 @@ Rules for the flow:
 - Use `django-filter` `FilterSet` classes when filtering becomes non-trivial.
 - Do not add global success response wrapping. A shared base error format or
   custom exception handler is deferred until a simple, tested need exists.
+- Club-scoped business endpoints must verify authenticated user, club slug,
+  platform admin or active club membership, role authority, and staff court
+  scope through `ClubAccessContext`.
 
 ## 8. Authentication and Permission Rules
 
@@ -275,7 +305,8 @@ Rules for the flow:
 - Do not invent business rules that are not requested or already documented in
   implemented code.
 - Sprint 1 role helpers and role permissions are foundation only; do not use
-  them to imply club/court access rules before the relevant domain models exist.
+  them to imply club/court access rules. Club/court authority now belongs to
+  `ClubMembership`.
 
 ## 10. Database and Query Rules
 
@@ -418,6 +449,11 @@ Notes:
   using PostgreSQL.
 - If settings are changed, verify the configured local apps match real package
   paths under `apps/`.
+- Club-scoped API routes currently include:
+  `/api/clubs/{club_slug}/memberships/`,
+  `/api/clubs/{club_slug}/courts/`,
+  `/api/clubs/{club_slug}/court-working-hours/`, and
+  `/api/clubs/{club_slug}/bookings/`.
 
 ## 14. Do and Don't Rules for Codex Agents
 

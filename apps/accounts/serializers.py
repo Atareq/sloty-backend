@@ -1,9 +1,37 @@
 from rest_framework import serializers
 
 from apps.accounts.models import User
+from apps.clubs.models import ClubMembership
+
+
+class UserMembershipClubSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    slug = serializers.SlugField()
+    name = serializers.CharField()
+
+
+class UserMembershipCourtSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+
+
+class UserMembershipSerializer(serializers.ModelSerializer):
+    club = UserMembershipClubSerializer(read_only=True)
+    court = UserMembershipCourtSerializer(read_only=True)
+
+    class Meta:
+        model = ClubMembership
+        fields = (
+            "id",
+            "role",
+            "club",
+            "court",
+        )
 
 
 class UserMeSerializer(serializers.ModelSerializer):
+    memberships = serializers.SerializerMethodField()
+
     class Meta:
         model = User
         fields = (
@@ -12,11 +40,20 @@ class UserMeSerializer(serializers.ModelSerializer):
             "email",
             "first_name",
             "last_name",
-            "role",
             "phone_number",
             "is_active",
+            "is_platform_admin",
+            "memberships",
         )
         read_only_fields = fields
+
+    def get_memberships(self, obj):
+        memberships = (
+            obj.club_memberships.filter(is_active=True)
+            .select_related("club", "court")
+            .order_by("club__name", "role", "id")
+        )
+        return UserMembershipSerializer(memberships, many=True).data
 
 
 class UserListSerializer(serializers.ModelSerializer):
@@ -30,11 +67,9 @@ class UserListSerializer(serializers.ModelSerializer):
             "email",
             "first_name",
             "last_name",
-            "role",
             "phone_number",
             "is_active",
-            "is_staff",
-            "is_superuser",
+            "is_platform_admin",
             "created_by",
         )
         read_only_fields = fields
@@ -52,14 +87,13 @@ class UserCreateSerializer(serializers.ModelSerializer):
             "email",
             "first_name",
             "last_name",
-            "role",
             "phone_number",
             "is_active",
+            "is_platform_admin",
         )
         read_only_fields = ("id",)
         extra_kwargs = {
             "username": {"required": True},
-            "role": {"required": True},
         }
 
     def create(self, validated_data):
@@ -77,9 +111,9 @@ class UserUpdateSerializer(serializers.ModelSerializer):
             "email",
             "first_name",
             "last_name",
-            "role",
             "phone_number",
             "is_active",
+            "is_platform_admin",
         )
 
     def to_representation(self, instance):

@@ -1,4 +1,3 @@
-from django.db.models import Q
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework.mixins import (
     CreateModelMixin,
@@ -8,6 +7,7 @@ from rest_framework.mixins import (
 )
 from rest_framework.viewsets import GenericViewSet
 
+from apps.clubs.mixins import ClubScopedAccessMixin
 from apps.clubs.models import Club, ClubMembership
 from apps.clubs.permissions import CanManageClubMemberships, CanManageClubs
 from apps.clubs.serializers import (
@@ -24,29 +24,10 @@ def scoped_clubs_for_user(user):
         return Club.objects.none()
     if user.is_platform_super_admin():
         return Club.objects.all()
-
-    scope_filter = Q()
-    if user.is_club_owner():
-        scope_filter |= Q(
-            memberships__user=user,
-            memberships__role=ClubMembership.Role.OWNER,
-            memberships__is_active=True,
-        )
-    if user.is_manager():
-        scope_filter |= Q(
-            memberships__user=user,
-            memberships__role=ClubMembership.Role.MANAGER,
-            memberships__is_active=True,
-        )
-    if user.is_staff_member():
-        scope_filter |= Q(
-            courts__staff_assignments__user=user,
-            courts__staff_assignments__is_active=True,
-        )
-
-    if not scope_filter:
-        return Club.objects.none()
-    return Club.objects.filter(scope_filter).distinct()
+    return Club.objects.filter(
+        memberships__user=user,
+        memberships__is_active=True,
+    ).distinct()
 
 
 @extend_schema_view(
@@ -108,6 +89,7 @@ class ClubViewSet(
     ),
 )
 class ClubMembershipViewSet(
+    ClubScopedAccessMixin,
     ListModelMixin,
     CreateModelMixin,
     RetrieveModelMixin,
@@ -119,23 +101,14 @@ class ClubMembershipViewSet(
     http_method_names = ("get", "post", "patch", "head", "options")
 
     def get_queryset(self):
-        user = self.request.user
-        queryset = ClubMembership.objects.select_related(
-            "club",
-            "user",
-            "created_by",
-        ).order_by("id")
-        if not user.is_authenticated:
-            return queryset.none()
-        if user.is_platform_super_admin():
-            return queryset
-        if user.is_club_owner():
-            return queryset.filter(
-                club__memberships__user=user,
-                club__memberships__role=ClubMembership.Role.OWNER,
-                club__memberships__is_active=True,
-            ).distinct()
-        return queryset.none()
+        if getattr(self, "swagger_fake_view", False):
+            return ClubMembership.objects.none()
+        return (
+            self.get_access_context()
+            .scoped_memberships_queryset()
+            .select_related("club", "court", "user", "created_by")
+            .order_by("id")
+        )
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save(club=self.get_club(), created_by=self.request.user)

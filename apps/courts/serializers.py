@@ -3,10 +3,7 @@ from decimal import Decimal
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
-from apps.accounts.models import User
-from apps.clubs.permissions import is_active_club_manager, is_active_club_owner
-from apps.courts.models import Court, CourtStaffAssignment, CourtWorkingHour
-from apps.courts.permissions import can_manage_court_setup, can_manage_working_hours
+from apps.courts.models import Court, CourtWorkingHour
 
 
 def validate_positive(value, field_name):
@@ -28,8 +25,7 @@ class CourtWorkingHourSerializer(serializers.ModelSerializer):
         read_only_fields = ("id",)
 
     def validate(self, attrs):
-        request = self.context.get("request")
-        request_user = getattr(request, "user", None)
+        access = self.context["club_access"]
         court = attrs.get("court", getattr(self.instance, "court", None))
         weekday = attrs.get("weekday", getattr(self.instance, "weekday", None))
         opens_at = attrs.get("opens_at", getattr(self.instance, "opens_at", None))
@@ -42,7 +38,19 @@ class CourtWorkingHourSerializer(serializers.ModelSerializer):
             getattr(self.instance, "is_closed", False),
         )
 
-        if not can_manage_working_hours(request_user, court):
+        if (
+            self.instance is not None
+            and "court" in attrs
+            and attrs["court"] != self.instance.court
+        ):
+            raise serializers.ValidationError(
+                {"court": "Existing working hours cannot change court."}
+            )
+        if court.club_id != access.club.id:
+            raise serializers.ValidationError(
+                {"court": "Court must belong to the selected club."}
+            )
+        if not access.can_manage_working_hours(court):
             raise PermissionDenied("You cannot manage working hours for this court.")
 
         if not is_closed:
@@ -80,7 +88,7 @@ class CourtListSerializer(serializers.ModelSerializer):
             "requires_digital_payment_reference",
             "internal_hold_expiry_hours",
         )
-        read_only_fields = ("id",)
+        read_only_fields = fields
 
 
 class CourtDetailSerializer(serializers.ModelSerializer):
@@ -105,7 +113,7 @@ class CourtDetailSerializer(serializers.ModelSerializer):
             "modified",
             "working_hours",
         )
-        read_only_fields = ("id", "created_by", "created", "modified")
+        read_only_fields = fields
 
 
 class CourtCreateSerializer(serializers.ModelSerializer):
@@ -113,7 +121,6 @@ class CourtCreateSerializer(serializers.ModelSerializer):
         model = Court
         fields = (
             "id",
-            "club",
             "name",
             "sport_type",
             "default_price",
@@ -126,9 +133,7 @@ class CourtCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ("id",)
 
     def validate(self, attrs):
-        request = self.context.get("request")
-        request_user = getattr(request, "user", None)
-        club = attrs["club"]
+        access = self.context["club_access"]
 
         if attrs.get("default_price", Decimal("0.00")) < Decimal("0.00"):
             raise serializers.ValidationError(
@@ -143,10 +148,7 @@ class CourtCreateSerializer(serializers.ModelSerializer):
             "internal_hold_expiry_hours",
         )
 
-        if not (
-            request_user.is_platform_super_admin()
-            or is_active_club_owner(request_user, club)
-        ):
+        if not access.can_create_court():
             raise PermissionDenied("You cannot create courts for this club.")
 
         return attrs
@@ -170,8 +172,7 @@ class CourtUpdateSerializer(serializers.ModelSerializer):
         )
 
     def validate(self, attrs):
-        request = self.context.get("request")
-        request_user = getattr(request, "user", None)
+        access = self.context["club_access"]
         court = self.instance
 
         if "default_price" in attrs and attrs["default_price"] < Decimal("0.00"):
@@ -186,94 +187,14 @@ class CourtUpdateSerializer(serializers.ModelSerializer):
                 "internal_hold_expiry_hours",
             )
 
-        if can_manage_court_setup(request_user, court):
-            return attrs
-
-        if is_active_club_manager(request_user, court.club):
-            if set(attrs) != {"default_price"}:
-                raise PermissionDenied(
-                    "Managers can update only court pricing in Sprint 2."
-                )
-            if not court.club.manager_can_change_pricing:
+        if not access.can_update_court(court, attrs):
+            if access.is_manager and set(attrs) == {"default_price"}:
                 raise PermissionDenied(
                     "This club does not allow managers to change pricing."
                 )
-            return attrs
+            raise PermissionDenied("You cannot update this court.")
 
-        raise PermissionDenied("You cannot update this court.")
+        return attrs
 
     def to_representation(self, instance):
         return CourtDetailSerializer(instance, context=self.context).data
-
-
-class CourtStaffAssignmentSerializer(serializers.ModelSerializer):
-    created_by = serializers.PrimaryKeyRelatedField(read_only=True)
-
-    class Meta:
-        model = CourtStaffAssignment
-        fields = (
-            "id",
-            "court",
-            "user",
-            "is_active",
-            "created_by",
-            "created",
-            "modified",
-        )
-        read_only_fields = ("id", "created_by", "created", "modified")
-
-    def validate(self, attrs):
-        request = self.context.get("request")
-        request_user = getattr(request, "user", None)
-        court = attrs.get("court", getattr(self.instance, "court", None))
-        user = attrs.get("user", getattr(self.instance, "user", None))
-        is_active = attrs.get(
-            "is_active",
-            getattr(self.instance, "is_active", True),
-        )
-
-        if self.instance is not None:
-            for field_name in ("court", "user"):
-                if field_name in attrs and attrs[field_name] != getattr(
-                    self.instance, field_name
-                ):
-                    raise serializers.ValidationError(
-                        {field_name: "Existing staff assignments cannot change scope."}
-                    )
-
-        if not (
-            request_user.is_platform_super_admin()
-            or is_active_club_owner(request_user, court.club)
-        ):
-            raise PermissionDenied("You cannot manage staff for this court.")
-
-        if user.role != User.Role.STAFF:
-            raise serializers.ValidationError(
-                {"user": "Court staff assignments require a STAFF user."}
-            )
-
-        if is_active:
-            duplicate_assignment = CourtStaffAssignment.objects.filter(
-                court=court,
-                user=user,
-                is_active=True,
-            )
-            active_user_assignment = CourtStaffAssignment.objects.filter(
-                user=user,
-                is_active=True,
-            )
-            if self.instance is not None:
-                duplicate_assignment = duplicate_assignment.exclude(pk=self.instance.pk)
-                active_user_assignment = active_user_assignment.exclude(
-                    pk=self.instance.pk
-                )
-            if duplicate_assignment.exists():
-                raise serializers.ValidationError(
-                    "This active court staff assignment already exists."
-                )
-            if active_user_assignment.exists():
-                raise serializers.ValidationError(
-                    {"user": "A staff user can have only one active court assignment."}
-                )
-
-        return attrs

@@ -10,13 +10,14 @@ from rest_framework.mixins import (
 )
 from rest_framework.viewsets import GenericViewSet
 
-from apps.bookings.permissions import CanManageBookings, scoped_bookings_for_user
 from apps.bookings.serializers import (
     BookingCreateSerializer,
     BookingDetailSerializer,
     BookingListSerializer,
     BookingUpdateSerializer,
 )
+from apps.clubs.mixins import ClubScopedAccessMixin
+from apps.clubs.permissions import CanManageClubBookings
 
 
 def parse_date(value):
@@ -45,7 +46,6 @@ def day_bounds(date_value):
 
 booking_filter_parameters = [
     OpenApiParameter("court", int, OpenApiParameter.QUERY),
-    OpenApiParameter("club", int, OpenApiParameter.QUERY),
     OpenApiParameter("status", str, OpenApiParameter.QUERY),
     OpenApiParameter("source", str, OpenApiParameter.QUERY),
     OpenApiParameter("date", str, OpenApiParameter.QUERY),
@@ -73,18 +73,24 @@ booking_filter_parameters = [
     ),
 )
 class BookingViewSet(
+    ClubScopedAccessMixin,
     ListModelMixin,
     CreateModelMixin,
     RetrieveModelMixin,
     UpdateModelMixin,
     GenericViewSet,
 ):
-    permission_classes = (CanManageBookings,)
+    permission_classes = (CanManageClubBookings,)
     http_method_names = ("get", "post", "patch", "head", "options")
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            from apps.bookings.models import Booking
+
+            return Booking.objects.none()
         queryset = (
-            scoped_bookings_for_user(self.request.user)
+            self.get_access_context()
+            .scoped_bookings_queryset()
             .select_related("club", "court", "created_by")
             .order_by("start_time", "id")
         )
@@ -92,8 +98,6 @@ class BookingViewSet(
 
         if params.get("court"):
             queryset = queryset.filter(court_id=params["court"])
-        if params.get("club"):
-            queryset = queryset.filter(club_id=params["club"])
         if params.get("status"):
             queryset = queryset.filter(status=params["status"])
         if params.get("source"):

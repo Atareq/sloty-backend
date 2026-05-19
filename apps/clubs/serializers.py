@@ -1,9 +1,7 @@
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
-from apps.accounts.models import User
-from apps.clubs.models import Club, ClubMembership
-from apps.clubs.permissions import is_active_club_owner
+from apps.clubs.models import Club, ClubMembership, generate_unique_club_slug
 
 
 class ClubListSerializer(serializers.ModelSerializer):
@@ -12,6 +10,7 @@ class ClubListSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "name",
+            "slug",
             "city",
             "area",
             "phone_number",
@@ -32,6 +31,7 @@ class ClubDetailSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "name",
+            "slug",
             "city",
             "area",
             "address",
@@ -53,6 +53,7 @@ class ClubCreateSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "name",
+            "slug",
             "city",
             "area",
             "address",
@@ -63,6 +64,19 @@ class ClubCreateSerializer(serializers.ModelSerializer):
             "manager_can_change_pricing",
         )
         read_only_fields = ("id",)
+        extra_kwargs = {
+            "slug": {"required": False, "allow_blank": True},
+        }
+
+    def validate_slug(self, value):
+        if value and Club.objects.filter(slug=value).exists():
+            raise serializers.ValidationError("A club with this slug already exists.")
+        return value
+
+    def validate(self, attrs):
+        if not attrs.get("slug"):
+            attrs["slug"] = generate_unique_club_slug(attrs["name"])
+        return attrs
 
     def to_representation(self, instance):
         return ClubDetailSerializer(instance, context=self.context).data
@@ -89,6 +103,7 @@ class ClubUpdateSerializer(serializers.ModelSerializer):
 
 class ClubMembershipSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    club = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = ClubMembership
@@ -97,6 +112,7 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
             "club",
             "user",
             "role",
+            "court",
             "is_active",
             "created_by",
             "created",
@@ -105,18 +121,18 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
         read_only_fields = ("id", "created_by", "created", "modified")
 
     def validate(self, attrs):
-        request = self.context.get("request")
-        request_user = getattr(request, "user", None)
-        club = attrs.get("club", getattr(self.instance, "club", None))
+        access = self.context["club_access"]
+        club = access.club
         user = attrs.get("user", getattr(self.instance, "user", None))
         role = attrs.get("role", getattr(self.instance, "role", None))
+        court = attrs.get("court", getattr(self.instance, "court", None))
         is_active = attrs.get(
             "is_active",
             getattr(self.instance, "is_active", True),
         )
 
         if self.instance is not None:
-            for field_name in ("club", "user", "role"):
+            for field_name in ("user", "role", "court"):
                 if field_name in attrs and attrs[field_name] != getattr(
                     self.instance, field_name
                 ):
@@ -124,22 +140,30 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
                         {field_name: "Existing memberships cannot change scope."}
                     )
 
-        if role == ClubMembership.Role.OWNER and user.role != User.Role.CLUB_OWNER:
+        if role in {ClubMembership.Role.OWNER, ClubMembership.Role.MANAGER} and court:
             raise serializers.ValidationError(
-                {"user": "OWNER assignments require a CLUB_OWNER user."}
+                {"court": "OWNER and MANAGER memberships cannot be court-scoped."}
             )
-        if role == ClubMembership.Role.MANAGER and user.role != User.Role.MANAGER:
+        if role == ClubMembership.Role.STAFF and not court:
             raise serializers.ValidationError(
-                {"user": "MANAGER assignments require a MANAGER user."}
+                {"court": "STAFF memberships require a court."}
+            )
+        if court and court.club_id != club.id:
+            raise serializers.ValidationError(
+                {"court": "Membership court must belong to the selected club."}
             )
 
-        if not request_user.is_platform_super_admin():
-            if not is_active_club_owner(request_user, club):
+        if self.instance is None:
+            if not access.can_create_membership(role, court=court):
+                raise PermissionDenied("You cannot create this membership.")
+        else:
+            if not access.can_manage_memberships():
                 raise PermissionDenied("You cannot manage memberships for this club.")
-            if role != ClubMembership.Role.MANAGER:
-                raise PermissionDenied(
-                    "Club owners can only manage manager assignments."
-                )
+            if (
+                not access.is_platform_admin
+                and self.instance.role == self.Meta.model.Role.OWNER
+            ):
+                raise PermissionDenied("Club owners cannot manage owner memberships.")
 
         if is_active:
             duplicate_membership = ClubMembership.objects.filter(
@@ -148,6 +172,10 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
                 role=role,
                 is_active=True,
             )
+            if role == ClubMembership.Role.STAFF:
+                duplicate_membership = duplicate_membership.filter(court=court)
+            else:
+                duplicate_membership = duplicate_membership.filter(court__isnull=True)
             if self.instance is not None:
                 duplicate_membership = duplicate_membership.exclude(pk=self.instance.pk)
             if duplicate_membership.exists():
@@ -168,6 +196,23 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
                 if active_manager_membership.exists():
                     raise serializers.ValidationError(
                         {"user": "A manager can have only one active club assignment."}
+                    )
+            if role == ClubMembership.Role.STAFF:
+                active_staff_membership = ClubMembership.objects.filter(
+                    user=user,
+                    role=ClubMembership.Role.STAFF,
+                    is_active=True,
+                )
+                if self.instance is not None:
+                    active_staff_membership = active_staff_membership.exclude(
+                        pk=self.instance.pk
+                    )
+                if active_staff_membership.exists():
+                    raise serializers.ValidationError(
+                        {
+                            "user": "A staff user can have only "
+                            "one active court assignment."
+                        }
                     )
 
         return attrs

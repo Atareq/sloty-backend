@@ -1,26 +1,27 @@
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import SAFE_METHODS, BasePermission
 
 from apps.clubs.models import ClubMembership
 
 
-def is_active_club_owner(user, club) -> bool:
+def has_active_club_membership(user, club) -> bool:
+    if not user.is_authenticated:
+        return False
+    if user.is_platform_super_admin():
+        return True
+    return ClubMembership.objects.filter(
+        club=club,
+        user=user,
+        is_active=True,
+    ).exists()
+
+
+def has_active_owner_membership(user, club) -> bool:
     if not user.is_authenticated:
         return False
     return ClubMembership.objects.filter(
         club=club,
         user=user,
         role=ClubMembership.Role.OWNER,
-        is_active=True,
-    ).exists()
-
-
-def is_active_club_manager(user, club) -> bool:
-    if not user.is_authenticated:
-        return False
-    return ClubMembership.objects.filter(
-        club=club,
-        user=user,
-        role=ClubMembership.Role.MANAGER,
         is_active=True,
     ).exists()
 
@@ -32,14 +33,7 @@ class CanManageClubs(BasePermission):
             return False
         if view.action == "create":
             return user.is_platform_super_admin()
-        if view.action in {"update", "partial_update"}:
-            return user.is_platform_super_admin() or user.is_club_owner()
-        return (
-            user.is_platform_super_admin()
-            or user.is_club_owner()
-            or user.is_manager()
-            or user.is_staff_member()
-        )
+        return True
 
     def has_object_permission(self, request, view, obj) -> bool:
         user = request.user
@@ -48,38 +42,64 @@ class CanManageClubs(BasePermission):
         if user.is_platform_super_admin():
             return True
         if view.action in {"update", "partial_update"}:
-            return is_active_club_owner(user, obj)
-        if user.is_club_owner():
-            return is_active_club_owner(user, obj)
-        if user.is_manager():
-            return is_active_club_manager(user, obj)
-        if user.is_staff_member():
-            from apps.courts.models import CourtStaffAssignment
+            return has_active_owner_membership(user, obj)
+        return has_active_club_membership(user, obj)
 
-            return CourtStaffAssignment.objects.filter(
-                court__club=obj,
-                user=user,
-                is_active=True,
-            ).exists()
-        return False
+
+class HasClubAccess(BasePermission):
+    def has_permission(self, request, view) -> bool:
+        return view.get_access_context().has_any_club_access()
 
 
 class CanManageClubMemberships(BasePermission):
     def has_permission(self, request, view) -> bool:
-        user = request.user
-        return bool(
-            user.is_authenticated
-            and (user.is_platform_super_admin() or user.is_club_owner())
-        )
+        return view.get_access_context().can_manage_memberships()
 
     def has_object_permission(self, request, view, obj) -> bool:
-        user = request.user
-        if not user.is_authenticated:
+        access = view.get_access_context()
+        if obj.club_id != access.club.id:
             return False
-        if user.is_platform_super_admin():
+        if request.method in SAFE_METHODS:
+            return access.can_manage_memberships()
+        if access.is_platform_admin:
             return True
+        return access.is_owner and obj.role != ClubMembership.Role.OWNER
+
+
+class CanManageClubCourts(BasePermission):
+    def has_permission(self, request, view) -> bool:
+        access = view.get_access_context()
+        if view.action == "create":
+            return access.can_create_court()
+        return access.has_any_club_access()
+
+    def has_object_permission(self, request, view, obj) -> bool:
+        access = view.get_access_context()
+        if request.method in SAFE_METHODS:
+            return access.can_access_court(obj)
         if view.action in {"update", "partial_update"}:
-            return obj.role == ClubMembership.Role.MANAGER and is_active_club_owner(
-                user, obj.club
-            )
-        return is_active_club_owner(user, obj.club)
+            return access.is_platform_admin or access.is_owner or access.is_manager
+        return access.can_access_court(obj)
+
+
+class CanManageClubWorkingHours(BasePermission):
+    def has_permission(self, request, view) -> bool:
+        access = view.get_access_context()
+        if view.action in {"create", "update", "partial_update"}:
+            return access.is_platform_admin or access.is_owner or access.is_manager
+        return access.has_any_club_access()
+
+    def has_object_permission(self, request, view, obj) -> bool:
+        access = view.get_access_context()
+        if request.method in SAFE_METHODS:
+            return access.can_access_court(obj.court)
+        return access.can_manage_working_hours(obj.court)
+
+
+class CanManageClubBookings(BasePermission):
+    def has_permission(self, request, view) -> bool:
+        return view.get_access_context().has_any_club_access()
+
+    def has_object_permission(self, request, view, obj) -> bool:
+        access = view.get_access_context()
+        return obj.club_id == access.club.id and access.can_access_court(obj.court)

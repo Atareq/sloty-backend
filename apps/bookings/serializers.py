@@ -2,7 +2,6 @@ from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
 from apps.bookings.models import Booking
-from apps.bookings.permissions import can_create_booking_for_court
 from apps.bookings.services import create_booking, validate_booking_duration
 
 
@@ -74,9 +73,14 @@ class BookingCreateSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         request = self.context.get("request")
         user = getattr(request, "user", None)
+        access = self.context["club_access"]
         court = attrs["court"]
         source = attrs.get("source", Booking.Source.MANUAL)
 
+        if court.club_id != access.club.id:
+            raise serializers.ValidationError(
+                {"court": "Court must belong to the selected club."}
+            )
         if not court.is_active:
             raise serializers.ValidationError(
                 {"court": "Cannot create a booking on an inactive court."}
@@ -85,7 +89,7 @@ class BookingCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"court": "Cannot create a booking for an inactive club."}
             )
-        if not can_create_booking_for_court(user, court):
+        if not access.can_create_booking_for_court(court):
             raise PermissionDenied("You cannot create bookings for this court.")
         if source == Booking.Source.ADMIN_CORRECTION and not (
             user and user.is_platform_super_admin()

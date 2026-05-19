@@ -43,26 +43,29 @@ http://127.0.0.1:8000/api/docs/
 
 - `POST /api/auth/token/` obtains JWT access and refresh tokens.
 - `POST /api/auth/token/refresh/` refreshes an access token.
-- `GET /api/me/` returns the authenticated user's profile.
+- `GET /api/me/` returns the authenticated user's identity, platform admin
+  flag, and active club memberships for frontend club selection.
 - `GET /api/users/` and `POST /api/users/` manage base user accounts for
-  Platform Super Admin users.
+  platform admin users.
+
+Login is global and does not require a club slug. After login, clients call
+`/api/me/`, choose one of the returned membership clubs, then call the
+club-scoped endpoints with that club's slug.
 
 ## Sprint 2 Setup Endpoints
 
 - `/api/clubs/`
-- `/api/club-memberships/`
-- `/api/courts/`
-- `/api/court-working-hours/`
-- `/api/court-staff-assignments/`
+- `/api/clubs/{club_slug}/memberships/`
+- `/api/clubs/{club_slug}/courts/`
+- `/api/clubs/{club_slug}/court-working-hours/`
 
 ## Sprint 3 Booking Endpoints
 
-- `/api/bookings/`
+- `/api/clubs/{club_slug}/bookings/`
 
 Useful booking list filters:
 
 - `court`
-- `club`
 - `status`
 - `source`
 - `date`

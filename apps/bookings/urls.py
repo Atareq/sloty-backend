@@ -1,8 +1,25 @@
-from rest_framework.routers import DefaultRouter
+from django.urls import path
 
 from apps.bookings.views import BookingViewSet
 
-router = DefaultRouter()
-router.register("bookings", BookingViewSet, basename="booking")
+booking_list = BookingViewSet.as_view(
+    {
+        "get": "list",
+        "post": "create",
+    }
+)
+booking_detail = BookingViewSet.as_view(
+    {
+        "get": "retrieve",
+        "patch": "partial_update",
+    }
+)
 
-urlpatterns = router.urls
+urlpatterns = [
+    path("clubs/<slug:club_slug>/bookings/", booking_list, name="club-booking-list"),
+    path(
+        "clubs/<slug:club_slug>/bookings/<int:pk>/",
+        booking_detail,
+        name="club-booking-detail",
+    ),
+]

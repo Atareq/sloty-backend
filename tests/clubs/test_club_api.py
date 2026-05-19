@@ -1,58 +1,82 @@
+from django.db import IntegrityError, transaction
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
 from apps.clubs.models import Club, ClubMembership
+from apps.courts.models import Court
 
 
 class ClubAPITestCase(APITestCase):
     password = "test-pass-123"
 
-    def create_user(self, username: str, role: str) -> User:
+    def create_user(self, username: str, **extra_fields) -> User:
         return User.objects.create_user(
             username=username,
             password=self.password,
-            role=role,
+            **extra_fields,
         )
 
-    def create_club(self, name: str, created_by=None, **extra_fields) -> Club:
+    def create_platform_admin(self, username="platform-admin") -> User:
+        return self.create_user(username=username, is_platform_admin=True)
+
+    def create_club(self, name: str, slug: str | None = None, **extra_fields) -> Club:
         data = {
             "name": name,
             "city": "Assiut",
             "area": "Downtown",
-            "created_by": created_by,
         }
+        if slug is not None:
+            data["slug"] = slug
         data.update(extra_fields)
         return Club.objects.create(**data)
 
+    def create_court(self, club: Club, name: str, **extra_fields) -> Court:
+        data = {
+            "club": club,
+            "name": name,
+            "default_price": "250.00",
+        }
+        data.update(extra_fields)
+        return Court.objects.create(**data)
+
     def create_membership(
         self,
-        club: Club,
         user: User,
+        club: Club,
         role: str,
+        court: Court | None = None,
         is_active: bool = True,
     ) -> ClubMembership:
         return ClubMembership.objects.create(
             club=club,
             user=user,
             role=role,
+            court=court,
             is_active=is_active,
         )
 
     def list_ids(self, response):
         return {item["id"] for item in response.data["results"]}
 
+    def membership_list_url(self, club):
+        return reverse("club-membership-list", kwargs={"club_slug": club.slug})
+
+    def membership_detail_url(self, club, membership):
+        return reverse(
+            "club-membership-detail",
+            kwargs={"club_slug": club.slug, "pk": membership.pk},
+        )
+
 
 class ClubAPITests(ClubAPITestCase):
     def setUp(self):
-        self.platform_admin = self.create_user(
-            "platform-admin",
-            User.Role.PLATFORM_SUPER_ADMIN,
-        )
-        self.owner = self.create_user("owner", User.Role.CLUB_OWNER)
-        self.other_owner = self.create_user("other-owner", User.Role.CLUB_OWNER)
-        self.manager = self.create_user("manager", User.Role.MANAGER)
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user("owner")
+        self.other_owner = self.create_user("other-owner")
+        self.manager = self.create_user("manager")
+        self.staff = self.create_user("staff")
 
     def authenticate_platform_admin(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -74,6 +98,38 @@ class ClubAPITests(ClubAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         club = Club.objects.get(name="El-Nasr Club")
         self.assertEqual(club.created_by, self.platform_admin)
+        self.assertEqual(club.slug, "el-nasr-club")
+        self.assertEqual(response.data["slug"], "el-nasr-club")
+
+    def test_club_slug_can_be_provided_on_create(self):
+        self.authenticate_platform_admin()
+
+        response = self.client.post(
+            reverse("club-list"),
+            {
+                "name": "Custom Slug Club",
+                "slug": "custom-club",
+                "city": "Assiut",
+                "area": "West",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["slug"], "custom-club")
+
+    def test_club_slug_is_unique(self):
+        self.create_club("Existing Club", slug="existing-club")
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.create_club("Duplicate Club", slug="existing-club")
+
+    def test_club_slug_is_generated_uniquely_when_missing(self):
+        first = self.create_club("Repeated Club")
+        second = self.create_club("Repeated Club")
+
+        self.assertEqual(first.slug, "repeated-club")
+        self.assertEqual(second.slug, "repeated-club-2")
 
     def test_club_defaults(self):
         club = self.create_club("Default Club")
@@ -88,13 +144,14 @@ class ClubAPITests(ClubAPITestCase):
 
         response = self.client.patch(
             reverse("club-detail", kwargs={"pk": club.pk}),
-            {"is_active": False},
+            {"is_active": False, "slug": "changed-slug"},
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         club.refresh_from_db()
         self.assertFalse(club.is_active)
+        self.assertNotEqual(club.slug, "changed-slug")
 
     def test_delete_club_is_not_allowed(self):
         club = self.create_club("No Delete Club")
@@ -124,17 +181,23 @@ class ClubAPITests(ClubAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_platform_admin_can_list_all_clubs(self):
+        first = self.create_club("First Club")
+        second = self.create_club("Second Club")
+        self.authenticate_platform_admin()
+
+        response = self.client.get(reverse("club-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {first.id, second.id})
+
     def test_owner_can_list_only_assigned_clubs(self):
         owned_club = self.create_club("Owned Club")
         unrelated_club = self.create_club("Unrelated Club")
+        self.create_membership(self.owner, owned_club, ClubMembership.Role.OWNER)
         self.create_membership(
-            owned_club,
-            self.owner,
-            ClubMembership.Role.OWNER,
-        )
-        self.create_membership(
-            unrelated_club,
             self.other_owner,
+            unrelated_club,
             ClubMembership.Role.OWNER,
         )
         self.client.force_authenticate(user=self.owner)
@@ -147,11 +210,7 @@ class ClubAPITests(ClubAPITestCase):
     def test_manager_can_list_only_assigned_club(self):
         assigned_club = self.create_club("Assigned Club")
         unrelated_club = self.create_club("Manager Unrelated Club")
-        self.create_membership(
-            assigned_club,
-            self.manager,
-            ClubMembership.Role.MANAGER,
-        )
+        self.create_membership(self.manager, assigned_club, ClubMembership.Role.MANAGER)
         self.client.force_authenticate(user=self.manager)
 
         response = self.client.get(reverse("club-list"))
@@ -160,19 +219,40 @@ class ClubAPITests(ClubAPITestCase):
         self.assertEqual(self.list_ids(response), {assigned_club.id})
         self.assertNotIn(unrelated_club.id, self.list_ids(response))
 
-    def test_owner_cannot_retrieve_unrelated_club(self):
-        unrelated_club = self.create_club("Hidden Club")
+    def test_staff_can_list_club_through_staff_membership(self):
+        club = self.create_club("Staff Club")
+        court = self.create_court(club, "Staff Court")
+        self.create_membership(
+            self.staff,
+            club,
+            ClubMembership.Role.STAFF,
+            court=court,
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(reverse("club-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {club.id})
+
+    def test_owner_can_update_owned_club(self):
+        club = self.create_club("Owned Update Club")
+        self.create_membership(self.owner, club, ClubMembership.Role.OWNER)
         self.client.force_authenticate(user=self.owner)
 
-        response = self.client.get(
-            reverse("club-detail", kwargs={"pk": unrelated_club.pk})
+        response = self.client.patch(
+            reverse("club-detail", kwargs={"pk": club.pk}),
+            {"notes": "Updated by owner"},
+            format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        club.refresh_from_db()
+        self.assertEqual(club.notes, "Updated by owner")
 
-    def test_manager_cannot_retrieve_unrelated_club(self):
-        unrelated_club = self.create_club("Hidden From Manager")
-        self.client.force_authenticate(user=self.manager)
+    def test_user_cannot_access_unrelated_club(self):
+        unrelated_club = self.create_club("Hidden Club")
+        self.client.force_authenticate(user=self.owner)
 
         response = self.client.get(
             reverse("club-detail", kwargs={"pk": unrelated_club.pk})
@@ -183,138 +263,206 @@ class ClubAPITests(ClubAPITestCase):
 
 class ClubMembershipAPITests(ClubAPITestCase):
     def setUp(self):
-        self.platform_admin = self.create_user(
-            "membership-admin",
-            User.Role.PLATFORM_SUPER_ADMIN,
+        self.platform_admin = self.create_platform_admin("membership-admin")
+        self.club = self.create_club("Membership Club", slug="membership-club")
+        self.other_club = self.create_club(
+            "Other Membership Club",
+            slug="other-membership-club",
         )
-        self.club = self.create_club("Membership Club")
-        self.other_club = self.create_club("Other Membership Club")
-        self.owner = self.create_user("membership-owner", User.Role.CLUB_OWNER)
-        self.manager = self.create_user("membership-manager", User.Role.MANAGER)
-        self.staff = self.create_user("membership-staff", User.Role.STAFF)
+        self.court = self.create_court(self.club, "Membership Court")
+        self.other_court = self.create_court(self.other_club, "Other Court")
+        self.owner = self.create_user("membership-owner")
+        self.manager = self.create_user("membership-manager")
+        self.staff = self.create_user("membership-staff")
+        self.other_user = self.create_user("membership-other-user")
 
     def authenticate_platform_admin(self):
         self.client.force_authenticate(user=self.platform_admin)
 
-    def test_platform_admin_can_assign_club_owner(self):
+    def post_membership(self, club, user, role, court=None, **extra_fields):
+        data = {
+            "user": user.id,
+            "role": role,
+            "is_active": True,
+        }
+        if court is not None:
+            data["court"] = court.id
+        data.update(extra_fields)
+        return self.client.post(self.membership_list_url(club), data, format="json")
+
+    def test_platform_admin_can_assign_owner_manager_and_staff(self):
         self.authenticate_platform_admin()
 
-        response = self.client.post(
-            reverse("club-membership-list"),
-            {
-                "club": self.club.id,
-                "user": self.owner.id,
-                "role": ClubMembership.Role.OWNER,
-            },
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertTrue(
-            ClubMembership.objects.filter(
-                club=self.club,
-                user=self.owner,
-                role=ClubMembership.Role.OWNER,
-                is_active=True,
-            ).exists()
-        )
-
-    def test_platform_admin_can_assign_manager(self):
-        self.authenticate_platform_admin()
-
-        response = self.client.post(
-            reverse("club-membership-list"),
-            {
-                "club": self.club.id,
-                "user": self.manager.id,
-                "role": ClubMembership.Role.MANAGER,
-            },
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-
-    def test_cannot_assign_staff_as_owner(self):
-        self.authenticate_platform_admin()
-
-        response = self.client.post(
-            reverse("club-membership-list"),
-            {
-                "club": self.club.id,
-                "user": self.staff.id,
-                "role": ClubMembership.Role.OWNER,
-            },
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-
-    def test_cannot_assign_staff_as_manager(self):
-        self.authenticate_platform_admin()
-
-        response = self.client.post(
-            reverse("club-membership-list"),
-            {
-                "club": self.club.id,
-                "user": self.staff.id,
-                "role": ClubMembership.Role.MANAGER,
-            },
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-
-    def test_cannot_assign_club_owner_as_manager(self):
-        self.authenticate_platform_admin()
-
-        response = self.client.post(
-            reverse("club-membership-list"),
-            {
-                "club": self.club.id,
-                "user": self.owner.id,
-                "role": ClubMembership.Role.MANAGER,
-            },
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-
-    def test_cannot_create_duplicate_active_owner_assignment(self):
-        self.create_membership(self.club, self.owner, ClubMembership.Role.OWNER)
-        self.authenticate_platform_admin()
-
-        response = self.client.post(
-            reverse("club-membership-list"),
-            {
-                "club": self.club.id,
-                "user": self.owner.id,
-                "role": ClubMembership.Role.OWNER,
-            },
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-
-    def test_manager_cannot_have_active_memberships_in_multiple_clubs(self):
-        self.create_membership(self.club, self.manager, ClubMembership.Role.MANAGER)
-        self.authenticate_platform_admin()
-
-        response = self.client.post(
-            reverse("club-membership-list"),
-            {
-                "club": self.other_club.id,
-                "user": self.manager.id,
-                "role": ClubMembership.Role.MANAGER,
-            },
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-
-    def test_deactivated_membership_no_longer_grants_scope(self):
-        membership = self.create_membership(
+        owner_response = self.post_membership(
             self.club,
             self.owner,
+            ClubMembership.Role.OWNER,
+        )
+        manager_response = self.post_membership(
+            self.club,
+            self.manager,
+            ClubMembership.Role.MANAGER,
+        )
+        staff_response = self.post_membership(
+            self.club,
+            self.staff,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+
+        self.assertEqual(owner_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(manager_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(staff_response.status_code, status.HTTP_201_CREATED)
+
+    def test_owner_can_create_manager_and_staff_inside_owned_club(self):
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.client.force_authenticate(user=self.owner)
+
+        manager_response = self.post_membership(
+            self.club,
+            self.manager,
+            ClubMembership.Role.MANAGER,
+        )
+        staff_response = self.post_membership(
+            self.club,
+            self.staff,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+
+        self.assertEqual(manager_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(staff_response.status_code, status.HTTP_201_CREATED)
+
+    def test_owner_cannot_create_owner_membership(self):
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.post_membership(
+            self.club,
+            self.other_user,
+            ClubMembership.Role.OWNER,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_manager_cannot_create_memberships(self):
+        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
+        self.client.force_authenticate(user=self.manager)
+
+        response = self.post_membership(
+            self.club,
+            self.staff,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_staff_cannot_create_memberships(self):
+        self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.post_membership(
+            self.club,
+            self.manager,
+            ClubMembership.Role.MANAGER,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_owner_and_manager_require_no_court(self):
+        self.authenticate_platform_admin()
+
+        owner_response = self.post_membership(
+            self.club,
+            self.owner,
+            ClubMembership.Role.OWNER,
+            court=self.court,
+        )
+        manager_response = self.post_membership(
+            self.club,
+            self.manager,
+            ClubMembership.Role.MANAGER,
+            court=self.court,
+        )
+
+        self.assertEqual(owner_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(manager_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_staff_requires_court(self):
+        self.authenticate_platform_admin()
+
+        response = self.post_membership(
+            self.club,
+            self.staff,
+            ClubMembership.Role.STAFF,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_staff_court_must_belong_to_url_club(self):
+        self.authenticate_platform_admin()
+
+        response = self.post_membership(
+            self.club,
+            self.staff,
+            ClubMembership.Role.STAFF,
+            court=self.other_court,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_duplicate_active_memberships_are_rejected(self):
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.authenticate_platform_admin()
+
+        response = self.post_membership(
+            self.club,
+            self.owner,
+            ClubMembership.Role.OWNER,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_manager_can_have_only_one_active_club_membership(self):
+        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
+        self.authenticate_platform_admin()
+
+        response = self.post_membership(
+            self.other_club,
+            self.manager,
+            ClubMembership.Role.MANAGER,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_staff_can_have_only_one_active_court_membership(self):
+        self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.authenticate_platform_admin()
+
+        response = self.post_membership(
+            self.other_club,
+            self.staff,
+            ClubMembership.Role.STAFF,
+            court=self.other_court,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_deactivated_membership_removes_scope(self):
+        membership = self.create_membership(
+            self.owner,
+            self.club,
             ClubMembership.Role.OWNER,
         )
         self.client.force_authenticate(user=self.owner)
@@ -323,7 +471,7 @@ class ClubMembershipAPITests(ClubAPITestCase):
 
         self.authenticate_platform_admin()
         response = self.client.patch(
-            reverse("club-membership-detail", kwargs={"pk": membership.pk}),
+            self.membership_detail_url(self.club, membership),
             {"is_active": False},
             format="json",
         )
