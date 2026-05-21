@@ -72,6 +72,27 @@ Useful booking list filters:
 - `date_from`
 - `date_to`
 
+## Sprint 4 Transaction Endpoints
+
+- `/api/clubs/{club_slug}/transactions/`
+- `/api/clubs/{club_slug}/transactions/{id}/`
+
+Useful transaction list filters:
+
+- `booking`
+- `court`
+- `payment_method`
+- `date`
+- `date_from`
+- `date_to`
+- `created_by`
+
+Creating the first valid transaction for a `HOLD` booking confirms it.
+Transactions are immutable through the API: no edit, delete, refund, reversal,
+or correction endpoint is implemented in Sprint 4. Duplicate non-blank payment
+references are rejected within the same club; blank references are allowed.
+Online payment gateway integration is not implemented.
+
 Run tests:
 
 ```bash

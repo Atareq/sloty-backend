@@ -10,6 +10,7 @@ from apps.accounts.models import User
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court, CourtWorkingHour
+from apps.transactions.models import Transaction
 
 
 class BookingAPITestCase(APITestCase):
@@ -76,6 +77,15 @@ class BookingAPITestCase(APITestCase):
         }
         data.update(extra_fields)
         return Booking.objects.create(**data)
+
+    def create_transaction(self, booking: Booking, **extra_fields) -> Transaction:
+        data = {
+            "booking": booking,
+            "amount": Decimal("50.00"),
+            "payment_method": Transaction.PaymentMethod.CASH,
+        }
+        data.update(extra_fields)
+        return Transaction.objects.create(**data)
 
     def time_at(self, hour: int, minute: int = 0):
         return timezone.datetime(
@@ -758,3 +768,94 @@ class BookingFilterTests(BookingAPITestCase):
             {self.booking.id, self.confirmed_booking.id},
         )
         self.assertNotIn(self.other_booking.id, self.list_ids(response))
+
+
+class BookingPaymentSummaryTests(BookingAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("payment-summary-admin")
+        self.staff = self.create_user("payment-summary-staff")
+        self.club = self.create_club("Payment Summary Club", slug="payment-summary")
+        self.other_club = self.create_club(
+            "Other Payment Summary Club",
+            slug="other-payment-summary",
+        )
+        self.court = self.create_court(self.club, "Summary Court")
+        self.same_club_other_court = self.create_court(
+            self.club,
+            "Summary Other Court",
+        )
+        self.other_court = self.create_court(self.other_club, "External Summary Court")
+        self.booking = self.create_booking(self.court)
+        self.same_club_other_booking = self.create_booking(self.same_club_other_court)
+        self.other_booking = self.create_booking(self.other_court)
+        self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+    def test_booking_list_includes_zero_payment_summary_without_transactions(self):
+        response = self.client.get(self.booking_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking_data = next(
+            item for item in response.data["results"] if item["id"] == self.booking.id
+        )
+        self.assertEqual(booking_data["paid_amount"], "0.00")
+        self.assertEqual(booking_data["remaining_amount"], "300.00")
+        self.assertFalse(booking_data["is_fully_paid"])
+
+    def test_booking_detail_includes_payment_summary(self):
+        self.create_transaction(self.booking, amount=Decimal("100.00"))
+
+        response = self.client.get(self.booking_detail_url(self.club, self.booking))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["paid_amount"], "100.00")
+        self.assertEqual(response.data["remaining_amount"], "200.00")
+        self.assertFalse(response.data["is_fully_paid"])
+
+    def test_payment_summary_is_correct_after_partial_payment(self):
+        self.create_transaction(self.booking, amount=Decimal("125.00"))
+
+        response = self.client.get(self.booking_detail_url(self.club, self.booking))
+
+        self.assertEqual(response.data["paid_amount"], "125.00")
+        self.assertEqual(response.data["remaining_amount"], "175.00")
+        self.assertFalse(response.data["is_fully_paid"])
+
+    def test_payment_summary_is_fully_paid_after_full_payment(self):
+        self.create_transaction(self.booking, amount=Decimal("100.00"))
+        self.create_transaction(self.booking, amount=Decimal("200.00"))
+
+        response = self.client.get(self.booking_detail_url(self.club, self.booking))
+
+        self.assertEqual(response.data["paid_amount"], "300.00")
+        self.assertEqual(response.data["remaining_amount"], "0.00")
+        self.assertTrue(response.data["is_fully_paid"])
+
+    def test_payment_summary_respects_club_scoped_booking_access(self):
+        self.create_transaction(self.booking, amount=Decimal("100.00"))
+        self.create_transaction(self.other_booking, amount=Decimal("200.00"))
+
+        response = self.client.get(self.booking_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(self.booking.id, self.list_ids(response))
+        self.assertNotIn(self.other_booking.id, self.list_ids(response))
+
+    def test_staff_sees_payment_summary_only_for_assigned_court_bookings(self):
+        self.create_transaction(self.booking, amount=Decimal("100.00"))
+        self.create_transaction(self.same_club_other_booking, amount=Decimal("200.00"))
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(self.booking_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {self.booking.id})
+        booking_data = response.data["results"][0]
+        self.assertEqual(booking_data["paid_amount"], "100.00")
+        self.assertEqual(booking_data["remaining_amount"], "200.00")
+        self.assertFalse(booking_data["is_fully_paid"])

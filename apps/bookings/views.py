@@ -1,5 +1,8 @@
 from datetime import datetime, time
+from decimal import Decimal
 
+from django.db.models import DecimalField, Sum, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework.mixins import (
@@ -92,6 +95,13 @@ class BookingViewSet(
             self.get_access_context()
             .scoped_bookings_queryset()
             .select_related("club", "court", "created_by")
+            .annotate(
+                paid_amount=Coalesce(
+                    Sum("transactions__amount"),
+                    Value(Decimal("0.00")),
+                    output_field=DecimalField(max_digits=10, decimal_places=2),
+                )
+            )
             .order_by("start_time", "id")
         )
         params = self.request.query_params

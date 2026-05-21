@@ -113,6 +113,20 @@ class ClubAccessContext:
     def can_create_booking_for_court(self, court):
         return self.can_access_court(court)
 
+    def can_create_transaction_for_booking(self, booking):
+        return (
+            booking is not None
+            and booking.club_id == self.club.id
+            and self.can_access_court(booking.court)
+        )
+
+    def can_access_transaction(self, transaction):
+        return (
+            transaction is not None
+            and transaction.club_id == self.club.id
+            and self.can_access_court(transaction.court)
+        )
+
     def scoped_courts_queryset(self):
         from apps.courts.models import Court
 
@@ -132,6 +146,11 @@ class ClubAccessContext:
         from apps.bookings.models import Booking
 
         return Booking.objects.filter(court__in=self.scoped_courts_queryset())
+
+    def scoped_transactions_queryset(self):
+        from apps.transactions.models import Transaction
+
+        return Transaction.objects.filter(court__in=self.scoped_courts_queryset())
 
     def scoped_memberships_queryset(self):
         queryset = ClubMembership.objects.filter(club=self.club)

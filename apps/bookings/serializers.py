@@ -1,3 +1,6 @@
+from decimal import Decimal
+
+from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
@@ -5,7 +8,37 @@ from apps.bookings.models import Booking
 from apps.bookings.services import create_booking, validate_booking_duration
 
 
-class BookingListSerializer(serializers.ModelSerializer):
+def format_money(value):
+    return f"{Decimal(value or Decimal('0.00')):.2f}"
+
+
+def get_paid_amount_for_booking(booking):
+    annotated_value = getattr(booking, "paid_amount", None)
+    if annotated_value is not None:
+        return annotated_value
+    return booking.transactions.aggregate(total=Sum("amount"))["total"] or Decimal(
+        "0.00"
+    )
+
+
+class BookingPaymentSummaryMixin(serializers.Serializer):
+    paid_amount = serializers.SerializerMethodField()
+    remaining_amount = serializers.SerializerMethodField()
+    is_fully_paid = serializers.SerializerMethodField()
+
+    def get_paid_amount(self, obj):
+        return format_money(get_paid_amount_for_booking(obj))
+
+    def get_remaining_amount(self, obj):
+        paid_amount = get_paid_amount_for_booking(obj)
+        remaining_amount = obj.total_price - paid_amount
+        return format_money(remaining_amount)
+
+    def get_is_fully_paid(self, obj):
+        return get_paid_amount_for_booking(obj) >= obj.total_price
+
+
+class BookingListSerializer(BookingPaymentSummaryMixin, serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
@@ -19,6 +52,9 @@ class BookingListSerializer(serializers.ModelSerializer):
             "start_time",
             "end_time",
             "total_price",
+            "paid_amount",
+            "remaining_amount",
+            "is_fully_paid",
             "status",
             "source",
             "created_by",
@@ -27,7 +63,7 @@ class BookingListSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class BookingDetailSerializer(serializers.ModelSerializer):
+class BookingDetailSerializer(BookingPaymentSummaryMixin, serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
@@ -41,6 +77,9 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             "start_time",
             "end_time",
             "total_price",
+            "paid_amount",
+            "remaining_amount",
+            "is_fully_paid",
             "status",
             "source",
             "notes",

@@ -29,8 +29,8 @@ Current repo reality:
 - Current root URL config: `config/urls.py`
 - Current local apps package: `apps/`
 - Current implemented app: `apps/accounts/`
-- Current implemented domain apps: `apps/clubs/`, `apps/courts/`, and
-  `apps/bookings/`
+- Current implemented domain apps: `apps/clubs/`, `apps/courts/`,
+  `apps/bookings/`, and `apps/transactions/`
 - Current API foundation endpoints include `/api/schema/`, `/api/docs/`,
   `/api/auth/token/`, and `/api/auth/token/refresh/`
 - Current account endpoints include `/api/me/` and platform-admin-only
@@ -45,9 +45,12 @@ Current repo reality:
   API scoping
 - Sprint 3 implements booking creation, booking list/detail and schedule
   filters, and application-level overlap protection
+- Sprint 4 implements immutable booking transaction recording, booking payment
+  summaries, and HOLD-to-CONFIRMED booking confirmation after the first valid
+  transaction
 - Planned shared app name is `apps/common/`
-- Domain apps beyond `accounts`, `clubs`, `courts`, and `bookings` are not
-  implemented yet
+- Domain apps beyond `accounts`, `clubs`, `courts`, `bookings`, and
+  `transactions` are not implemented yet
 
 Planned project direction:
 
@@ -58,7 +61,7 @@ Planned project direction:
 - Planned app layout: `accounts`, `clubs`, `courts`, `bookings`,
   `transactions`, `settlements`, `pricing`, `audit`, and `common`.
 - Only `accounts`, `clubs`, `courts`, and `bookings` should exist through
-  Sprint 3.
+  Sprint 3. Sprint 4 adds `transactions`.
 
 ## 3. Architecture Overview
 
@@ -99,9 +102,9 @@ Current implemented app:
 - `apps/courts/` contains court setup and court working hours logic.
 - `Court` stores `default_price`, `slot_duration_minutes`,
   `requires_digital_payment_reference`, and `internal_hold_expiry_hours`.
-  Payment reference and hold-expiry behavior are stored for later transaction
-  and lifecycle work; do not implement those workflows during Sprint 3 unless
-  explicitly requested.
+  Sprint 4 transactions use `requires_digital_payment_reference` for manual
+  payment-reference validation. Hold-expiry behavior remains future lifecycle
+  work and must not be implemented in Sprint 4.
 - Club/court scope must come from active `ClubMembership` rows, not from direct
   club or court fields on `User`.
 - `apps/bookings/` contains booking creation, list/detail APIs, schedule-style
@@ -115,11 +118,18 @@ Current implemented app:
   `source`, `date`, `date_from`, and `date_to`.
 - Booking outside working hours is allowed in Sprint 3, and no
   `outside_working_hours` flag is stored.
-- Transactions, booking lifecycle actions, settlements, dashboards, and audit
-  logs are future sprint work and must not be implemented in `bookings` during
-  Sprint 3.
-- Business APIs for memberships, courts, working hours, and bookings are
-  club-scoped under `/api/clubs/{club_slug}/...`.
+- Booking lifecycle actions, settlements, dashboards, and audit logs are future
+  sprint work and must not be implemented in `bookings` during Sprint 4.
+- `apps/transactions/` contains immutable booking transaction recording,
+  transaction create/list/detail APIs, payment reference uniqueness inside a
+  club, and booking payment summary support.
+- Transaction creation confirms a HOLD booking to CONFIRMED. Other booking
+  lifecycle actions remain future work.
+- Settlements, corrections, refunds, reversals, dashboards, reports, audit logs,
+  online payment gateway logic, and platform commission calculation remain
+  future work.
+- Business APIs for memberships, courts, working hours, bookings, and
+  transactions are club-scoped under `/api/clubs/{club_slug}/...`.
 - Login remains global. The frontend logs in, calls `/api/me/` to read active
   memberships and club slugs, then sends selected-club requests to
   `/api/clubs/{club_slug}/...`. Never trust frontend-selected club context
@@ -146,6 +156,11 @@ apps/<domain>/
 If the app is still small, it is acceptable to start with a smaller subset of
 these files. Mark missing files as planned patterns in documentation or PR notes
 instead of pretending they already exist.
+
+`permissions.py` remains an optional owning-app file when a domain truly needs
+DRF permission classes. For `apps/transactions/` work, do not create
+`apps/transactions/permissions.py` by default; transaction access is expected
+to go through `ClubAccessContext`.
 
 ## 4. Preferred Request Flow
 
@@ -244,8 +259,8 @@ Rules for the flow:
 - Booking foundation app.
 - Contains `Booking`, booking serializers, scoped booking viewsets, and booking
   creation services.
-- New bookings start as `HOLD` because transactions are not implemented until
-  Sprint 4.
+- New bookings start as `HOLD`; in Sprint 4 a valid booking transaction
+  confirms a HOLD booking to CONFIRMED.
 - `total_price` is calculated by the backend from the court default price and
   slot duration; clients must not control booking price in Sprint 3.
 - Overlap protection is currently application-level: `HOLD` and `CONFIRMED`
@@ -255,8 +270,36 @@ Rules for the flow:
 - Creating bookings on inactive clubs or inactive courts is rejected.
 - `COMPLETED`, `CANCELLED`, `NO_SHOW`, and `EXPIRED` bookings are treated as
   locked for Sprint 3 update behavior and do not block new overlapping slots.
-- Do not place transaction, settlement, lifecycle action, dashboard, marketplace,
-  notification, or audit-log behavior here in Sprint 3.
+- Do not place transaction creation logic, settlement, lifecycle action,
+  dashboard, marketplace, notification, or audit-log behavior in `bookings`.
+
+`apps/transactions/`
+
+- Sprint 4 transaction recording app.
+- Contains `Transaction`, transaction serializers, transaction viewsets,
+  transaction creation services, and transaction admin registration.
+- Do not create `apps/transactions/permissions.py` by default.
+- Transaction access must be centralized through
+  `apps/clubs/access.py -> ClubAccessContext`.
+- `TransactionViewSet` must use `ClubScopedAccessMixin`.
+- Transaction serializers must receive `context["club_access"]`.
+- Transaction views should call `access.scoped_transactions_queryset()` for
+  list/detail scoping.
+- Transaction creation should call
+  `access.can_create_transaction_for_booking(booking)`.
+- Object-level transaction checks, when needed, should call
+  `access.can_access_transaction(transaction)`.
+- Do not duplicate `ClubMembership` queries inside transaction views,
+  serializers, or services.
+- Do not create independent per-app transaction permission logic. If a
+  transaction-specific DRF permission class seems absolutely necessary, stop
+  and explain why before adding it.
+- Transactions are immutable through the API: no PATCH, PUT, DELETE, void,
+  correction, refund, reversal, or settlement endpoint exists in Sprint 4.
+- Transaction creation may change booking status only from HOLD to CONFIRMED.
+  Do not implement other booking lifecycle actions in Sprint 4.
+- `manager_can_settle_transactions` remains reserved for future settlement
+  behavior and must not control Sprint 4 payment recording.
 
 `apps/common/`
 
@@ -323,6 +366,9 @@ Rules for the flow:
 - Do not assume default permissions are enough for sensitive endpoints.
 - Put domain-specific permission classes in the owning app's `permissions.py`
   when needed.
+- Future transaction endpoints are the exception to the default permission-file
+  pattern: do not add transaction-specific DRF permission classes unless
+  absolutely necessary, and explain the need before adding one.
 - Shared permission helpers may move to `apps/common/` only after reuse exists.
 - Tests for protected endpoints must cover unauthenticated, unauthorized, and
   authorized cases where applicable.
@@ -453,6 +499,12 @@ Run Sprint 3 booking tests:
 pytest tests/bookings
 ```
 
+Run Sprint 4 transaction tests:
+
+```bash
+pytest tests/transactions
+```
+
 Run all tests:
 
 ```bash
@@ -496,7 +548,8 @@ Notes:
   `/api/clubs/{club_slug}/memberships/`,
   `/api/clubs/{club_slug}/courts/`,
   `/api/clubs/{club_slug}/court-working-hours/`, and
-  `/api/clubs/{club_slug}/bookings/`.
+  `/api/clubs/{club_slug}/bookings/`,
+  `/api/clubs/{club_slug}/transactions/`.
 - Global API routes currently include `/api/me/`, `/api/users/`,
   `/api/auth/token/`, `/api/auth/token/refresh/`, `/api/schema/`, and
   `/api/docs/`.
