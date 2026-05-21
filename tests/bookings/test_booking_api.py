@@ -1,13 +1,17 @@
 from datetime import time
 from decimal import Decimal
+from pathlib import Path
 
-from django.urls import reverse
+from django.urls import resolve, reverse
 from django.utils import timezone
+from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
+from apps.bookings.filters import BookingFilter
 from apps.bookings.models import Booking
+from apps.bookings.views import BookingViewSet
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court, CourtWorkingHour
 from apps.transactions.models import Transaction
@@ -755,6 +759,22 @@ class BookingFilterTests(BookingAPITestCase):
 
         self.assertEqual(self.list_ids(response), {self.confirmed_booking.id})
 
+    def test_invalid_date_filter_returns_400(self):
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"date": "not-a-date"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invalid_datetime_filter_returns_400(self):
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"date_from": "not-a-datetime"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_filters_still_respect_user_scope_inside_selected_club(self):
         self.client.force_authenticate(user=self.owner)
 
@@ -768,6 +788,77 @@ class BookingFilterTests(BookingAPITestCase):
             {self.booking.id, self.confirmed_booking.id},
         )
         self.assertNotIn(self.other_booking.id, self.list_ids(response))
+
+    def test_filters_still_respect_staff_assigned_court_scope(self):
+        staff = self.create_user("filter-staff")
+        same_club_other_court = self.create_court(
+            self.club,
+            "Hidden Staff Filter Court",
+        )
+        same_club_other_booking = self.create_booking(
+            same_club_other_court,
+            customer_phone="+201000000007",
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+        )
+        self.create_membership(
+            staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"date": "2026-05-20"},
+        )
+
+        self.assertEqual(
+            self.list_ids(response),
+            {self.booking.id, self.confirmed_booking.id},
+        )
+        self.assertNotIn(same_club_other_booking.id, self.list_ids(response))
+
+    def test_club_query_param_does_not_control_club_scoped_filtering(self):
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"club": self.other_club.id},
+        )
+
+        self.assertEqual(
+            self.list_ids(response),
+            {self.booking.id, self.confirmed_booking.id},
+        )
+        self.assertNotIn(self.other_booking.id, self.list_ids(response))
+
+
+class BookingFilterPatternTests(BookingAPITestCase):
+    def test_booking_route_resolves_to_viewset(self):
+        match = resolve("/api/clubs/example-club/bookings/")
+
+        self.assertIs(match.func.cls, BookingViewSet)
+
+    def test_booking_viewset_uses_django_filter_backend(self):
+        self.assertEqual(BookingViewSet.filter_backends, (DjangoFilterBackend,))
+        self.assertIs(BookingViewSet.filterset_class, BookingFilter)
+
+    def test_booking_viewset_does_not_manually_parse_filter_query_params(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        view_source = (repo_root / "apps" / "bookings" / "views.py").read_text()
+
+        self.assertNotIn("request.query_params", view_source)
+        self.assertNotIn("parse_date", view_source)
+        self.assertNotIn("parse_datetime", view_source)
+
+    def test_booking_filter_does_not_contain_access_logic(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        filter_source = (repo_root / "apps" / "bookings" / "filters.py").read_text()
+
+        self.assertNotIn("ClubMembership", filter_source)
+        self.assertNotIn("ClubAccessContext", filter_source)
+        self.assertNotIn("get_access_context", filter_source)
+        self.assertNotIn("club_slug", filter_source)
 
 
 class BookingPaymentSummaryTests(BookingAPITestCase):

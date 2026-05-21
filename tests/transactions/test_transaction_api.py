@@ -6,6 +6,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.urls import resolve, reverse
 from django.utils import timezone
+from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APITestCase
@@ -15,6 +16,7 @@ from apps.bookings.models import Booking
 from apps.clubs.access import ClubAccessContext
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court
+from apps.transactions.filters import TransactionFilter
 from apps.transactions.models import Transaction
 from apps.transactions.services import (
     DUPLICATE_PAYMENT_REFERENCE_MESSAGE,
@@ -672,6 +674,22 @@ class TransactionFilterTests(TransactionAPITestCase):
         self.assertIn(self.same_club_other_transaction.id, self.list_ids(response))
         self.assertNotIn(self.other_transaction.id, self.list_ids(response))
 
+    def test_invalid_date_filter_returns_400(self):
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"date": "not-a-date"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invalid_datetime_filter_returns_400(self):
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"date_from": "not-a-datetime"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_filter_by_created_by(self):
         response = self.client.get(
             self.transaction_list_url(self.club),
@@ -691,12 +709,28 @@ class TransactionFilterTests(TransactionAPITestCase):
         self.assertEqual(self.list_ids(response), {self.transaction_obj.id})
         self.assertNotIn(self.same_club_other_transaction.id, self.list_ids(response))
 
+    def test_club_query_param_does_not_control_club_scoped_filtering(self):
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"club": self.other_club.id},
+        )
+
+        self.assertEqual(
+            self.list_ids(response),
+            {self.transaction_obj.id, self.same_club_other_transaction.id},
+        )
+        self.assertNotIn(self.other_transaction.id, self.list_ids(response))
+
 
 class TransactionCentralizedAccessTests(TransactionAPITestCase):
     def test_transaction_route_resolves_to_viewset(self):
         match = resolve("/api/clubs/example-club/transactions/")
 
         self.assertIs(match.func.cls, TransactionViewSet)
+
+    def test_transaction_viewset_uses_django_filter_backend(self):
+        self.assertEqual(TransactionViewSet.filter_backends, (DjangoFilterBackend,))
+        self.assertIs(TransactionViewSet.filterset_class, TransactionFilter)
 
     def test_transaction_app_does_not_define_permissions_module(self):
         permissions_path = (
@@ -711,6 +745,7 @@ class TransactionCentralizedAccessTests(TransactionAPITestCase):
     def test_transaction_code_uses_centralized_access_and_no_removed_assignment(self):
         repo_root = Path(__file__).resolve().parents[2]
         transaction_files = [
+            repo_root / "apps" / "transactions" / "filters.py",
             repo_root / "apps" / "transactions" / "services.py",
             repo_root / "apps" / "transactions" / "serializers.py",
             repo_root / "apps" / "transactions" / "views.py",
@@ -720,8 +755,17 @@ class TransactionCentralizedAccessTests(TransactionAPITestCase):
         self.assertIn("can_create_transaction_for_booking", combined)
         self.assertIn("scoped_transactions_queryset", combined)
         self.assertNotIn("ClubMembership", combined)
+        self.assertNotIn("ClubAccessContext", combined)
         self.assertNotIn("CourtStaffAssignment", combined)
         self.assertNotIn(".role", combined)
+
+    def test_transaction_viewset_does_not_manually_parse_filter_query_params(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        view_source = (repo_root / "apps" / "transactions" / "views.py").read_text()
+
+        self.assertNotIn("request.query_params", view_source)
+        self.assertNotIn("parse_date_param", view_source)
+        self.assertNotIn("parse_datetime_param", view_source)
 
     def test_schema_and_docs_return_200(self):
         schema_response = self.client.get(reverse("schema"))

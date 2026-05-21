@@ -354,6 +354,18 @@ Rules for the flow:
 - Do not expose internal-only fields.
 - Use pagination consistently for list endpoints.
 - Use `django-filter` `FilterSet` classes when filtering becomes non-trivial.
+- All public query parameters for list filtering must be declared in the
+  domain app's `filters.py`; `FilterSet` classes are the source of truth for
+  list-filter parameters.
+- ViewSets should declare `filter_backends` and `filterset_class` for list
+  filtering instead of parsing filter query params directly.
+- `ViewSet.get_queryset()` must return an already authorized/scoped queryset
+  before `DjangoFilterBackend` applies request filters.
+- `FilterSet` classes must not perform permission checks, import or query
+  `ClubMembership`, import `ClubAccessContext`, resolve `club_slug`, or decide
+  staff court scope.
+- Club-scoped endpoints must not accept a `club` query param because club
+  context comes from `/api/clubs/{club_slug}/...`.
 - Do not add global success response wrapping. A shared base error format or
   custom exception handler is deferred until a simple, tested need exists.
 - Club-scoped business endpoints must verify authenticated user, club slug,
