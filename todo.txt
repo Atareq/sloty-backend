@@ -1,0 +1,21 @@
+Use the JWT access token to include:
+
+{
+  "user_id": 12,
+  "role": "court_staff",
+  "club_id": 3,
+  "court_id": 8,
+  "name": "Ahmed",
+  "token_version": 1,
+  "permissions_version": 1,
+  "exp": 1234567890
+}
+
+But keep it simple.
+
+For Sloty, the roles are:
+
+platform_super_admin
+club_owner
+club_manager
+court_staff

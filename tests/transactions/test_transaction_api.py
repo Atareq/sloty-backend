@@ -724,7 +724,7 @@ class TransactionFilterTests(TransactionAPITestCase):
 
 class TransactionCentralizedAccessTests(TransactionAPITestCase):
     def test_transaction_route_resolves_to_viewset(self):
-        match = resolve("/api/clubs/example-club/transactions/")
+        match = resolve("/api/v1/clubs/example-club/transactions/")
 
         self.assertIs(match.func.cls, TransactionViewSet)
 
@@ -774,5 +774,6 @@ class TransactionCentralizedAccessTests(TransactionAPITestCase):
         self.assertEqual(schema_response.status_code, status.HTTP_200_OK)
         self.assertEqual(docs_response.status_code, status.HTTP_200_OK)
         self.assertIn(
-            "/api/clubs/{club_slug}/transactions/", schema_response.content.decode()
+            "/api/v1/clubs/{club_slug}/transactions/",
+            schema_response.content.decode(),
         )

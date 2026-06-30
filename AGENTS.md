@@ -12,6 +12,10 @@ The goal is to keep this Django backend moving toward a disciplined
 Django + Django REST Framework modular monolith without copying business logic
 from any previous project.
 
+Before implementing any new API, follow the API Implementation Checklist in
+this file. This keeps future Codex prompts short and avoids repeating project
+rules.
+
 ## 2. Project Summary
 
 This is a new Django backend project named `sloty`.
@@ -31,16 +35,18 @@ Current repo reality:
 - Current implemented app: `apps/accounts/`
 - Current implemented domain apps: `apps/clubs/`, `apps/courts/`,
   `apps/bookings/`, and `apps/transactions/`
-- Current API foundation endpoints include `/api/schema/`, `/api/docs/`,
-  `/api/auth/token/`, and `/api/auth/token/refresh/`
-- Current account endpoints include `/api/me/` and platform-admin-only
-  `/api/users/`
+- Current public API routes are versioned under `/api/v1/`
+- Current API foundation endpoints include `/api/v1/schema/`,
+  `/api/v1/docs/`, `/api/v1/auth/token/`, and
+  `/api/v1/auth/token/refresh/`
+- Current account endpoints include `/api/v1/me/` and platform-admin-only
+  `/api/v1/users/`
 - Project docs live under `docs/`
 - Requirements are split into `requirements/base.txt` and `requirements/dev.txt`
 - Style tooling exists through `.pre-commit-config.yaml`, `pyproject.toml`, and
   `setup.cfg`
 - Sprint 1 implements backend foundation, JWT login/refresh URLs, the custom
-  accounts user model, `/api/me/`, and platform-admin user management APIs
+  accounts user model, `/api/v1/me/`, and platform-admin user management APIs
 - Sprint 2 implements club/court setup, club membership assignment, and setup
   API scoping
 - Sprint 3 implements booking creation, booking list/detail and schedule
@@ -48,6 +54,8 @@ Current repo reality:
 - Sprint 4 implements immutable booking transaction recording, booking payment
   summaries, and HOLD-to-CONFIRMED booking confirmation after the first valid
   transaction
+- Sprint 5 implements manual booking lifecycle action endpoints, API v1
+  routing, custom JWT convenience claims, and local demo seed data
 - Planned shared app name is `apps/common/`
 - Domain apps beyond `accounts`, `clubs`, `courts`, `bookings`, and
   `transactions` are not implemented yet
@@ -118,22 +126,31 @@ Current implemented app:
   `source`, `date`, `date_from`, and `date_to`.
 - Booking outside working hours is allowed in Sprint 3, and no
   `outside_working_hours` flag is stored.
-- Booking lifecycle actions, settlements, dashboards, and audit logs are future
-  sprint work and must not be implemented in `bookings` during Sprint 4.
+- Sprint 5 booking lifecycle actions are manual endpoints on the existing
+  `BookingViewSet`: cancel, complete, no-show, and expire. Rescheduling,
+  automatic hold expiry jobs, settlements, dashboards, and audit logs remain
+  future sprint work.
 - `apps/transactions/` contains immutable booking transaction recording,
   transaction create/list/detail APIs, payment reference uniqueness inside a
   club, and booking payment summary support.
 - Transaction creation confirms a HOLD booking to CONFIRMED. Other booking
-  lifecycle actions remain future work.
+  lifecycle actions are handled by the Sprint 5 booking lifecycle service.
 - Settlements, corrections, refunds, reversals, dashboards, reports, audit logs,
   online payment gateway logic, and platform commission calculation remain
   future work.
 - Business APIs for memberships, courts, working hours, bookings, and
-  transactions are club-scoped under `/api/clubs/{club_slug}/...`.
-- Login remains global. The frontend logs in, calls `/api/me/` to read active
+  transactions are club-scoped under `/api/v1/clubs/{club_slug}/...`.
+- Login remains global. The frontend logs in, calls `/api/v1/me/` to read active
   memberships and club slugs, then sends selected-club requests to
-  `/api/clubs/{club_slug}/...`. Never trust frontend-selected club context
+  `/api/v1/clubs/{club_slug}/...`. Never trust frontend-selected club context
   without backend verification.
+- Token obtain may accept optional `club_slug` and returns custom JWT claims
+  for frontend convenience: `user_id`, `role`, `name`, and optional `club_id`
+  and `court_id`. These claims are derived from `User` and active
+  `ClubMembership` rows at token issue time; `User` still does not store
+  club-scoped roles or club/court fields. Business endpoints must still verify
+  active database-backed club access through `ClubAccessContext` and must not
+  trust JWT club/court claims alone.
 - Use “club-scoped access”, “club access”, or “club context” terminology only.
 
 Planned app pattern:
@@ -213,7 +230,8 @@ Rules for the flow:
 - Current account app.
 - Contains the custom `User` model, `phone_number`, nullable `created_by`,
   `is_platform_admin`, account admin registration, account serializers/views,
-  `/api/me/`, platform-admin-only `/api/users/`, and account permission helpers.
+  `/api/v1/me/`, platform-admin-only `/api/v1/users/`, and account permission
+  helpers.
 - `User.is_platform_super_admin()` is a temporary compatibility helper that
   returns `is_platform_admin`.
 - Do not add or reintroduce club-scoped business roles on `User`.
@@ -258,7 +276,7 @@ Rules for the flow:
 
 - Booking foundation app.
 - Contains `Booking`, booking serializers, scoped booking viewsets, and booking
-  creation services.
+  creation/lifecycle services.
 - New bookings start as `HOLD`; in Sprint 4 a valid booking transaction
   confirms a HOLD booking to CONFIRMED.
 - `total_price` is calculated by the backend from the court default price and
@@ -270,8 +288,18 @@ Rules for the flow:
 - Creating bookings on inactive clubs or inactive courts is rejected.
 - `COMPLETED`, `CANCELLED`, `NO_SHOW`, and `EXPIRED` bookings are treated as
   locked for Sprint 3 update behavior and do not block new overlapping slots.
-- Do not place transaction creation logic, settlement, lifecycle action,
-  dashboard, marketplace, notification, or audit-log behavior in `bookings`.
+- Sprint 5 lifecycle transitions are service-layer controlled through
+  `transition_booking_status(access=..., booking=..., target_status=..., actor=...)`.
+  The service uses `transaction.atomic()`, `select_for_update()`, explicit
+  transition maps, and `ClubAccessContext.can_change_booking_status()`.
+- Allowed Sprint 5 lifecycle transitions are `HOLD -> CANCELLED`,
+  `HOLD -> EXPIRED`, `CONFIRMED -> CANCELLED`,
+  `CONFIRMED -> COMPLETED`, and `CONFIRMED -> NO_SHOW`.
+- Terminal statuses `COMPLETED`, `CANCELLED`, `NO_SHOW`, and `EXPIRED` cannot
+  transition further.
+- Do not place transaction creation logic, settlement, rescheduling,
+  automatic hold expiry jobs, dashboard, marketplace, notification, or
+  audit-log behavior in `bookings`.
 
 `apps/transactions/`
 
@@ -365,12 +393,97 @@ Rules for the flow:
   `ClubMembership`, import `ClubAccessContext`, resolve `club_slug`, or decide
   staff court scope.
 - Club-scoped endpoints must not accept a `club` query param because club
-  context comes from `/api/clubs/{club_slug}/...`.
+  context comes from `/api/v1/clubs/{club_slug}/...`.
 - Do not add global success response wrapping. A shared base error format or
   custom exception handler is deferred until a simple, tested need exists.
 - Club-scoped business endpoints must verify authenticated user, club slug,
   platform admin or active club membership, role authority, and staff court
   scope through `ClubAccessContext`.
+
+## API Implementation Checklist
+
+Whenever a new API endpoint is added or changed, check whether the following
+are needed:
+
+A) URL and versioning
+
+- New public APIs must live under `/api/v1/`.
+- Club-scoped APIs must live under `/api/v1/clubs/{club_slug}/...`.
+- Do not create unversioned `/api/...` routes for new public APIs.
+- Do not create global business endpoints when the business context is
+  club-scoped.
+
+B) Access/scoping
+
+- Use `ClubAccessContext` for club-scoped access.
+- `ViewSet.get_queryset()` must return an already scoped queryset.
+- Do not trust frontend-selected club/court/token claims without DB
+  verification.
+- Do not query `ClubMembership` directly outside centralized access code unless
+  the task explicitly updates that access layer.
+- Do not create new per-app permission classes unless clearly needed and
+  approved.
+
+C) Services
+
+- Put workflow, state-change, and multi-model write logic in services.
+- Use `transaction.atomic()` for multi-model writes.
+- Use `select_for_update()` when concurrent changes can conflict.
+
+D) Filters
+
+- Non-trivial list filters must use django-filter `FilterSet` classes.
+- Public query params must be explicitly declared in
+  `apps/<domain>/filters.py`.
+- ViewSets should use `DjangoFilterBackend` and `filterset_class`.
+- Filters must not contain permission logic.
+- Filters must not import `ClubAccessContext` or query `ClubMembership`.
+
+E) Serializers
+
+- Use separate create, update, list, and detail serializers when request and
+  response shapes differ.
+- Do not expose internal fields.
+- Keep response shapes stable.
+
+F) Schema/docs
+
+- Ensure the endpoint appears in `/api/v1/schema/` and `/api/v1/docs/`.
+- Use `extend_schema` only when automatic schema output is weak or ambiguous.
+- Keep `/api/v1/docs/` and `/api/v1/schema/` public for development.
+
+G) Tests
+
+- Add tests for authentication.
+- Add tests for unauthorized access.
+- Add tests for authorized access.
+- Add tests for role/court/club scoping.
+- Add tests for invalid input.
+- Add tests for filters if list filters exist.
+- Add regression tests for security-sensitive behavior.
+
+H) Seed data
+
+- Update `seed_demo_data` when a new endpoint needs realistic manual testing
+  data.
+- Seed data must be idempotent.
+- Seed data must use management commands, not migrations.
+- Seed data must not create future sprint concepts before they exist.
+- Use predictable usernames, slugs, and references.
+
+I) Documentation
+
+- Update `README.md` when a public endpoint is added or changed.
+- Update `AGENTS.md` when architecture, conventions, or workflow changes.
+- Keep docs concise and useful for future Codex runs.
+
+J) Strict boundaries
+
+- Do not implement future sprint features during endpoint work.
+- Do not add dependencies without approval.
+- Do not add fields to `User` for club/court roles.
+- Do not reintroduce `CourtStaffAssignment`.
+- Do not use “tenant” terminology.
 
 ## 8. Authentication and Permission Rules
 
@@ -517,6 +630,12 @@ Run Sprint 4 transaction tests:
 pytest tests/transactions
 ```
 
+Seed local/demo data for manual endpoint testing:
+
+```bash
+python manage.py seed_demo_data
+```
+
 Run all tests:
 
 ```bash
@@ -556,17 +675,35 @@ Notes:
 - If settings are changed, verify the configured local apps match real package
   paths under `apps/`.
 - Club-scoped API routes currently include:
-  `/api/clubs/`,
-  `/api/clubs/{club_slug}/memberships/`,
-  `/api/clubs/{club_slug}/courts/`,
-  `/api/clubs/{club_slug}/court-working-hours/`, and
-  `/api/clubs/{club_slug}/bookings/`,
-  `/api/clubs/{club_slug}/transactions/`.
-- Global API routes currently include `/api/me/`, `/api/users/`,
-  `/api/auth/token/`, `/api/auth/token/refresh/`, `/api/schema/`, and
-  `/api/docs/`.
+  `/api/v1/clubs/`,
+  `/api/v1/clubs/{club_slug}/memberships/`,
+  `/api/v1/clubs/{club_slug}/courts/`,
+  `/api/v1/clubs/{club_slug}/court-working-hours/`,
+  `/api/v1/clubs/{club_slug}/bookings/`,
+  `/api/v1/clubs/{club_slug}/bookings/{id}/cancel/`,
+  `/api/v1/clubs/{club_slug}/bookings/{id}/complete/`,
+  `/api/v1/clubs/{club_slug}/bookings/{id}/no-show/`,
+  `/api/v1/clubs/{club_slug}/bookings/{id}/expire/`, and
+  `/api/v1/clubs/{club_slug}/transactions/`.
+- Global API routes currently include `/api/v1/me/`, `/api/v1/users/`,
+  `/api/v1/auth/token/`, `/api/v1/auth/token/refresh/`, `/api/v1/schema/`, and
+  `/api/v1/docs/`.
 
-## 14. Do and Don't Rules for Codex Agents
+## 14. Demo Seed Data Pattern
+
+- New endpoint work should consider whether demo seed data is needed for
+  manual Swagger/Postman testing.
+- Demo seed data must be added through an idempotent management command, not
+  migrations.
+- Current command: `python manage.py seed_demo_data`.
+- Seed data is for local/manual testing only and must not create production
+  side effects.
+- Use predictable usernames, slugs, dates, and references.
+- Keep seed data minimal and aligned with currently implemented endpoints.
+- Do not seed future sprint concepts before they exist.
+- Do not add fixtures unless the project intentionally adopts fixtures.
+
+## 15. Do and Don't Rules for Codex Agents
 
 Do:
 

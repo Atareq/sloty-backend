@@ -121,6 +121,12 @@ class BookingAPITestCase(APITestCase):
             kwargs={"club_slug": club.slug, "pk": booking.pk},
         )
 
+    def booking_lifecycle_url(self, club, booking, action_name):
+        return reverse(
+            f"club-booking-{action_name}",
+            kwargs={"club_slug": club.slug, "pk": booking.pk},
+        )
+
     def post_booking(self, club: Club, court: Court, **extra_fields):
         return self.client.post(
             self.booking_list_url(club),
@@ -676,6 +682,235 @@ class BookingUpdateTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
+class BookingLifecycleActionTests(BookingAPITestCase):
+    detail_response_fields = {
+        "id",
+        "club",
+        "court",
+        "customer_name",
+        "customer_phone",
+        "start_time",
+        "end_time",
+        "total_price",
+        "paid_amount",
+        "remaining_amount",
+        "is_fully_paid",
+        "status",
+        "source",
+        "notes",
+        "created_by",
+        "created",
+        "modified",
+    }
+
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("lifecycle-admin")
+        self.owner = self.create_user("lifecycle-owner")
+        self.manager = self.create_user("lifecycle-manager")
+        self.staff = self.create_user("lifecycle-staff")
+        self.other_user = self.create_user("lifecycle-other-user")
+        self.club = self.create_club("Lifecycle Club", slug="lifecycle-club")
+        self.other_club = self.create_club(
+            "Other Lifecycle Club",
+            slug="other-lifecycle",
+        )
+        self.court = self.create_court(self.club, "Lifecycle Court")
+        self.same_club_other_court = self.create_court(
+            self.club,
+            "Lifecycle Other Court",
+        )
+        self.other_court = self.create_court(self.other_club, "Other Lifecycle Court")
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
+        self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.create_membership(
+            self.other_user,
+            self.other_club,
+            ClubMembership.Role.OWNER,
+        )
+
+    def post_lifecycle(self, club, booking, action_name, user):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.post(
+            self.booking_lifecycle_url(club, booking, action_name),
+            {},
+            format="json",
+        )
+
+    def test_anonymous_cannot_call_lifecycle_actions(self):
+        booking = self.create_booking(self.court, status=Booking.Status.HOLD)
+
+        response = self.post_lifecycle(self.club, booking, "cancel", None)
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_platform_admin_can_cancel_hold(self):
+        booking = self.create_booking(self.court, status=Booking.Status.HOLD)
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "cancel",
+            self.platform_admin,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CANCELLED)
+
+    def test_owner_can_cancel_confirmed(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+
+        response = self.post_lifecycle(self.club, booking, "cancel", self.owner)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CANCELLED)
+
+    def test_manager_can_complete_confirmed(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+
+        response = self.post_lifecycle(self.club, booking, "complete", self.manager)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.COMPLETED)
+
+    def test_staff_can_change_booking_status_for_assigned_court(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+
+        response = self.post_lifecycle(self.club, booking, "no-show", self.staff)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.NO_SHOW)
+
+    def test_staff_cannot_change_booking_status_for_another_court_in_same_club(self):
+        booking = self.create_booking(
+            self.same_club_other_court,
+            status=Booking.Status.CONFIRMED,
+        )
+
+        response = self.post_lifecycle(self.club, booking, "complete", self.staff)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+
+    def test_unrelated_club_member_cannot_access_selected_club_booking(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+
+        response = self.post_lifecycle(self.club, booking, "complete", self.other_user)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+
+    def test_allowed_transitions_succeed(self):
+        cases = (
+            (Booking.Status.HOLD, "cancel", Booking.Status.CANCELLED, 10),
+            (Booking.Status.HOLD, "expire", Booking.Status.EXPIRED, 11),
+            (Booking.Status.CONFIRMED, "cancel", Booking.Status.CANCELLED, 12),
+            (Booking.Status.CONFIRMED, "complete", Booking.Status.COMPLETED, 13),
+            (Booking.Status.CONFIRMED, "no-show", Booking.Status.NO_SHOW, 14),
+        )
+        for source_status, action_name, target_status, phone_suffix in cases:
+            with self.subTest(source_status=source_status, action_name=action_name):
+                booking = self.create_booking(
+                    self.court,
+                    status=source_status,
+                    start_time=self.time_at(phone_suffix),
+                    end_time=self.time_at(phone_suffix + 1),
+                    customer_phone=f"+2010000003{phone_suffix:02d}",
+                )
+
+                response = self.post_lifecycle(
+                    self.club,
+                    booking,
+                    action_name,
+                    self.platform_admin,
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                booking.refresh_from_db()
+                self.assertEqual(booking.status, target_status)
+
+    def test_hold_cannot_be_completed_or_marked_no_show(self):
+        cases = (
+            ("complete", Booking.Status.COMPLETED, 15),
+            ("no-show", Booking.Status.NO_SHOW, 16),
+        )
+        for action_name, target_status, phone_suffix in cases:
+            with self.subTest(action_name=action_name):
+                booking = self.create_booking(
+                    self.court,
+                    status=Booking.Status.HOLD,
+                    start_time=self.time_at(phone_suffix),
+                    end_time=self.time_at(phone_suffix + 1),
+                    customer_phone=f"+2010000004{phone_suffix:02d}",
+                )
+
+                response = self.post_lifecycle(
+                    self.club,
+                    booking,
+                    action_name,
+                    self.platform_admin,
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                booking.refresh_from_db()
+                self.assertEqual(booking.status, Booking.Status.HOLD)
+                self.assertIn("status", response.data)
+                self.assertNotEqual(booking.status, target_status)
+
+    def test_terminal_statuses_cannot_transition(self):
+        terminal_statuses = (
+            Booking.Status.COMPLETED,
+            Booking.Status.CANCELLED,
+            Booking.Status.NO_SHOW,
+            Booking.Status.EXPIRED,
+        )
+        for index, terminal_status in enumerate(terminal_statuses, start=17):
+            with self.subTest(terminal_status=terminal_status):
+                booking = self.create_booking(
+                    self.court,
+                    status=terminal_status,
+                    start_time=self.time_at(index),
+                    end_time=self.time_at(index + 1),
+                    customer_phone=f"+2010000005{index:02d}",
+                )
+
+                response = self.post_lifecycle(
+                    self.club,
+                    booking,
+                    "cancel",
+                    self.platform_admin,
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                booking.refresh_from_db()
+                self.assertEqual(booking.status, terminal_status)
+
+    def test_successful_action_returns_booking_detail_shape(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "complete",
+            self.platform_admin,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(set(response.data), self.detail_response_fields)
+
+
 class BookingFilterTests(BookingAPITestCase):
     def setUp(self):
         self.platform_admin = self.create_platform_admin("filter-admin")
@@ -835,7 +1070,7 @@ class BookingFilterTests(BookingAPITestCase):
 
 class BookingFilterPatternTests(BookingAPITestCase):
     def test_booking_route_resolves_to_viewset(self):
-        match = resolve("/api/clubs/example-club/bookings/")
+        match = resolve("/api/v1/clubs/example-club/bookings/")
 
         self.assertIs(match.func.cls, BookingViewSet)
 

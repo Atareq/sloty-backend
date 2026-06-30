@@ -5,6 +5,18 @@ from rest_framework import serializers
 
 from apps.bookings.models import Booking
 
+BOOKING_STATUS_TRANSITIONS = {
+    Booking.Status.HOLD: {
+        Booking.Status.CANCELLED,
+        Booking.Status.EXPIRED,
+    },
+    Booking.Status.CONFIRMED: {
+        Booking.Status.CANCELLED,
+        Booking.Status.COMPLETED,
+        Booking.Status.NO_SHOW,
+    },
+}
+
 
 def calculate_booking_price(court, start_time, end_time) -> Decimal:
     duration_minutes = (end_time - start_time).total_seconds() / 60
@@ -73,3 +85,36 @@ def create_booking(*, created_by, court, start_time, end_time, **booking_data):
             created_by=created_by,
             **booking_data,
         )
+
+
+def transition_booking_status(*, access, booking, target_status, actor):
+    with transaction.atomic():
+        locked_booking = (
+            Booking.objects.select_for_update()
+            .select_related("club", "court")
+            .get(pk=booking.pk)
+        )
+
+        if locked_booking.club_id != access.club.id:
+            raise serializers.ValidationError(
+                {"booking": "Booking must belong to the selected club."}
+            )
+        if not access.can_change_booking_status(locked_booking):
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied("You cannot change this booking status.")
+
+        allowed_targets = BOOKING_STATUS_TRANSITIONS.get(locked_booking.status, set())
+        if target_status not in allowed_targets:
+            raise serializers.ValidationError(
+                {
+                    "status": (
+                        f"Cannot transition booking from "
+                        f"{locked_booking.status} to {target_status}."
+                    )
+                }
+            )
+
+        locked_booking.status = target_status
+        locked_booking.save(update_fields=["status", "modified"])
+        return locked_booking

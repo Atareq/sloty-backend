@@ -1,6 +1,7 @@
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.accounts.models import User
 from apps.clubs.models import Club, ClubMembership
@@ -124,17 +125,25 @@ class MeAPITests(AccountAPITestCase):
 
 
 class JWTAPITests(AccountAPITestCase):
+    def obtain_token(self, username, **extra_data):
+        payload = {
+            "username": username,
+            "password": self.password,
+        }
+        payload.update(extra_data)
+        return self.client.post(
+            reverse("token_obtain_pair"),
+            payload,
+            format="json",
+        )
+
+    def decode_access(self, token):
+        return AccessToken(token)
+
     def test_active_user_can_obtain_token_without_club_slug(self):
         user = self.create_user(username="active-token-user")
 
-        response = self.client.post(
-            reverse("token_obtain_pair"),
-            {
-                "username": user.username,
-                "password": self.password,
-            },
-            format="json",
-        )
+        response = self.obtain_token(user.username)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("access", response.data)
@@ -145,10 +154,7 @@ class JWTAPITests(AccountAPITestCase):
 
         response = self.client.post(
             reverse("token_obtain_pair"),
-            {
-                "username": user.username,
-                "password": "wrong-password",
-            },
+            {"username": user.username, "password": "wrong-password"},
             format="json",
         )
 
@@ -157,16 +163,131 @@ class JWTAPITests(AccountAPITestCase):
     def test_inactive_user_cannot_obtain_token(self):
         user = self.create_user(username="inactive-token-user", is_active=False)
 
-        response = self.client.post(
-            reverse("token_obtain_pair"),
-            {
-                "username": user.username,
-                "password": self.password,
-            },
+        response = self.obtain_token(user.username)
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_global_normal_token_contains_base_custom_claims(self):
+        user = self.create_user(
+            username="claims-user",
+            first_name="Claims",
+            last_name="User",
+        )
+
+        response = self.obtain_token(user.username)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        claims = self.decode_access(response.data["access"])
+        self.assertEqual(claims["user_id"], user.id)
+        self.assertEqual(claims["role"], "")
+        self.assertEqual(claims["name"], "Claims User")
+        self.assertNotIn("club_id", claims)
+        self.assertNotIn("court_id", claims)
+
+    def test_platform_admin_token_has_platform_role(self):
+        admin = self.create_platform_admin(username="claims-admin")
+
+        response = self.obtain_token(admin.username)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        claims = self.decode_access(response.data["access"])
+        self.assertEqual(claims["role"], "PLATFORM_ADMIN")
+        self.assertEqual(claims["name"], admin.username)
+
+    def test_platform_admin_token_with_club_slug_includes_club_context(self):
+        admin = self.create_platform_admin(username="claims-admin-club")
+        club = self.create_club("Admin Claims Club", "admin-claims-club")
+
+        response = self.obtain_token(admin.username, club_slug=club.slug)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        claims = self.decode_access(response.data["access"])
+        self.assertEqual(claims["role"], "PLATFORM_ADMIN")
+        self.assertEqual(claims["club_id"], club.id)
+        self.assertNotIn("court_id", claims)
+
+    def test_owner_token_with_club_slug_has_owner_claims(self):
+        owner = self.create_user(username="claims-owner")
+        club = self.create_club("Owner Claims Club", "owner-claims-club")
+        self.create_membership(owner, club, ClubMembership.Role.OWNER)
+
+        response = self.obtain_token(owner.username, club_slug=club.slug)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        claims = self.decode_access(response.data["access"])
+        self.assertEqual(claims["role"], ClubMembership.Role.OWNER)
+        self.assertEqual(claims["club_id"], club.id)
+        self.assertNotIn("court_id", claims)
+
+    def test_manager_token_with_club_slug_has_manager_claims(self):
+        manager = self.create_user(username="claims-manager")
+        club = self.create_club("Manager Claims Club", "manager-claims-club")
+        self.create_membership(manager, club, ClubMembership.Role.MANAGER)
+
+        response = self.obtain_token(manager.username, club_slug=club.slug)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        claims = self.decode_access(response.data["access"])
+        self.assertEqual(claims["role"], ClubMembership.Role.MANAGER)
+        self.assertEqual(claims["club_id"], club.id)
+        self.assertNotIn("court_id", claims)
+
+    def test_staff_token_with_club_slug_has_staff_and_court_claims(self):
+        staff = self.create_user(username="claims-staff")
+        club = self.create_club("Staff Claims Club", "staff-claims-club")
+        court = self.create_court(club, "Staff Claims Court")
+        self.create_membership(staff, club, ClubMembership.Role.STAFF, court=court)
+
+        response = self.obtain_token(staff.username, club_slug=club.slug)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        claims = self.decode_access(response.data["access"])
+        self.assertEqual(claims["role"], ClubMembership.Role.STAFF)
+        self.assertEqual(claims["club_id"], club.id)
+        self.assertEqual(claims["court_id"], court.id)
+
+    def test_invalid_club_slug_is_rejected(self):
+        user = self.create_user(username="invalid-club-token-user")
+
+        response = self.obtain_token(user.username, club_slug="missing-club")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("club_slug", response.data)
+
+    def test_club_slug_without_membership_is_rejected_for_non_platform_user(self):
+        user = self.create_user(username="unauthorized-club-token-user")
+        club = self.create_club("Unauthorized Claims Club", "unauthorized-claims")
+
+        response = self.obtain_token(user.username, club_slug=club.slug)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("club_slug", response.data)
+
+    def test_refresh_preserves_custom_claims(self):
+        staff = self.create_user(username="refresh-claims-staff")
+        club = self.create_club("Refresh Claims Club", "refresh-claims")
+        court = self.create_court(club, "Refresh Claims Court")
+        self.create_membership(staff, club, ClubMembership.Role.STAFF, court=court)
+        token_response = self.obtain_token(staff.username, club_slug=club.slug)
+
+        refresh_response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": token_response.data["refresh"]},
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(refresh_response.status_code, status.HTTP_200_OK)
+        claims = self.decode_access(refresh_response.data["access"])
+        self.assertEqual(claims["role"], ClubMembership.Role.STAFF)
+        self.assertEqual(claims["club_id"], club.id)
+        self.assertEqual(claims["court_id"], court.id)
+
+    def test_user_model_does_not_store_club_scoped_role_fields(self):
+        user_fields = {field.name for field in User._meta.get_fields()}
+
+        self.assertNotIn("role", user_fields)
+        self.assertNotIn("club", user_fields)
+        self.assertNotIn("court", user_fields)
 
 
 class PlatformUserManagementAPITests(AccountAPITestCase):

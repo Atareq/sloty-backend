@@ -8,15 +8,21 @@ from rest_framework.mixins import (
 )
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.viewsets import GenericViewSet
+from rest_framework_simplejwt.views import TokenObtainPairView
 
 from apps.accounts.models import User
 from apps.accounts.permissions import IsPlatformSuperAdmin
 from apps.accounts.serializers import (
+    SlotyTokenObtainPairSerializer,
     UserCreateSerializer,
     UserListSerializer,
     UserMeSerializer,
     UserUpdateSerializer,
 )
+
+
+class SlotyTokenObtainPairView(TokenObtainPairView):
+    serializer_class = SlotyTokenObtainPairSerializer
 
 
 @extend_schema(tags=["Accounts"], responses=UserMeSerializer)

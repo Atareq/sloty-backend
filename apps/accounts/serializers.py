@@ -1,7 +1,94 @@
 from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from apps.accounts.models import User
-from apps.clubs.models import ClubMembership
+from apps.clubs.models import Club, ClubMembership
+
+
+def get_token_name(user):
+    return user.get_full_name() or user.username
+
+
+def get_membership_for_token_context(*, user, club):
+    role_order = {
+        ClubMembership.Role.OWNER: 0,
+        ClubMembership.Role.MANAGER: 1,
+        ClubMembership.Role.STAFF: 2,
+    }
+    memberships = list(
+        ClubMembership.objects.filter(
+            user=user,
+            club=club,
+            is_active=True,
+        )
+        .select_related("court")
+        .order_by("id")
+    )
+    if not memberships:
+        return None
+    return sorted(memberships, key=lambda item: role_order[item.role])[0]
+
+
+def build_token_claims(*, user, club_slug=None):
+    claims = {
+        "user_id": user.id,
+        "role": "",
+        "name": get_token_name(user),
+    }
+
+    if user.is_platform_super_admin():
+        claims["role"] = "PLATFORM_ADMIN"
+
+    if not club_slug:
+        return claims
+
+    try:
+        club = Club.objects.get(slug=club_slug)
+    except Club.DoesNotExist as exc:
+        raise serializers.ValidationError(
+            {"club_slug": "Invalid club context."}
+        ) from exc
+
+    if user.is_platform_super_admin():
+        claims["club_id"] = club.id
+        return claims
+
+    membership = get_membership_for_token_context(user=user, club=club)
+    if membership is None:
+        raise serializers.ValidationError(
+            {"club_slug": "User has no active membership in this club."}
+        )
+
+    claims["role"] = membership.role
+    claims["club_id"] = club.id
+    if membership.role == ClubMembership.Role.STAFF and membership.court_id:
+        claims["court_id"] = membership.court_id
+    return claims
+
+
+class SlotyTokenObtainPairSerializer(TokenObtainPairSerializer):
+    club_slug = serializers.SlugField(required=False, allow_blank=True)
+
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        for key, value in build_token_claims(user=user).items():
+            token[key] = value
+        return token
+
+    def validate(self, attrs):
+        club_slug = attrs.pop("club_slug", "")
+        super().validate(attrs)
+
+        claims = build_token_claims(user=self.user, club_slug=club_slug or None)
+        refresh = self.get_token(self.user)
+        for key, value in claims.items():
+            refresh[key] = value
+
+        return {
+            "refresh": str(refresh),
+            "access": str(refresh.access_token),
+        }
 
 
 class UserMembershipClubSerializer(serializers.Serializer):

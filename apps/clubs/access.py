@@ -113,6 +113,13 @@ class ClubAccessContext:
     def can_create_booking_for_court(self, court):
         return self.can_access_court(court)
 
+    def can_change_booking_status(self, booking):
+        return (
+            booking is not None
+            and booking.club_id == self.club.id
+            and self.can_access_court(booking.court)
+        )
+
     def can_create_transaction_for_booking(self, booking):
         return (
             booking is not None
