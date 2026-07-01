@@ -10,7 +10,7 @@ from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court
 from apps.transactions.models import Transaction
 
-DEMO_PASSWORD = "test-pass-123"
+DEMO_PASSWORD = "123"
 
 
 class Command(BaseCommand):
