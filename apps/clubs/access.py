@@ -134,6 +134,23 @@ class ClubAccessContext:
             and self.can_access_court(transaction.court)
         )
 
+    def can_manage_settlements(self):
+        if self.is_platform_admin or self.is_owner:
+            return True
+        return self.is_manager and self.club.manager_can_settle_transactions
+
+    def can_create_settlement(self, court=None):
+        if court is not None and court.club_id != self.club.id:
+            return False
+        return self.can_manage_settlements()
+
+    def can_access_settlement(self, settlement):
+        return (
+            settlement is not None
+            and settlement.club_id == self.club.id
+            and self.can_manage_settlements()
+        )
+
     def scoped_courts_queryset(self):
         from apps.courts.models import Court
 
@@ -158,6 +175,14 @@ class ClubAccessContext:
         from apps.transactions.models import Transaction
 
         return Transaction.objects.filter(court__in=self.scoped_courts_queryset())
+
+    def scoped_settlements_queryset(self):
+        from apps.settlements.models import Settlement
+
+        queryset = Settlement.objects.filter(club=self.club)
+        if self.can_manage_settlements():
+            return queryset
+        return queryset.none()
 
     def scoped_memberships_queryset(self):
         queryset = ClubMembership.objects.filter(club=self.club)

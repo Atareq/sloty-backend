@@ -5,6 +5,7 @@ from apps.accounts.models import User
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court
+from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
 
@@ -28,7 +29,7 @@ class SeedDemoDataCommandTests(TestCase):
             3,
         )
         self.assertEqual(
-            Booking.objects.filter(club__slug="demo-football-club").count(), 7
+            Booking.objects.filter(club__slug="demo-football-club").count(), 11
         )
         self.assertEqual(
             set(
@@ -48,6 +49,16 @@ class SeedDemoDataCommandTests(TestCase):
         )
         self.assertEqual(
             Transaction.objects.filter(club__slug="demo-football-club").count(),
+            6,
+        )
+        self.assertEqual(
+            Settlement.objects.filter(club__slug="demo-football-club").count(),
+            2,
+        )
+        self.assertEqual(
+            SettlementTransaction.objects.filter(
+                settlement__club__slug="demo-football-club"
+            ).count(),
             2,
         )
 
@@ -60,6 +71,8 @@ class SeedDemoDataCommandTests(TestCase):
             "memberships": ClubMembership.objects.count(),
             "bookings": Booking.objects.count(),
             "transactions": Transaction.objects.count(),
+            "settlements": Settlement.objects.count(),
+            "lines": SettlementTransaction.objects.count(),
         }
 
         self.run_seed_command()
@@ -70,3 +83,5 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertEqual(ClubMembership.objects.count(), counts["memberships"])
         self.assertEqual(Booking.objects.count(), counts["bookings"])
         self.assertEqual(Transaction.objects.count(), counts["transactions"])
+        self.assertEqual(Settlement.objects.count(), counts["settlements"])
+        self.assertEqual(SettlementTransaction.objects.count(), counts["lines"])

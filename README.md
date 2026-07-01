@@ -124,6 +124,32 @@ Allowed transitions are `HOLD -> CANCELLED`, `HOLD -> EXPIRED`,
 `CONFIRMED -> CANCELLED`, `CONFIRMED -> COMPLETED`, and
 `CONFIRMED -> NO_SHOW`. Terminal statuses remain locked.
 
+## Sprint 6 Settlement Endpoints
+
+- `GET /api/v1/clubs/{club_slug}/settlements/`
+- `POST /api/v1/clubs/{club_slug}/settlements/`
+- `GET /api/v1/clubs/{club_slug}/settlements/{id}/`
+- `GET /api/v1/clubs/{club_slug}/settlements/preview/`
+- `POST /api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`
+
+Settlement preview summarizes unsettled transactions for a selected period
+without creating records. Settlement creation snapshots matching unsettled
+transactions into settlement lines. Mark-settled changes only `PENDING`
+settlements to `SETTLED`.
+
+Platform admins and owners can manage settlements. Managers can manage
+settlements only when the club has `manager_can_settle_transactions=True`.
+Staff cannot access settlement endpoints in Sprint 6.
+
+Useful settlement list filters:
+
+- `status`
+- `court`
+- `period_from`
+- `period_to`
+- `created_by`
+- `settled_by`
+
 ## Demo Seed Data
 
 Create local/demo data for Swagger or Postman testing:
@@ -140,7 +166,10 @@ The command is idempotent and local/dev only. It creates:
 - `staff_user`
 
 All demo users use password `test-pass-123`. The demo club slug is
-`demo-football-club`.
+`demo-football-club`. The seed command includes unsettled transactions plus
+pending and settled settlement examples for manual settlement testing.
+Use `platform_admin`, `owner_user`, or `manager_user` to test settlement
+endpoints for the demo club.
 
 Run tests:
 

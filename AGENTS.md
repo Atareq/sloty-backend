@@ -34,7 +34,7 @@ Current repo reality:
 - Current local apps package: `apps/`
 - Current implemented app: `apps/accounts/`
 - Current implemented domain apps: `apps/clubs/`, `apps/courts/`,
-  `apps/bookings/`, and `apps/transactions/`
+  `apps/bookings/`, `apps/transactions/`, and `apps/settlements/`
 - Current public API routes are versioned under `/api/v1/`
 - Current API foundation endpoints include `/api/v1/schema/`,
   `/api/v1/docs/`, `/api/v1/auth/token/`, and
@@ -56,9 +56,11 @@ Current repo reality:
   transaction
 - Sprint 5 implements manual booking lifecycle action endpoints, API v1
   routing, custom JWT convenience claims, and local demo seed data
+- Sprint 6 implements club-scoped settlement/cash-closing for already-recorded
+  transactions
 - Planned shared app name is `apps/common/`
-- Domain apps beyond `accounts`, `clubs`, `courts`, `bookings`, and
-  `transactions` are not implemented yet
+- Domain apps beyond `accounts`, `clubs`, `courts`, `bookings`,
+  `transactions`, and `settlements` are not implemented yet
 
 Planned project direction:
 
@@ -102,8 +104,9 @@ Current implemented app:
 - `Club` has a unique `slug` used by club-scoped business API URLs.
 - `Club` stores `manager_can_settle_transactions` and
   `manager_can_change_pricing` flags. `manager_can_change_pricing` currently
-  gates manager updates to a court's `default_price`. Settlement behavior is
-  still future work even though the flag exists.
+  gates manager updates to a court's `default_price`.
+  `manager_can_settle_transactions` gates manager settlement access in
+  Sprint 6.
 - `ClubMembership` is the single source of OWNER, MANAGER, and STAFF authority
   inside a club. STAFF memberships are tied to a court through
   `ClubMembership.court`.
@@ -135,9 +138,9 @@ Current implemented app:
   club, and booking payment summary support.
 - Transaction creation confirms a HOLD booking to CONFIRMED. Other booking
   lifecycle actions are handled by the Sprint 5 booking lifecycle service.
-- Settlements, corrections, refunds, reversals, dashboards, reports, audit logs,
-  online payment gateway logic, and platform commission calculation remain
-  future work.
+- Corrections, refunds, reversals, dashboards, reports, audit logs, online
+  payment gateway logic, and platform commission calculation remain future
+  work.
 - Business APIs for memberships, courts, working hours, bookings, and
   transactions are club-scoped under `/api/v1/clubs/{club_slug}/...`.
 - Login remains global. The frontend logs in, calls `/api/v1/me/` to read active
@@ -326,8 +329,41 @@ Rules for the flow:
   correction, refund, reversal, or settlement endpoint exists in Sprint 4.
 - Transaction creation may change booking status only from HOLD to CONFIRMED.
   Do not implement other booking lifecycle actions in Sprint 4.
-- `manager_can_settle_transactions` remains reserved for future settlement
-  behavior and must not control Sprint 4 payment recording.
+
+`apps/settlements/`
+
+- Sprint 6 settlement/cash-closing app.
+- Contains `Settlement`, `SettlementTransaction`, settlement serializers,
+  settlement viewsets, settlement filters, settlement services, and settlement
+  admin registration.
+- Settlement APIs are club-scoped under
+  `/api/v1/clubs/{club_slug}/settlements/`.
+- Settlement access is centralized through
+  `apps/clubs/access.py -> ClubAccessContext`.
+- `SettlementViewSet` must use `ClubScopedAccessMixin`.
+- Settlement serializers must receive `context["club_access"]`.
+- Settlement views should call `access.scoped_settlements_queryset()` for
+  list/detail scoping.
+- Platform admins and owners can preview, create, list, retrieve, and mark
+  settlements as settled in the selected club.
+- Managers can access settlements only when
+  `club.manager_can_settle_transactions=True`.
+- Staff cannot access settlement endpoints in Sprint 6.
+- `SettlementTransaction.transaction` is a `OneToOneField` to `Transaction`;
+  this prevents one transaction from being included in more than one
+  settlement while keeping transaction rows immutable.
+- Settlements include already-recorded transactions by club, optional court,
+  period, and unsettled state. Booking lifecycle status is not used to decide
+  settlement inclusion in Sprint 6.
+- Settlements do not implement refunds, reversals, corrections, commission,
+  payout automation, dashboards, audit logs, or automatic settlement jobs.
+- Settlement filters live in `apps/settlements/filters.py` and must follow the
+  standard FilterSet pattern.
+- `seed_demo_data` includes minimal settlement examples: unsettled
+  transactions, one pending settlement, and one settled settlement.
+- Do not create `apps/settlements/permissions.py` by default. If a settlement
+  permission class is necessary, keep it as a thin centralized wrapper in
+  `apps/clubs/permissions.py`.
 
 `apps/common/`
 
@@ -630,6 +666,12 @@ Run Sprint 4 transaction tests:
 pytest tests/transactions
 ```
 
+Run Sprint 6 settlement tests:
+
+```bash
+pytest tests/settlements
+```
+
 Seed local/demo data for manual endpoint testing:
 
 ```bash
@@ -684,7 +726,10 @@ Notes:
   `/api/v1/clubs/{club_slug}/bookings/{id}/complete/`,
   `/api/v1/clubs/{club_slug}/bookings/{id}/no-show/`,
   `/api/v1/clubs/{club_slug}/bookings/{id}/expire/`, and
-  `/api/v1/clubs/{club_slug}/transactions/`.
+  `/api/v1/clubs/{club_slug}/transactions/`,
+  `/api/v1/clubs/{club_slug}/settlements/`,
+  `/api/v1/clubs/{club_slug}/settlements/preview/`, and
+  `/api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`.
 - Global API routes currently include `/api/v1/me/`, `/api/v1/users/`,
   `/api/v1/auth/token/`, `/api/v1/auth/token/refresh/`, `/api/v1/schema/`, and
   `/api/v1/docs/`.
