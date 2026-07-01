@@ -125,6 +125,25 @@ def create_booking_transaction(
                 notes=notes,
                 created_by=created_by,
             )
+            from apps.audit.models import AuditLog
+            from apps.audit.services import record_audit_log
+
+            record_audit_log(
+                club=created_transaction.club,
+                court=created_transaction.court,
+                actor=created_by,
+                action=AuditLog.Action.TRANSACTION_CREATED,
+                entity_type="Transaction",
+                entity_id=created_transaction.id,
+                after_data={
+                    "transaction_id": created_transaction.id,
+                    "booking_id": created_transaction.booking_id,
+                    "court_id": created_transaction.court_id,
+                    "amount": str(created_transaction.amount),
+                    "payment_method": created_transaction.payment_method,
+                    "payment_reference": created_transaction.payment_reference,
+                },
+            )
 
             if locked_booking.status == Booking.Status.HOLD:
                 locked_booking.status = Booking.Status.CONFIRMED

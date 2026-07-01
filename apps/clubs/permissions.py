@@ -111,3 +111,11 @@ class CanManageClubSettlements(BasePermission):
 
     def has_object_permission(self, request, view, obj) -> bool:
         return view.get_access_context().can_access_settlement(obj)
+
+
+class CanViewClubAuditLogs(BasePermission):
+    def has_permission(self, request, view) -> bool:
+        return view.get_access_context().can_view_audit_logs()
+
+    def has_object_permission(self, request, view, obj) -> bool:
+        return view.get_access_context().can_access_audit_log(obj)

@@ -16,6 +16,22 @@ BOOKING_STATUS_TRANSITIONS = {
         Booking.Status.NO_SHOW,
     },
 }
+BOOKING_AUDIT_ACTIONS = {
+    Booking.Status.CANCELLED: "BOOKING_CANCELLED",
+    Booking.Status.COMPLETED: "BOOKING_COMPLETED",
+    Booking.Status.NO_SHOW: "BOOKING_NO_SHOW",
+    Booking.Status.EXPIRED: "BOOKING_EXPIRED",
+}
+
+
+def booking_audit_snapshot(booking):
+    return {
+        "status": booking.status,
+        "court_id": booking.court_id,
+        "start_time": booking.start_time.isoformat(),
+        "end_time": booking.end_time.isoformat(),
+        "total_price": str(booking.total_price),
+    }
 
 
 def calculate_booking_price(court, start_time, end_time) -> Decimal:
@@ -75,7 +91,7 @@ def create_booking(*, created_by, court, start_time, end_time, **booking_data):
             end_time,
         )
 
-        return Booking.objects.create(
+        created_booking = Booking.objects.create(
             club=locked_court.club,
             court=locked_court,
             start_time=start_time,
@@ -85,6 +101,19 @@ def create_booking(*, created_by, court, start_time, end_time, **booking_data):
             created_by=created_by,
             **booking_data,
         )
+        from apps.audit.models import AuditLog
+        from apps.audit.services import record_audit_log
+
+        record_audit_log(
+            club=created_booking.club,
+            court=created_booking.court,
+            actor=created_by,
+            action=AuditLog.Action.BOOKING_CREATED,
+            entity_type="Booking",
+            entity_id=created_booking.id,
+            after_data=booking_audit_snapshot(created_booking),
+        )
+        return created_booking
 
 
 def transition_booking_status(*, access, booking, target_status, actor):
@@ -115,6 +144,20 @@ def transition_booking_status(*, access, booking, target_status, actor):
                 }
             )
 
+        old_status = locked_booking.status
         locked_booking.status = target_status
         locked_booking.save(update_fields=["status", "modified"])
+        from apps.audit.models import AuditLog
+        from apps.audit.services import record_audit_log
+
+        record_audit_log(
+            club=locked_booking.club,
+            court=locked_booking.court,
+            actor=actor,
+            action=getattr(AuditLog.Action, BOOKING_AUDIT_ACTIONS[target_status]),
+            entity_type="Booking",
+            entity_id=locked_booking.id,
+            before_data={"status": old_status},
+            after_data={"status": target_status},
+        )
         return locked_booking

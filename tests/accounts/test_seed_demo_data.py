@@ -2,6 +2,7 @@ from django.core.management import call_command
 from django.test import TestCase
 
 from apps.accounts.models import User
+from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court
@@ -61,6 +62,10 @@ class SeedDemoDataCommandTests(TestCase):
             ).count(),
             2,
         )
+        self.assertEqual(
+            AuditLog.objects.filter(club__slug="demo-football-club").count(),
+            5,
+        )
 
     def test_seed_demo_data_is_idempotent(self):
         self.run_seed_command()
@@ -73,6 +78,7 @@ class SeedDemoDataCommandTests(TestCase):
             "transactions": Transaction.objects.count(),
             "settlements": Settlement.objects.count(),
             "lines": SettlementTransaction.objects.count(),
+            "audit_logs": AuditLog.objects.count(),
         }
 
         self.run_seed_command()
@@ -85,3 +91,4 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertEqual(Transaction.objects.count(), counts["transactions"])
         self.assertEqual(Settlement.objects.count(), counts["settlements"])
         self.assertEqual(SettlementTransaction.objects.count(), counts["lines"])
+        self.assertEqual(AuditLog.objects.count(), counts["audit_logs"])

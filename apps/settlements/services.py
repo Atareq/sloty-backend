@@ -130,6 +130,25 @@ def create_settlement(
                     for transaction_obj in candidates
                 ]
             )
+            from apps.audit.models import AuditLog
+            from apps.audit.services import record_audit_log
+
+            record_audit_log(
+                club=created_settlement.club,
+                court=created_settlement.court,
+                actor=created_by,
+                action=AuditLog.Action.SETTLEMENT_CREATED,
+                entity_type="Settlement",
+                entity_id=created_settlement.id,
+                after_data={
+                    "settlement_id": created_settlement.id,
+                    "court_id": created_settlement.court_id,
+                    "period_start": created_settlement.period_start.isoformat(),
+                    "period_end": created_settlement.period_end.isoformat(),
+                    "total_amount": str(created_settlement.total_amount),
+                    "transaction_count": created_settlement.transaction_count,
+                },
+            )
             return created_settlement
     except IntegrityError as exc:
         raise serializers.ValidationError(
@@ -158,5 +177,22 @@ def mark_settlement_settled(*, access, settlement, actor):
         locked_settlement.settled_at = timezone.now()
         locked_settlement.save(
             update_fields=["status", "settled_by", "settled_at", "modified"]
+        )
+        from apps.audit.models import AuditLog
+        from apps.audit.services import record_audit_log
+
+        record_audit_log(
+            club=locked_settlement.club,
+            court=locked_settlement.court,
+            actor=actor,
+            action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
+            entity_type="Settlement",
+            entity_id=locked_settlement.id,
+            before_data={"status": Settlement.Status.PENDING},
+            after_data={
+                "status": Settlement.Status.SETTLED,
+                "settled_at": locked_settlement.settled_at.isoformat(),
+                "settled_by_id": actor.id if actor else None,
+            },
         )
         return locked_settlement

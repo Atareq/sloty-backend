@@ -151,6 +151,16 @@ class ClubAccessContext:
             and self.can_manage_settlements()
         )
 
+    def can_view_audit_logs(self):
+        return self.is_platform_admin or self.is_owner or self.is_manager
+
+    def can_access_audit_log(self, audit_log):
+        return (
+            audit_log is not None
+            and audit_log.club_id == self.club.id
+            and self.can_view_audit_logs()
+        )
+
     def scoped_courts_queryset(self):
         from apps.courts.models import Court
 
@@ -181,6 +191,14 @@ class ClubAccessContext:
 
         queryset = Settlement.objects.filter(club=self.club)
         if self.can_manage_settlements():
+            return queryset
+        return queryset.none()
+
+    def scoped_audit_logs_queryset(self):
+        from apps.audit.models import AuditLog
+
+        queryset = AuditLog.objects.filter(club=self.club)
+        if self.can_view_audit_logs():
             return queryset
         return queryset.none()
 

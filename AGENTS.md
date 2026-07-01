@@ -34,7 +34,8 @@ Current repo reality:
 - Current local apps package: `apps/`
 - Current implemented app: `apps/accounts/`
 - Current implemented domain apps: `apps/clubs/`, `apps/courts/`,
-  `apps/bookings/`, `apps/transactions/`, and `apps/settlements/`
+  `apps/bookings/`, `apps/transactions/`, `apps/settlements/`, and
+  `apps/audit/`
 - Current public API routes are versioned under `/api/v1/`
 - Current API foundation endpoints include `/api/v1/schema/`,
   `/api/v1/docs/`, `/api/v1/auth/token/`, and
@@ -58,9 +59,11 @@ Current repo reality:
   routing, custom JWT convenience claims, and local demo seed data
 - Sprint 6 implements club-scoped settlement/cash-closing for already-recorded
   transactions
+- Sprint 7 implements club-scoped read-only audit logs for important business
+  actions
 - Planned shared app name is `apps/common/`
 - Domain apps beyond `accounts`, `clubs`, `courts`, `bookings`,
-  `transactions`, and `settlements` are not implemented yet
+  `transactions`, `settlements`, and `audit` are not implemented yet
 
 Planned project direction:
 
@@ -131,16 +134,15 @@ Current implemented app:
   `outside_working_hours` flag is stored.
 - Sprint 5 booking lifecycle actions are manual endpoints on the existing
   `BookingViewSet`: cancel, complete, no-show, and expire. Rescheduling,
-  automatic hold expiry jobs, settlements, dashboards, and audit logs remain
-  future sprint work.
+  automatic hold expiry jobs, settlements, and dashboards remain future sprint
+  work.
 - `apps/transactions/` contains immutable booking transaction recording,
   transaction create/list/detail APIs, payment reference uniqueness inside a
   club, and booking payment summary support.
 - Transaction creation confirms a HOLD booking to CONFIRMED. Other booking
   lifecycle actions are handled by the Sprint 5 booking lifecycle service.
-- Corrections, refunds, reversals, dashboards, reports, audit logs, online
-  payment gateway logic, and platform commission calculation remain future
-  work.
+- Corrections, refunds, reversals, dashboards, reports, online payment gateway
+  logic, and platform commission calculation remain future work.
 - Business APIs for memberships, courts, working hours, bookings, and
   transactions are club-scoped under `/api/v1/clubs/{club_slug}/...`.
 - Login remains global. The frontend logs in, calls `/api/v1/me/` to read active
@@ -301,8 +303,8 @@ Rules for the flow:
 - Terminal statuses `COMPLETED`, `CANCELLED`, `NO_SHOW`, and `EXPIRED` cannot
   transition further.
 - Do not place transaction creation logic, settlement, rescheduling,
-  automatic hold expiry jobs, dashboard, marketplace, notification, or
-  audit-log behavior in `bookings`.
+  automatic hold expiry jobs, dashboard, marketplace, or notification behavior
+  in `bookings`.
 
 `apps/transactions/`
 
@@ -356,13 +358,39 @@ Rules for the flow:
   period, and unsettled state. Booking lifecycle status is not used to decide
   settlement inclusion in Sprint 6.
 - Settlements do not implement refunds, reversals, corrections, commission,
-  payout automation, dashboards, audit logs, or automatic settlement jobs.
+  payout automation, dashboards, or automatic settlement jobs.
 - Settlement filters live in `apps/settlements/filters.py` and must follow the
   standard FilterSet pattern.
 - `seed_demo_data` includes minimal settlement examples: unsettled
   transactions, one pending settlement, and one settled settlement.
 - Do not create `apps/settlements/permissions.py` by default. If a settlement
   permission class is necessary, keep it as a thin centralized wrapper in
+  `apps/clubs/permissions.py`.
+
+`apps/audit/`
+
+- Sprint 7 audit/activity trail app.
+- Contains `AuditLog`, audit serializers, audit viewsets, audit filters, audit
+  services, and audit admin registration.
+- Audit APIs are club-scoped under
+  `/api/v1/clubs/{club_slug}/audit-logs/`.
+- Audit access is centralized through
+  `apps/clubs/access.py -> ClubAccessContext`.
+- `AuditLogViewSet` must use `ClubScopedAccessMixin`.
+- Platform admins, owners, and managers can list/retrieve audit logs in the
+  selected club. Staff cannot access audit logs in Sprint 7.
+- Audit logs are append-only and read-only through the API. Do not expose API
+  create, update, or delete actions for audit logs.
+- Audit logs must be created explicitly from service-layer business actions,
+  not Django signals.
+- Audited Sprint 7 actions are booking create/update/lifecycle transitions,
+  transaction creation, settlement creation, and mark-settled.
+- Audit filters live in `apps/audit/filters.py` and must follow the standard
+  FilterSet pattern.
+- Audit logging does not implement reports, dashboards, exports, correction
+  workflows, or broad field-history tracking.
+- Do not create `apps/audit/permissions.py` by default. If an audit permission
+  class is necessary, keep it as a thin centralized wrapper in
   `apps/clubs/permissions.py`.
 
 `apps/common/`
@@ -672,6 +700,12 @@ Run Sprint 6 settlement tests:
 pytest tests/settlements
 ```
 
+Run Sprint 7 audit tests:
+
+```bash
+pytest tests/audit
+```
+
 Seed local/demo data for manual endpoint testing:
 
 ```bash
@@ -729,7 +763,9 @@ Notes:
   `/api/v1/clubs/{club_slug}/transactions/`,
   `/api/v1/clubs/{club_slug}/settlements/`,
   `/api/v1/clubs/{club_slug}/settlements/preview/`, and
-  `/api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`.
+  `/api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`,
+  `/api/v1/clubs/{club_slug}/audit-logs/`, and
+  `/api/v1/clubs/{club_slug}/audit-logs/{id}/`.
 - Global API routes currently include `/api/v1/me/`, `/api/v1/users/`,
   `/api/v1/auth/token/`, `/api/v1/auth/token/refresh/`, `/api/v1/schema/`, and
   `/api/v1/docs/`.

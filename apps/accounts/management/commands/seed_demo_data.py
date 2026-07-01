@@ -5,6 +5,7 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from apps.accounts.models import User
+from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court
@@ -24,13 +25,22 @@ class Command(BaseCommand):
         self.create_memberships(users, club, courts)
         bookings = self.create_bookings(club, courts)
         transactions = self.create_transactions(users, bookings)
-        self.create_settlements(users, club, courts, transactions)
+        settlements = self.create_settlements(users, club, courts, transactions)
+        audit_logs = self.create_audit_logs(
+            users,
+            club,
+            courts,
+            bookings,
+            transactions,
+            settlements,
+        )
 
         self.stdout.write(
             self.style.SUCCESS(
                 "Seeded demo data: users=4, clubs=1, courts=2, "
                 f"memberships=3, bookings={len(bookings)}, "
-                f"transactions={len(transactions)}, settlements=2"
+                f"transactions={len(transactions)}, settlements=2, "
+                f"audit_logs={len(audit_logs)}"
             )
         )
         self.stdout.write(
@@ -259,3 +269,95 @@ class Command(BaseCommand):
                 "amount": transactions["DEMO-ALREADY-SETTLED-001"].amount,
             },
         )
+        return {
+            "pending": pending_settlement,
+            "settled": settled_settlement,
+        }
+
+    def create_audit_logs(
+        self, users, club, courts, bookings, transactions, settlements
+    ):
+        specs = (
+            (
+                AuditLog.Action.BOOKING_CREATED,
+                "Booking",
+                bookings["+201000000101"].id,
+                users["staff_user"],
+                courts["Demo Court 1"],
+                {},
+                {"status": Booking.Status.HOLD},
+                {"seed_key": "DEMO-AUDIT-BOOKING-CREATED"},
+            ),
+            (
+                AuditLog.Action.BOOKING_CANCELLED,
+                "Booking",
+                bookings["+201000000104"].id,
+                users["manager_user"],
+                courts["Demo Court 1"],
+                {"status": Booking.Status.CONFIRMED},
+                {"status": Booking.Status.CANCELLED},
+                {"seed_key": "DEMO-AUDIT-BOOKING-CANCELLED"},
+            ),
+            (
+                AuditLog.Action.TRANSACTION_CREATED,
+                "Transaction",
+                transactions["DEMO-PARTIAL-001"].id,
+                users["staff_user"],
+                courts["Demo Court 1"],
+                {},
+                {
+                    "transaction_id": transactions["DEMO-PARTIAL-001"].id,
+                    "amount": str(transactions["DEMO-PARTIAL-001"].amount),
+                },
+                {"seed_key": "DEMO-AUDIT-TRANSACTION-CREATED"},
+            ),
+            (
+                AuditLog.Action.SETTLEMENT_CREATED,
+                "Settlement",
+                settlements["pending"].id,
+                users["owner_user"],
+                courts["Demo Court 1"],
+                {},
+                {
+                    "settlement_id": settlements["pending"].id,
+                    "transaction_count": settlements["pending"].transaction_count,
+                },
+                {"seed_key": "DEMO-AUDIT-SETTLEMENT-CREATED"},
+            ),
+            (
+                AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
+                "Settlement",
+                settlements["settled"].id,
+                users["platform_admin"],
+                courts["Demo Court 1"],
+                {"status": Settlement.Status.PENDING},
+                {"status": Settlement.Status.SETTLED},
+                {"seed_key": "DEMO-AUDIT-SETTLEMENT-MARKED-SETTLED"},
+            ),
+        )
+        audit_logs = {}
+        for (
+            action,
+            entity_type,
+            entity_id,
+            actor,
+            court,
+            before_data,
+            after_data,
+            metadata,
+        ) in specs:
+            audit_log, _ = AuditLog.objects.get_or_create(
+                club=club,
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                defaults={
+                    "court": court,
+                    "actor": actor,
+                    "before_data": before_data,
+                    "after_data": after_data,
+                    "metadata": metadata,
+                },
+            )
+            audit_logs[metadata["seed_key"]] = audit_log
+        return audit_logs

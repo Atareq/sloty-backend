@@ -1,9 +1,12 @@
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
+from apps.audit.models import AuditLog
+from apps.audit.services import record_audit_log
 from apps.bookings.models import Booking
 from apps.bookings.services import create_booking, validate_booking_duration
 
@@ -173,6 +176,32 @@ class BookingUpdateSerializer(serializers.ModelSerializer):
                 "This booking status cannot be edited in Sprint 3."
             )
         return attrs
+
+    def update(self, instance, validated_data):
+        before_data = {}
+        after_data = {}
+        for field, value in validated_data.items():
+            old_value = getattr(instance, field)
+            if old_value != value:
+                before_data[field] = str(old_value)
+                after_data[field] = str(value)
+
+        with transaction.atomic():
+            updated_booking = super().update(instance, validated_data)
+            if before_data:
+                request = self.context.get("request")
+                actor = getattr(request, "user", None)
+                record_audit_log(
+                    club=updated_booking.club,
+                    court=updated_booking.court,
+                    actor=actor,
+                    action=AuditLog.Action.BOOKING_UPDATED,
+                    entity_type="Booking",
+                    entity_id=updated_booking.id,
+                    before_data=before_data,
+                    after_data=after_data,
+                )
+            return updated_booking
 
     def to_representation(self, instance):
         return BookingDetailSerializer(instance, context=self.context).data

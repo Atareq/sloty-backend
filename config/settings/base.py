@@ -56,6 +56,7 @@ APPS = [
     "apps.bookings.apps.BookingsConfig",
     "apps.transactions.apps.TransactionsConfig",
     "apps.settlements.apps.SettlementsConfig",
+    "apps.audit.apps.AuditConfig",
 ]
 
 DEBUG_APPS = []
