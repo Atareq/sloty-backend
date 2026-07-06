@@ -361,8 +361,9 @@ Rules for the flow:
   payout automation, dashboards, or automatic settlement jobs.
 - Settlement filters live in `apps/settlements/filters.py` and must follow the
   standard FilterSet pattern.
-- `seed_demo_data` includes minimal settlement examples: unsettled
-  transactions, one pending settlement, and one settled settlement.
+- `seed_demo_data` maintains multi-club settlement examples: unsettled
+  transactions, pending settlements, and settled settlements for manual
+  settlement testing.
 - Do not create `apps/settlements/permissions.py` by default. If a settlement
   permission class is necessary, keep it as a thin centralized wrapper in
   `apps/clubs/permissions.py`.
@@ -780,7 +781,14 @@ Notes:
 - Seed data is for local/manual testing only and must not create production
   side effects.
 - Use predictable usernames, slugs, dates, and references.
-- Keep seed data minimal and aligned with currently implemented endpoints.
+- Maintain role-specific and club-specific demo users for multi-club testing.
+- Do not reuse active manager or staff demo users across clubs because current
+  membership constraints allow only one active manager or staff assignment per
+  user.
+- Keep seed data idempotent, non-destructive, and aligned with currently
+  implemented endpoints.
+- New API work should update `seed_demo_data` only when manual testing needs
+  new realistic data.
 - Do not seed future sprint concepts before they exist.
 - Do not add fixtures unless the project intentionally adopts fixtures.
 

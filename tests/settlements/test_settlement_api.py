@@ -757,7 +757,7 @@ class SettlementSeedSchemaTests(SettlementAPITestCase):
             Transaction.objects.filter(
                 club__slug="demo-football-club",
                 settlement_line__isnull=True,
-                payment_reference__in=["DEMO-UNSETTLED-001", "DEMO-UNSETTLED-002"],
+                payment_reference__in=["A-UNSETTLED-001", "A-UNSETTLED-002"],
             ).exists()
         )
 

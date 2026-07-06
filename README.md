@@ -174,25 +174,46 @@ Useful audit log filters:
 
 ## Demo Seed Data
 
-Create local/demo data for Swagger or Postman testing:
+Create richer local/demo data for Swagger or Postman testing:
 
 ```bash
 python manage.py seed_demo_data
 ```
 
-The command is idempotent and local/dev only. It creates:
+The command is idempotent and local/dev only. All demo users use password
+`test-pass-123`.
+
+Main users:
 
 - `platform_admin`
-- `owner_user`
-- `manager_user`
-- `staff_user`
+- `owner_a`, `manager_a`, `staff_a`
+- `owner_b`, `manager_b`, `staff_b`
+- `owner_c`, `manager_c`, `staff_c`
 
-All demo users use password `test-pass-123`. The demo club slug is
-`demo-football-club`. The seed command includes unsettled transactions plus
-pending and settled settlement examples for manual settlement testing. It also
-includes audit log examples for manual audit list/detail and filter testing.
-Use `platform_admin`, `owner_user`, or `manager_user` to test settlement
-and audit endpoints for the demo club.
+Main clubs:
+
+- `demo-football-club`: happy-path testing; managers can settle and change
+  pricing.
+- `demo-restricted-club`: restricted manager settlement and pricing flags.
+- `demo-other-club`: cross-club scoping checks.
+
+Token examples:
+
+```json
+{"username": "staff_a", "password": "test-pass-123"}
+```
+
+```json
+{
+  "username": "staff_a",
+  "password": "test-pass-123",
+  "club_slug": "demo-football-club"
+}
+```
+
+The seed command includes role-specific memberships, two courts per club,
+working hours, bookings across all statuses, transactions, pending and settled
+settlements, unsettled transactions for preview testing, and audit log examples.
 
 Run tests:
 
