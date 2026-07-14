@@ -5,6 +5,14 @@ from django.db.models import Q
 from django.utils.text import slugify
 from phonenumber_field.modelfields import PhoneNumberField
 
+from apps.common.egypt_locations import (
+    get_all_city_choices,
+    get_governorate_choices,
+    is_valid_city,
+    is_valid_city_for_governorate,
+    is_valid_governorate,
+)
+
 
 def generate_unique_club_slug(name: str, *, exclude_pk=None) -> str:
     base_slug = slugify(name) or "club"
@@ -22,8 +30,16 @@ def generate_unique_club_slug(name: str, *, exclude_pk=None) -> str:
 class Club(models.Model):
     name = models.CharField(max_length=255, db_index=True)
     slug = models.SlugField(max_length=120, unique=True, db_index=True)
-    city = models.CharField(max_length=120, db_index=True)
-    area = models.CharField(max_length=120)
+    governorate = models.CharField(
+        max_length=64,
+        choices=get_governorate_choices(),
+        db_index=True,
+    )
+    city = models.CharField(
+        max_length=120,
+        choices=get_all_city_choices(),
+        db_index=True,
+    )
     address = models.TextField(blank=True)
     phone_number = PhoneNumberField(blank=True, null=True)
     notes = models.TextField(blank=True)
@@ -54,6 +70,21 @@ class Club(models.Model):
         if not self.slug:
             self.slug = generate_unique_club_slug(self.name, exclude_pk=self.pk)
         super().save(*args, **kwargs)
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        if not is_valid_governorate(self.governorate):
+            errors["governorate"] = "Invalid governorate choice."
+        if not is_valid_city(self.city):
+            errors["city"] = "Invalid city choice."
+        elif self.governorate and not is_valid_city_for_governorate(
+            self.governorate,
+            self.city,
+        ):
+            errors["city"] = "City must belong to the selected governorate."
+        if errors:
+            raise ValidationError(errors)
 
 
 class ClubMembership(models.Model):

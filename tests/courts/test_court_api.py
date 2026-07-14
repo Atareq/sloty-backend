@@ -23,8 +23,8 @@ class CourtAPITestCase(APITestCase):
     def create_club(self, name: str, slug: str | None = None, **extra_fields) -> Club:
         data = {
             "name": name,
-            "city": "Assiut",
-            "area": "Downtown",
+            "governorate": "ASSIUT",
+            "city": "ASSIUT_MARKAZ",
         }
         if slug is not None:
             data["slug"] = slug

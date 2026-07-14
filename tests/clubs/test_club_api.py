@@ -24,8 +24,8 @@ class ClubAPITestCase(APITestCase):
     def create_club(self, name: str, slug: str | None = None, **extra_fields) -> Club:
         data = {
             "name": name,
-            "city": "Assiut",
-            "area": "Downtown",
+            "governorate": "ASSIUT",
+            "city": "ASSIUT_MARKAZ",
         }
         if slug is not None:
             data["slug"] = slug
@@ -88,8 +88,8 @@ class ClubAPITests(ClubAPITestCase):
             reverse("club-list"),
             {
                 "name": "El-Nasr Club",
-                "city": "Assiut",
-                "area": "West",
+                "governorate": "ASSIUT",
+                "city": "ASSIUT_MARKAZ",
                 "address": "Main street",
             },
             format="json",
@@ -99,7 +99,62 @@ class ClubAPITests(ClubAPITestCase):
         club = Club.objects.get(name="El-Nasr Club")
         self.assertEqual(club.created_by, self.platform_admin)
         self.assertEqual(club.slug, "el-nasr-club")
+        self.assertEqual(club.governorate, "ASSIUT")
+        self.assertEqual(club.city, "ASSIUT_MARKAZ")
         self.assertEqual(response.data["slug"], "el-nasr-club")
+        self.assertEqual(response.data["governorate"], "ASSIUT")
+        self.assertEqual(response.data["city"], "ASSIUT_MARKAZ")
+
+    def test_create_club_with_invalid_governorate_fails(self):
+        self.authenticate_platform_admin()
+
+        response = self.client.post(
+            reverse("club-list"),
+            {
+                "name": "Invalid Governorate Club",
+                "governorate": "UNKNOWN",
+                "city": "ASSIUT_MARKAZ",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("governorate", response.data)
+
+    def test_create_club_with_invalid_city_fails(self):
+        self.authenticate_platform_admin()
+
+        response = self.client.post(
+            reverse("club-list"),
+            {
+                "name": "Invalid City Club",
+                "governorate": "ASSIUT",
+                "city": "Assiut",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("city", response.data)
+
+    def test_create_club_with_city_from_another_governorate_fails(self):
+        self.authenticate_platform_admin()
+
+        response = self.client.post(
+            reverse("club-list"),
+            {
+                "name": "Wrong Governorate City Club",
+                "governorate": "ASSIUT",
+                "city": "SOHAG_MARKAZ",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["city"][0],
+            "City must belong to the selected governorate.",
+        )
 
     def test_club_slug_can_be_provided_on_create(self):
         self.authenticate_platform_admin()
@@ -109,8 +164,8 @@ class ClubAPITests(ClubAPITestCase):
             {
                 "name": "Custom Slug Club",
                 "slug": "custom-club",
-                "city": "Assiut",
-                "area": "West",
+                "governorate": "ASSIUT",
+                "city": "ASSIUT_MARKAZ",
             },
             format="json",
         )
@@ -153,6 +208,69 @@ class ClubAPITests(ClubAPITestCase):
         self.assertFalse(club.is_active)
         self.assertNotEqual(club.slug, "changed-slug")
 
+    def test_update_city_to_valid_city_succeeds(self):
+        club = self.create_club("City Update Club")
+        self.authenticate_platform_admin()
+
+        response = self.client.patch(
+            reverse("club-detail", kwargs={"pk": club.pk}),
+            {"city": "ASSIUT_1"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        club.refresh_from_db()
+        self.assertEqual(club.city, "ASSIUT_1")
+        self.assertEqual(response.data["city"], "ASSIUT_1")
+
+    def test_update_city_to_city_from_another_governorate_fails(self):
+        club = self.create_club("Invalid City Update Club")
+        self.authenticate_platform_admin()
+
+        response = self.client.patch(
+            reverse("club-detail", kwargs={"pk": club.pk}),
+            {"city": "SOHAG_MARKAZ"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["city"][0],
+            "City must belong to the selected governorate.",
+        )
+
+    def test_partial_update_governorate_validates_existing_city(self):
+        club = self.create_club("Governorate Partial Update Club")
+        self.authenticate_platform_admin()
+
+        response = self.client.patch(
+            reverse("club-detail", kwargs={"pk": club.pk}),
+            {"governorate": "SOHAG"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["city"][0],
+            "City must belong to the selected governorate.",
+        )
+
+    def test_partial_update_city_validates_existing_governorate(self):
+        club = self.create_club("City Partial Update Club")
+        self.authenticate_platform_admin()
+
+        response = self.client.patch(
+            reverse("club-detail", kwargs={"pk": club.pk}),
+            {"city": "SOHAG_MARKAZ"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["city"][0],
+            "City must belong to the selected governorate.",
+        )
+
     def test_delete_club_is_not_allowed(self):
         club = self.create_club("No Delete Club")
         self.authenticate_platform_admin()
@@ -173,8 +291,8 @@ class ClubAPITests(ClubAPITestCase):
             reverse("club-list"),
             {
                 "name": "Owner Created Club",
-                "city": "Assiut",
-                "area": "East",
+                "governorate": "ASSIUT",
+                "city": "ASSIUT_MARKAZ",
             },
             format="json",
         )

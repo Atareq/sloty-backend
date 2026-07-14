@@ -19,6 +19,8 @@ class UserModelTests(TestCase):
         user = self.create_user(username="normal-user")
 
         self.assertFalse(hasattr(user, "role"))
+        self.assertFalse(hasattr(user, "club"))
+        self.assertFalse(hasattr(user, "court"))
         self.assertFalse(user.is_platform_admin)
 
     def test_platform_admin_flag_controls_platform_helper(self):

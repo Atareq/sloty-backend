@@ -2,6 +2,42 @@ from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
 from apps.clubs.models import Club, ClubMembership, generate_unique_club_slug
+from apps.common.egypt_locations import (
+    get_all_city_choices,
+    get_governorate_choices,
+    is_valid_city_for_governorate,
+)
+
+
+class ClubLocationValidationMixin:
+    governorate = serializers.ChoiceField(
+        choices=get_governorate_choices(),
+        error_messages={"invalid_choice": "Invalid governorate choice."},
+    )
+    city = serializers.ChoiceField(
+        choices=get_all_city_choices(),
+        error_messages={"invalid_choice": "Invalid city choice."},
+    )
+
+    def validate_location(self, attrs):
+        instance = getattr(self, "instance", None)
+        governorate = attrs.get(
+            "governorate",
+            getattr(instance, "governorate", None),
+        )
+        city = attrs.get("city", getattr(instance, "city", None))
+        if (
+            governorate
+            and city
+            and not is_valid_city_for_governorate(
+                governorate,
+                city,
+            )
+        ):
+            raise serializers.ValidationError(
+                {"city": "City must belong to the selected governorate."}
+            )
+        return attrs
 
 
 class ClubListSerializer(serializers.ModelSerializer):
@@ -11,8 +47,8 @@ class ClubListSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "slug",
+            "governorate",
             "city",
-            "area",
             "phone_number",
             "is_active",
             "manager_can_settle_transactions",
@@ -32,8 +68,8 @@ class ClubDetailSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "slug",
+            "governorate",
             "city",
-            "area",
             "address",
             "phone_number",
             "notes",
@@ -47,15 +83,15 @@ class ClubDetailSerializer(serializers.ModelSerializer):
         read_only_fields = ("id", "created_by", "created", "modified")
 
 
-class ClubCreateSerializer(serializers.ModelSerializer):
+class ClubCreateSerializer(ClubLocationValidationMixin, serializers.ModelSerializer):
     class Meta:
         model = Club
         fields = (
             "id",
             "name",
             "slug",
+            "governorate",
             "city",
-            "area",
             "address",
             "phone_number",
             "notes",
@@ -74,6 +110,7 @@ class ClubCreateSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        attrs = self.validate_location(attrs)
         if not attrs.get("slug"):
             attrs["slug"] = generate_unique_club_slug(attrs["name"])
         return attrs
@@ -82,13 +119,13 @@ class ClubCreateSerializer(serializers.ModelSerializer):
         return ClubDetailSerializer(instance, context=self.context).data
 
 
-class ClubUpdateSerializer(serializers.ModelSerializer):
+class ClubUpdateSerializer(ClubLocationValidationMixin, serializers.ModelSerializer):
     class Meta:
         model = Club
         fields = (
             "name",
+            "governorate",
             "city",
-            "area",
             "address",
             "phone_number",
             "notes",
@@ -96,6 +133,9 @@ class ClubUpdateSerializer(serializers.ModelSerializer):
             "manager_can_settle_transactions",
             "manager_can_change_pricing",
         )
+
+    def validate(self, attrs):
+        return self.validate_location(attrs)
 
     def to_representation(self, instance):
         return ClubDetailSerializer(instance, context=self.context).data

@@ -161,6 +161,15 @@ class ClubAccessContext:
             and self.can_view_audit_logs()
         )
 
+    def can_view_court_availability(self, court):
+        return self.can_access_court(court)
+
+    def can_view_calendar(self):
+        return self.has_any_club_access()
+
+    def can_view_dashboard(self):
+        return self.is_platform_admin or self.is_owner or self.is_manager
+
     def scoped_courts_queryset(self):
         from apps.courts.models import Court
 
@@ -180,6 +189,17 @@ class ClubAccessContext:
         from apps.bookings.models import Booking
 
         return Booking.objects.filter(court__in=self.scoped_courts_queryset())
+
+    def scoped_calendar_bookings_queryset(self):
+        return self.scoped_bookings_queryset()
+
+    def scoped_dashboard_courts_queryset(self):
+        from apps.courts.models import Court
+
+        queryset = Court.objects.filter(club=self.club)
+        if self.can_view_dashboard():
+            return queryset
+        return queryset.none()
 
     def scoped_transactions_queryset(self):
         from apps.transactions.models import Transaction

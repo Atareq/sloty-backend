@@ -72,6 +72,19 @@ These claims are derived at token issue time and are not stored on `User`:
 Business APIs still verify active club access from the database through
 `ClubAccessContext`; clients must not treat JWT club/court claims as authority.
 
+## Egypt Locations and Club Address Fields
+
+- `GET /api/v1/egypt-locations/` returns public dropdown data for Egypt
+  governorates and city/center codes.
+- `governorate` stores a controlled Egypt governorate code.
+- `city` stores a controlled Egypt city/center code and must belong to the
+  selected governorate.
+- `address` remains detailed free-text address content.
+
+Frontend clients should select `governorate` first, then filter the city
+dropdown from `/api/v1/egypt-locations/` before submitting Club create/update
+requests.
+
 ## Sprint 2 Setup Endpoints
 
 - `/api/v1/clubs/`
@@ -172,6 +185,32 @@ Useful audit log filters:
 - `date_from`
 - `date_to`
 
+## Sprint 8 Dashboard and Availability Endpoints
+
+- `GET /api/v1/clubs/{club_slug}/courts/{court_id}/availability/`
+- `GET /api/v1/clubs/{club_slug}/calendar/`
+- `GET /api/v1/clubs/{club_slug}/dashboard/overview/`
+- `GET /api/v1/clubs/{club_slug}/dashboard/revenue/`
+- `GET /api/v1/clubs/{club_slug}/dashboard/court-utilization/`
+
+Availability returns generated slots for one court and date. `HOLD` and
+`CONFIRMED` bookings block slots; terminal booking statuses do not.
+
+Calendar returns frontend-friendly booking items with payment summary fields.
+Staff can use availability and calendar only for their assigned court. Platform
+admins, owners, and managers can access all selected-club courts.
+
+Overview, revenue, and court-utilization endpoints are financial dashboard
+summaries. Platform admins, owners, and managers can access them. Staff cannot.
+
+Useful Sprint 8 query parameters:
+
+- Availability: `date`
+- Calendar: `date`, `date_from`, `date_to`, `court`, `status`
+- Overview: `date_from`, `date_to`, `court`
+- Revenue: `date_from`, `date_to`, `group_by`, `court`, `payment_method`
+- Court utilization: `date_from`, `date_to`
+
 ## Demo Seed Data
 
 Create richer local/demo data for Swagger or Postman testing:
@@ -214,6 +253,9 @@ Token examples:
 The seed command includes role-specific memberships, two courts per club,
 working hours, bookings across all statuses, transactions, pending and settled
 settlements, unsettled transactions for preview testing, and audit log examples.
+It supports Sprint 8 manual testing for blocked/free availability slots,
+calendar scoping, dashboard summaries, revenue, utilization, and staff financial
+dashboard denial.
 
 Run tests:
 

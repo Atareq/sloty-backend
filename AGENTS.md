@@ -34,12 +34,14 @@ Current repo reality:
 - Current local apps package: `apps/`
 - Current implemented app: `apps/accounts/`
 - Current implemented domain apps: `apps/clubs/`, `apps/courts/`,
-  `apps/bookings/`, `apps/transactions/`, `apps/settlements/`, and
-  `apps/audit/`
+  `apps/bookings/`, `apps/transactions/`, `apps/settlements/`,
+  `apps/audit/`, and `apps/dashboard/`
+- Current shared app: `apps/common/`
 - Current public API routes are versioned under `/api/v1/`
 - Current API foundation endpoints include `/api/v1/schema/`,
   `/api/v1/docs/`, `/api/v1/auth/token/`, and
   `/api/v1/auth/token/refresh/`
+- Current public utility endpoints include `/api/v1/egypt-locations/`
 - Current account endpoints include `/api/v1/me/` and platform-admin-only
   `/api/v1/users/`
 - Project docs live under `docs/`
@@ -61,9 +63,12 @@ Current repo reality:
   transactions
 - Sprint 7 implements club-scoped read-only audit logs for important business
   actions
+- Sprint 8 implements read-only club operations dashboard, calendar, revenue,
+  utilization, and court availability APIs
 - Planned shared app name is `apps/common/`
 - Domain apps beyond `accounts`, `clubs`, `courts`, `bookings`,
-  `transactions`, `settlements`, and `audit` are not implemented yet
+  `transactions`, `settlements`, `audit`, and `dashboard` are not implemented
+  yet
 
 Planned project direction:
 
@@ -105,6 +110,12 @@ Current implemented app:
 - `apps/clubs/` contains club setup, club membership assignment logic, and the
   central `ClubAccessContext` club-scoped access layer.
 - `Club` has a unique `slug` used by club-scoped business API URLs.
+- `Club.governorate` and `Club.city` are controlled Egypt location code
+  choices from `apps/common/egypt_locations.py`; `Club.city` must belong to
+  `Club.governorate`.
+- `Club.address` remains detailed free text. `Club.area` has been removed;
+  do not add or accept `area` in future Club APIs unless a new task explicitly
+  reintroduces it.
 - `Club` stores `manager_can_settle_transactions` and
   `manager_can_change_pricing` flags. `manager_can_change_pricing` currently
   gates manager updates to a court's `default_price`.
@@ -394,10 +405,40 @@ Rules for the flow:
   class is necessary, keep it as a thin centralized wrapper in
   `apps/clubs/permissions.py`.
 
+`apps/dashboard/`
+
+- Sprint 8 read-only operations dashboard app.
+- Contains dashboard serializers, services, views, and URL routing. It has no
+  models or migrations in Sprint 8.
+- Dashboard APIs are frontend summary APIs for availability, calendar,
+  overview, revenue, and court utilization.
+- Availability and calendar are operational APIs. Staff can access only their
+  assigned court through `ClubAccessContext`.
+- Financial dashboard endpoints are overview, revenue, and court utilization.
+  Staff cannot access these endpoints.
+- Dashboard views must stay thin and use service functions plus
+  `ClubAccessContext`; do not query `ClubMembership` in dashboard views,
+  serializers, or services.
+- Sprint 8 does not implement advanced pricing, refunds, reversals, exports,
+  payment gateway behavior, notifications, marketplace booking, or automatic
+  hold expiry jobs.
+- Do not create `apps/dashboard/permissions.py` by default. If dashboard
+  permissions need a wrapper, keep it centralized in `apps/clubs/permissions.py`.
+
 `apps/common/`
 
-- Planned pattern, not currently present.
-- Use only when shared behavior exists.
+- Shared app for reusable infrastructure that is not owned by one business
+  domain.
+- Egypt location constants live in `apps/common/egypt_locations.py`.
+- `get_governorate_choices()`, `get_all_city_choices()`,
+  `get_city_choices(governorate_code)`, and validation helpers are the source
+  of truth for controlled governorate and city/center codes.
+- New city/center entries should be added to the constants file, not scattered
+  in serializers or views.
+- Do not add free-form governorate or city fields in future APIs.
+- Do not create database tables for locations unless a future task explicitly
+  asks for dynamic/admin-managed locations.
+- Use shared behavior here only when repeated patterns justify it.
 - Base timestamp models are deferred until reusable model behavior exists; do
   not create `apps/common/` only for planned base models.
 - Appropriate contents include base models, shared permissions, common viewsets
@@ -707,6 +748,12 @@ Run Sprint 7 audit tests:
 pytest tests/audit
 ```
 
+Run Sprint 8 dashboard tests:
+
+```bash
+pytest tests/dashboard
+```
+
 Seed local/demo data for manual endpoint testing:
 
 ```bash
@@ -767,9 +814,15 @@ Notes:
   `/api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`,
   `/api/v1/clubs/{club_slug}/audit-logs/`, and
   `/api/v1/clubs/{club_slug}/audit-logs/{id}/`.
+- Sprint 8 read-only dashboard routes include:
+  `/api/v1/clubs/{club_slug}/courts/{court_id}/availability/`,
+  `/api/v1/clubs/{club_slug}/calendar/`,
+  `/api/v1/clubs/{club_slug}/dashboard/overview/`,
+  `/api/v1/clubs/{club_slug}/dashboard/revenue/`, and
+  `/api/v1/clubs/{club_slug}/dashboard/court-utilization/`.
 - Global API routes currently include `/api/v1/me/`, `/api/v1/users/`,
-  `/api/v1/auth/token/`, `/api/v1/auth/token/refresh/`, `/api/v1/schema/`, and
-  `/api/v1/docs/`.
+  `/api/v1/egypt-locations/`, `/api/v1/auth/token/`,
+  `/api/v1/auth/token/refresh/`, `/api/v1/schema/`, and `/api/v1/docs/`.
 
 ## 14. Demo Seed Data Pattern
 

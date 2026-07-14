@@ -11,12 +11,14 @@ from apps.accounts.views import SlotyTokenObtainPairView
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/v1/", include("apps.accounts.urls")),
+    path("api/v1/", include("apps.common.urls")),
     path("api/v1/", include("apps.clubs.urls")),
     path("api/v1/", include("apps.courts.urls")),
     path("api/v1/", include("apps.bookings.urls")),
     path("api/v1/", include("apps.transactions.urls")),
     path("api/v1/", include("apps.settlements.urls")),
     path("api/v1/", include("apps.audit.urls")),
+    path("api/v1/", include("apps.dashboard.urls")),
     path(
         "api/v1/schema/",
         SpectacularAPIView.as_view(permission_classes=[AllowAny]),

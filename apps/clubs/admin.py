@@ -8,14 +8,14 @@ class ClubAdmin(admin.ModelAdmin):
     list_display = (
         "name",
         "slug",
+        "governorate",
         "city",
-        "area",
         "is_active",
         "manager_can_settle_transactions",
         "manager_can_change_pricing",
     )
-    search_fields = ("name", "slug", "city", "area", "phone_number")
-    list_filter = ("is_active", "city")
+    search_fields = ("name", "slug", "governorate", "city", "phone_number")
+    list_filter = ("is_active", "governorate", "city")
     prepopulated_fields = {"slug": ("name",)}
 
 

@@ -41,6 +41,7 @@ DJANGO_APPS = [
 
 THIRD_PARTY_APPS = [
     "django_extensions",
+    "corsheaders",
     "safedelete",
     "rest_framework",
     "drf_spectacular",
@@ -51,12 +52,14 @@ THIRD_PARTY_APPS = [
 
 APPS = [
     "apps.accounts.apps.AccountsConfig",
+    "apps.common.apps.CommonConfig",
     "apps.clubs.apps.ClubsConfig",
     "apps.courts.apps.CourtsConfig",
     "apps.bookings.apps.BookingsConfig",
     "apps.transactions.apps.TransactionsConfig",
     "apps.settlements.apps.SettlementsConfig",
     "apps.audit.apps.AuditConfig",
+    "apps.dashboard.apps.DashboardConfig",
 ]
 
 DEBUG_APPS = []
@@ -99,15 +102,17 @@ if DB_ENGINE in {"postgres", "postgresql"}:
         }
     }
 else:
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
-        }
-    }
+    pass
+    # DATABASES = {
+    #     "default": {
+    #         "ENGINE": "django.db.backends.sqlite3",
+    #         "NAME": BASE_DIR / "db.sqlite3",
+    #     }
+    # }
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",

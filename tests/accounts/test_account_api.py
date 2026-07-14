@@ -25,8 +25,8 @@ class AccountAPITestCase(APITestCase):
         data = {
             "name": name,
             "slug": slug,
-            "city": "Assiut",
-            "area": "Downtown",
+            "governorate": "ASSIUT",
+            "city": "ASSIUT_MARKAZ",
         }
         data.update(extra_fields)
         return Club.objects.create(**data)

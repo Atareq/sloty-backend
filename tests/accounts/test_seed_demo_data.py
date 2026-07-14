@@ -6,6 +6,7 @@ from apps.accounts.models import User
 from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
+from apps.common.egypt_locations import is_valid_city_for_governorate
 from apps.courts.models import Court
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
@@ -56,6 +57,12 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertTrue(club_a.manager_can_change_pricing)
         self.assertFalse(club_b.manager_can_settle_transactions)
         self.assertFalse(club_b.manager_can_change_pricing)
+        self.assertEqual(club_a.governorate, "ASSIUT")
+        self.assertEqual(club_a.city, "ASSIUT_MARKAZ")
+        self.assertEqual(club_b.governorate, "SOHAG")
+        self.assertEqual(club_b.city, "SOHAG_MARKAZ")
+        for club in Club.objects.filter(slug__in=DEMO_CLUB_SLUGS):
+            self.assertTrue(is_valid_city_for_governorate(club.governorate, club.city))
 
         for username in ("staff_a", "staff_b", "staff_c"):
             self.assertEqual(
