@@ -282,6 +282,15 @@ class DashboardDataMixin:
             payment_reference="DASH-DIGITAL-001",
             created=self.time_at(13, 20),
         )
+        self.voided_transaction = self.create_transaction(
+            self.confirmed,
+            amount=Decimal("60.00"),
+            created=self.time_at(13, 30),
+            is_voided=True,
+            voided_by=self.platform_admin,
+            voided_at=timezone.now(),
+            void_reason="Dashboard correction",
+        )
         self.pending_settlement = self.create_settlement(
             self.club,
             court=self.court,

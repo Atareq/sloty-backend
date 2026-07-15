@@ -13,6 +13,11 @@ transaction_detail = TransactionViewSet.as_view(
         "get": "retrieve",
     }
 )
+transaction_void = TransactionViewSet.as_view(
+    {
+        "post": "void",
+    }
+)
 
 urlpatterns = [
     path(
@@ -24,5 +29,10 @@ urlpatterns = [
         "clubs/<slug:club_slug>/transactions/<int:pk>/",
         transaction_detail,
         name="club-transaction-detail",
+    ),
+    path(
+        "clubs/<slug:club_slug>/transactions/<int:pk>/void/",
+        transaction_void,
+        name="club-transaction-void",
     ),
 ]

@@ -39,6 +39,7 @@ def unsettled_transactions_queryset(*, access, period_start, period_end, court=N
         created__gte=period_start,
         created__lt=period_end,
         settlement_line__isnull=True,
+        is_voided=False,
     )
     if court is not None:
         queryset = queryset.filter(court=court)
@@ -97,7 +98,7 @@ def create_settlement(
                     period_end=period_end,
                     court=court,
                 )
-                .select_for_update()
+                .select_for_update(of=("self",))
                 .order_by("id")
             )
             if not candidates:
@@ -159,7 +160,7 @@ def create_settlement(
 def mark_settlement_settled(*, access, settlement, actor):
     with transaction.atomic():
         locked_settlement = (
-            Settlement.objects.select_for_update()
+            Settlement.objects.select_for_update(of=("self",))
             .select_related("club", "court", "created_by", "settled_by")
             .get(pk=settlement.pk)
         )

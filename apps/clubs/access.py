@@ -134,6 +134,11 @@ class ClubAccessContext:
             and self.can_access_court(transaction.court)
         )
 
+    def can_void_transaction(self, transaction):
+        if not self.can_access_transaction(transaction):
+            return False
+        return self.is_platform_admin or transaction.created_by_id == self.user.id
+
     def can_manage_settlements(self):
         if self.is_platform_admin or self.is_owner:
             return True

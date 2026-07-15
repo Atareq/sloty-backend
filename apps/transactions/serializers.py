@@ -12,6 +12,7 @@ from apps.transactions.services import (
 
 class TransactionListSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    voided_by = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = Transaction
@@ -24,6 +25,10 @@ class TransactionListSerializer(serializers.ModelSerializer):
             "payment_method",
             "payment_reference",
             "created_by",
+            "is_voided",
+            "voided_by",
+            "voided_at",
+            "void_reason",
             "created",
         )
         read_only_fields = fields
@@ -31,6 +36,7 @@ class TransactionListSerializer(serializers.ModelSerializer):
 
 class TransactionDetailSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    voided_by = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = Transaction
@@ -44,10 +50,22 @@ class TransactionDetailSerializer(serializers.ModelSerializer):
             "payment_reference",
             "notes",
             "created_by",
+            "is_voided",
+            "voided_by",
+            "voided_at",
+            "void_reason",
             "created",
             "modified",
         )
         read_only_fields = fields
+
+
+class TransactionVoidSerializer(serializers.Serializer):
+    reason = serializers.CharField(
+        required=True,
+        allow_blank=False,
+        trim_whitespace=True,
+    )
 
 
 class TransactionCreateSerializer(serializers.ModelSerializer):

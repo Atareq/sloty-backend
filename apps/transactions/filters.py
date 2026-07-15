@@ -32,6 +32,7 @@ class TransactionFilter(django_filters.FilterSet):
         lookup_expr="lte",
     )
     created_by = django_filters.NumberFilter(field_name="created_by_id")
+    is_voided = django_filters.BooleanFilter(field_name="is_voided")
 
     class Meta:
         model = Transaction
@@ -43,6 +44,7 @@ class TransactionFilter(django_filters.FilterSet):
             "date_from",
             "date_to",
             "created_by",
+            "is_voided",
         )
 
     def filter_date(self, queryset, name, value):

@@ -63,6 +63,13 @@ class Booking(models.Model):
         db_index=True,
     )
     notes = models.TextField(blank=True)
+    cancellation_reason = models.TextField(blank=True)
+    no_show_reason = models.TextField(blank=True)
+    reschedule_reason = models.TextField(blank=True)
+    completed_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    cancelled_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    no_show_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    expired_at = models.DateTimeField(blank=True, null=True, db_index=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         blank=True,
@@ -81,6 +88,10 @@ class Booking(models.Model):
             models.Index(fields=["source"]),
             models.Index(fields=["created_by"]),
             models.Index(fields=["created"]),
+            models.Index(fields=["completed_at"]),
+            models.Index(fields=["cancelled_at"]),
+            models.Index(fields=["no_show_at"]),
+            models.Index(fields=["expired_at"]),
         ]
 
     def __str__(self) -> str:

@@ -65,6 +65,12 @@ Current repo reality:
   actions
 - Sprint 8 implements read-only club operations dashboard, calendar, revenue,
   utilization, and court availability APIs
+- Sprint 9 completes MVP booking lifecycle behavior with reason capture,
+  rescheduling, remaining-cash completion confirmation, automatic hold-expiry
+  command support, and lifecycle audit logs
+- Sprint 10 adds logged transaction voiding for safe corrections, excludes
+  voided transactions from financial totals and settlements, and recalculates
+  booking payment status from valid transactions
 - Planned shared app name is `apps/common/`
 - Domain apps beyond `accounts`, `clubs`, `courts`, `bookings`,
   `transactions`, `settlements`, `audit`, and `dashboard` are not implemented
@@ -151,17 +157,18 @@ Current implemented app:
   `source`, `date`, `date_from`, and `date_to`.
 - Booking outside working hours is allowed in Sprint 3, and no
   `outside_working_hours` flag is stored.
-- Sprint 5 booking lifecycle actions are manual endpoints on the existing
-  `BookingViewSet`: cancel, complete, no-show, and expire. Rescheduling,
-  automatic hold expiry jobs, settlements, and dashboards remain future sprint
-  work.
+- Sprint 9 booking lifecycle actions are manual endpoints on the existing
+  `BookingViewSet`: cancel, complete, no-show, reschedule, and expire.
+  Automatic hold expiry is exposed through the `expire_hold_bookings`
+  management command only; no Celery scheduler or background worker exists.
 - `apps/transactions/` contains immutable booking transaction recording,
-  transaction create/list/detail APIs, payment reference uniqueness inside a
-  club, and booking payment summary support.
+  transaction create/list/detail/void APIs, payment reference uniqueness inside
+  a club, and booking payment summary support.
 - Transaction creation confirms a HOLD booking to CONFIRMED. Other booking
   lifecycle actions are handled by the Sprint 5 booking lifecycle service.
-- Corrections, refunds, reversals, dashboards, reports, online payment gateway
-  logic, and platform commission calculation remain future work.
+- Transaction corrections use a logged void of the original row followed by
+  the normal create endpoint. Refunds, reversals, online payment gateway logic,
+  and platform commission calculation remain future work.
 - Business APIs for memberships, courts, working hours, bookings, and
   transactions are club-scoped under `/api/v1/clubs/{club_slug}/...`.
 - Login remains global. The frontend logs in, calls `/api/v1/me/` to read active
@@ -321,23 +328,46 @@ Rules for the flow:
 - `COMPLETED`, `CANCELLED`, `NO_SHOW`, and `EXPIRED` bookings are treated as
   locked for Sprint 3 update behavior and do not block new overlapping slots.
 - Sprint 5 lifecycle transitions are service-layer controlled through
-  `transition_booking_status(access=..., booking=..., target_status=..., actor=...)`.
-  The service uses `transaction.atomic()`, `select_for_update()`, explicit
-  transition maps, and `ClubAccessContext.can_change_booking_status()`.
-- Allowed Sprint 5 lifecycle transitions are `HOLD -> CANCELLED`,
+  action-specific service functions in `apps/bookings/services.py`: cancel,
+  complete, no-show, reschedule, expire, and due-hold expiry. The services use
+  `transaction.atomic()`, `select_for_update()`, explicit status validation,
+  and `ClubAccessContext` access checks.
+- Allowed lifecycle transitions are `HOLD -> CANCELLED`,
   `HOLD -> EXPIRED`, `CONFIRMED -> CANCELLED`,
   `CONFIRMED -> COMPLETED`, and `CONFIRMED -> NO_SHOW`.
 - Terminal statuses `COMPLETED`, `CANCELLED`, `NO_SHOW`, and `EXPIRED` cannot
   transition further.
+- `cancel` accepts an optional reason for platform admins, owners, and managers;
+  staff must provide a non-empty cancellation reason.
+- `no-show` is allowed only from `CONFIRMED` and stores an optional reason.
+- `reschedule` is allowed only from `HOLD` or `CONFIRMED`; the new court must
+  belong to the selected club, pass `ClubAccessContext` access checks, match the
+  court slot duration, and avoid overlaps with other `HOLD` or `CONFIRMED`
+  bookings while excluding the current booking.
+- Rescheduling keeps existing transactions attached to the same booking. If the
+  recalculated price is higher, update `total_price`; if it is lower or equal,
+  keep the existing `total_price`.
+- `complete` is allowed only from `CONFIRMED`. If a dynamic remaining amount
+  exists, the request must set `confirm_collect_remaining_cash=true`; the
+  service then creates a CASH transaction for the remaining amount before
+  marking the booking `COMPLETED`.
+- Manual `expire` is allowed only from `HOLD`. Automatic due-hold expiry uses
+  `python manage.py expire_hold_bookings`, sets `EXPIRED`, records
+  `expired_at`, and audits with actor `None`.
+- Booking lifecycle traceability fields are `cancellation_reason`,
+  `no_show_reason`, `reschedule_reason`, `completed_at`, `cancelled_at`,
+  `no_show_at`, and `expired_at`. Do not add payment status or cached remaining
+  amount fields.
 - Do not place transaction creation logic, settlement, rescheduling,
-  automatic hold expiry jobs, dashboard, marketplace, or notification behavior
-  in `bookings`.
+  dashboard, marketplace, or notification behavior in `bookings`, except the
+  Sprint 9 remaining-cash completion transaction and hold-expiry command
+  explicitly owned by booking lifecycle services.
 
 `apps/transactions/`
 
-- Sprint 4 transaction recording app.
+- Transaction recording and Sprint 10 correction app.
 - Contains `Transaction`, transaction serializers, transaction viewsets,
-  transaction creation services, and transaction admin registration.
+  transaction creation/void services, and transaction admin registration.
 - Do not create `apps/transactions/permissions.py` by default.
 - Transaction access must be centralized through
   `apps/clubs/access.py -> ClubAccessContext`.
@@ -349,15 +379,28 @@ Rules for the flow:
   `access.can_create_transaction_for_booking(booking)`.
 - Object-level transaction checks, when needed, should call
   `access.can_access_transaction(transaction)`.
+- Transaction void authority should call
+  `access.can_void_transaction(transaction)`. Platform admins may void any
+  eligible scoped transaction; owners, managers, and staff may void only their
+  own eligible scoped transactions.
 - Do not duplicate `ClubMembership` queries inside transaction views,
   serializers, or services.
 - Do not create independent per-app transaction permission logic. If a
   transaction-specific DRF permission class seems absolutely necessary, stop
   and explain why before adding it.
-- Transactions are immutable through the API: no PATCH, PUT, DELETE, void,
-  correction, refund, reversal, or settlement endpoint exists in Sprint 4.
+- Transactions are immutable financial history through the API: no PATCH, PUT,
+  DELETE, refund, or reversal behavior exists. Corrections use
+  `POST .../transactions/{id}/void/` with a required reason, followed by normal
+  transaction creation.
+- Voided transactions remain visible and may be filtered with `is_voided`, but
+  only non-voided transactions count toward paid/remaining amounts, completion
+  collection, settlements, calendar summaries, and dashboard revenue.
+- Already voided or settled transactions and transactions attached to terminal
+  bookings cannot be voided. If no valid payment remains on a confirmed
+  booking, the void service returns the booking to `HOLD` in the same atomic,
+  row-locked workflow.
 - Transaction creation may change booking status only from HOLD to CONFIRMED.
-  Do not implement other booking lifecycle actions in Sprint 4.
+  Transaction void may change booking status only from CONFIRMED to HOLD.
 
 `apps/settlements/`
 
@@ -381,9 +424,9 @@ Rules for the flow:
 - `SettlementTransaction.transaction` is a `OneToOneField` to `Transaction`;
   this prevents one transaction from being included in more than one
   settlement while keeping transaction rows immutable.
-- Settlements include already-recorded transactions by club, optional court,
-  period, and unsettled state. Booking lifecycle status is not used to decide
-  settlement inclusion in Sprint 6.
+- Settlements include non-voided already-recorded transactions by club,
+  optional court, period, and unsettled state. Booking lifecycle status is not
+  used to decide settlement inclusion in Sprint 6.
 - Settlements do not implement refunds, reversals, corrections, commission,
   payout automation, dashboards, or automatic settlement jobs.
 - Settlement filters live in `apps/settlements/filters.py` and must follow the
@@ -413,6 +456,12 @@ Rules for the flow:
   not Django signals.
 - Audited Sprint 7 actions are booking create/update/lifecycle transitions,
   transaction creation, settlement creation, and mark-settled.
+- Sprint 9 adds `BOOKING_RESCHEDULED` and requires audit logs for cancellation,
+  no-show, reschedule, completion, manual expiry, automatic expiry, and auto
+  cash transaction creation on completion.
+- Sprint 10 adds `TRANSACTION_VOIDED`. A void records before/after void and
+  booking status data plus reason metadata; a CONFIRMED-to-HOLD recalculation
+  also records an explicit `BOOKING_UPDATED` audit log.
 - Audit filters live in `apps/audit/filters.py` and must follow the standard
   FilterSet pattern.
 - Audit logging does not implement reports, dashboards, exports, correction
@@ -432,6 +481,8 @@ Rules for the flow:
   assigned court through `ClubAccessContext`.
 - Financial dashboard endpoints are overview, revenue, and court utilization.
   Staff cannot access these endpoints.
+- Calendar payment summaries and all financial dashboard transaction totals
+  include non-voided transactions only.
 - Dashboard views must stay thin and use service functions plus
   `ClubAccessContext`; do not query `ClubMembership` in dashboard views,
   serializers, or services.
@@ -823,8 +874,10 @@ Notes:
   `/api/v1/clubs/{club_slug}/bookings/{id}/cancel/`,
   `/api/v1/clubs/{club_slug}/bookings/{id}/complete/`,
   `/api/v1/clubs/{club_slug}/bookings/{id}/no-show/`,
-  `/api/v1/clubs/{club_slug}/bookings/{id}/expire/`, and
+  `/api/v1/clubs/{club_slug}/bookings/{id}/reschedule/`,
+  `/api/v1/clubs/{club_slug}/bookings/{id}/expire/`,
   `/api/v1/clubs/{club_slug}/transactions/`,
+  `/api/v1/clubs/{club_slug}/transactions/{id}/void/`,
   `/api/v1/clubs/{club_slug}/settlements/`,
   `/api/v1/clubs/{club_slug}/settlements/preview/`, and
   `/api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`,

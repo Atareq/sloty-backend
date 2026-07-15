@@ -1,7 +1,6 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
@@ -9,6 +8,8 @@ from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log
 from apps.bookings.models import Booking
 from apps.bookings.services import create_booking, validate_booking_duration
+from apps.courts.models import Court
+from apps.transactions.services import get_booking_paid_amount
 
 
 def format_money(value):
@@ -19,9 +20,7 @@ def get_paid_amount_for_booking(booking):
     annotated_value = getattr(booking, "paid_amount", None)
     if annotated_value is not None:
         return annotated_value
-    return booking.transactions.aggregate(total=Sum("amount"))["total"] or Decimal(
-        "0.00"
-    )
+    return get_booking_paid_amount(booking)
 
 
 class BookingPaymentSummaryMixin(serializers.Serializer):
@@ -86,6 +85,13 @@ class BookingDetailSerializer(BookingPaymentSummaryMixin, serializers.ModelSeria
             "status",
             "source",
             "notes",
+            "cancellation_reason",
+            "no_show_reason",
+            "reschedule_reason",
+            "completed_at",
+            "cancelled_at",
+            "no_show_at",
+            "expired_at",
             "created_by",
             "created",
             "modified",
@@ -159,6 +165,44 @@ class BookingCreateSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         return BookingDetailSerializer(instance, context=self.context).data
+
+
+class BookingCancelSerializer(serializers.Serializer):
+    reason = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
+
+
+class BookingNoShowSerializer(serializers.Serializer):
+    reason = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
+
+
+class BookingRescheduleSerializer(serializers.Serializer):
+    court = serializers.PrimaryKeyRelatedField(queryset=Court.objects.all())
+    start_time = serializers.DateTimeField()
+    end_time = serializers.DateTimeField()
+    reason = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
+
+
+class BookingCompleteSerializer(serializers.Serializer):
+    confirm_collect_remaining_cash = serializers.BooleanField(
+        required=False,
+        default=False,
+    )
+
+
+class BookingExpireSerializer(serializers.Serializer):
+    pass
 
 
 class BookingUpdateSerializer(serializers.ModelSerializer):

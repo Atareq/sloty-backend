@@ -2,9 +2,12 @@ from decimal import Decimal
 
 from django.db import IntegrityError, transaction
 from django.db.models import Sum
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
+from apps.audit.models import AuditLog
+from apps.audit.services import record_audit_log
 from apps.bookings.models import Booking
 from apps.transactions.models import Transaction
 
@@ -17,10 +20,16 @@ def normalize_payment_reference(payment_reference):
     return (payment_reference or "").strip()
 
 
-def get_booking_paid_amount(booking) -> Decimal:
-    return Transaction.objects.filter(booking=booking).aggregate(total=Sum("amount"))[
-        "total"
-    ] or Decimal("0.00")
+def get_booking_paid_amount(booking, *, include_voided=False) -> Decimal:
+    queryset = Transaction.objects.filter(booking=booking)
+    if not include_voided:
+        queryset = queryset.filter(is_voided=False)
+    return queryset.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+
+
+def get_booking_remaining_amount(booking) -> Decimal:
+    remaining_amount = booking.total_price - get_booking_paid_amount(booking)
+    return max(remaining_amount, Decimal("0.00"))
 
 
 def validate_duplicate_payment_reference(*, club, payment_reference):
@@ -125,9 +134,6 @@ def create_booking_transaction(
                 notes=notes,
                 created_by=created_by,
             )
-            from apps.audit.models import AuditLog
-            from apps.audit.services import record_audit_log
-
             record_audit_log(
                 club=created_transaction.club,
                 court=created_transaction.court,
@@ -156,3 +162,107 @@ def create_booking_transaction(
                 {"payment_reference": [DUPLICATE_PAYMENT_REFERENCE_MESSAGE]}
             ) from exc
         raise
+
+
+def recalculate_booking_status_after_transaction_void(booking):
+    old_status = booking.status
+    if booking.status == Booking.Status.CONFIRMED and get_booking_paid_amount(
+        booking
+    ) == Decimal("0.00"):
+        booking.status = Booking.Status.HOLD
+        booking.save(update_fields=["status", "modified"])
+    return old_status, booking.status
+
+
+def void_transaction(*, access, transaction_obj, reason, actor):
+    reason = (reason or "").strip()
+    if not reason:
+        raise serializers.ValidationError({"reason": "A void reason is required."})
+
+    with transaction.atomic():
+        locked_transaction = (
+            Transaction.objects.select_for_update(of=("self",))
+            .select_related("booking", "club", "court", "created_by", "voided_by")
+            .get(pk=transaction_obj.pk)
+        )
+        locked_booking = (
+            Booking.objects.select_for_update()
+            .select_related("club", "court")
+            .get(pk=locked_transaction.booking_id)
+        )
+        locked_transaction.booking = locked_booking
+
+        if not access.can_void_transaction(locked_transaction):
+            raise PermissionDenied("You cannot void this transaction.")
+        if locked_transaction.is_voided:
+            raise serializers.ValidationError(
+                {"is_voided": "This transaction is already voided."}
+            )
+        if Transaction.objects.filter(
+            pk=locked_transaction.pk,
+            settlement_line__isnull=False,
+        ).exists():
+            raise serializers.ValidationError(
+                {"transaction": "Settled transactions cannot be voided."}
+            )
+        if locked_booking.status in Booking.LOCKED_STATUSES:
+            raise serializers.ValidationError(
+                {"booking": "Transactions on terminal bookings cannot be voided."}
+            )
+
+        old_booking_status = locked_booking.status
+        locked_transaction.is_voided = True
+        locked_transaction.voided_by = actor
+        locked_transaction.voided_at = timezone.now()
+        locked_transaction.void_reason = reason
+        locked_transaction.save(
+            update_fields=[
+                "is_voided",
+                "voided_by",
+                "voided_at",
+                "void_reason",
+                "modified",
+            ]
+        )
+        _, new_booking_status = recalculate_booking_status_after_transaction_void(
+            locked_booking
+        )
+
+        record_audit_log(
+            club=locked_transaction.club,
+            court=locked_transaction.court,
+            actor=actor,
+            action=AuditLog.Action.TRANSACTION_VOIDED,
+            entity_type="Transaction",
+            entity_id=locked_transaction.id,
+            before_data={
+                "is_voided": False,
+                "booking_status": old_booking_status,
+            },
+            after_data={
+                "is_voided": True,
+                "voided_by": actor.id,
+                "voided_at": locked_transaction.voided_at.isoformat(),
+                "booking_status": new_booking_status,
+            },
+            metadata={
+                "reason": reason,
+                "booking_id": locked_transaction.booking_id,
+            },
+        )
+        if old_booking_status != new_booking_status:
+            record_audit_log(
+                club=locked_booking.club,
+                court=locked_booking.court,
+                actor=actor,
+                action=AuditLog.Action.BOOKING_UPDATED,
+                entity_type="Booking",
+                entity_id=locked_booking.id,
+                before_data={"status": old_booking_status},
+                after_data={"status": new_booking_status},
+                metadata={
+                    "source": "transaction_void",
+                    "transaction_id": locked_transaction.id,
+                },
+            )
+        return locked_transaction

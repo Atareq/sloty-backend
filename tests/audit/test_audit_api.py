@@ -143,6 +143,12 @@ class AuditAPITestCase(APITestCase):
     def transaction_list_url(self, club):
         return reverse("club-transaction-list", kwargs={"club_slug": club.slug})
 
+    def transaction_void_url(self, club, transaction_obj):
+        return reverse(
+            "club-transaction-void",
+            kwargs={"club_slug": club.slug, "pk": transaction_obj.pk},
+        )
+
     def settlement_list_url(self, club):
         return reverse("club-settlement-list", kwargs={"club_slug": club.slug})
 
@@ -535,12 +541,29 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
 
     def test_booking_lifecycle_actions_create_audit_logs(self):
         cases = (
-            (Booking.Status.CONFIRMED, "complete", AuditLog.Action.BOOKING_COMPLETED),
-            (Booking.Status.CONFIRMED, "no-show", AuditLog.Action.BOOKING_NO_SHOW),
-            (Booking.Status.HOLD, "cancel", AuditLog.Action.BOOKING_CANCELLED),
-            (Booking.Status.HOLD, "expire", AuditLog.Action.BOOKING_EXPIRED),
+            (
+                Booking.Status.CONFIRMED,
+                "complete",
+                AuditLog.Action.BOOKING_COMPLETED,
+                {"confirm_collect_remaining_cash": True},
+            ),
+            (
+                Booking.Status.CONFIRMED,
+                "no-show",
+                AuditLog.Action.BOOKING_NO_SHOW,
+                {"reason": "Customer did not arrive"},
+            ),
+            (
+                Booking.Status.HOLD,
+                "cancel",
+                AuditLog.Action.BOOKING_CANCELLED,
+                {"reason": "Customer cancelled"},
+            ),
+            (Booking.Status.HOLD, "expire", AuditLog.Action.BOOKING_EXPIRED, {}),
         )
-        for index, (initial_status, action_name, audit_action) in enumerate(cases):
+        for index, (initial_status, action_name, audit_action, payload) in enumerate(
+            cases
+        ):
             booking = self.create_booking(
                 self.court,
                 customer_phone=f"+20100000110{index}",
@@ -551,7 +574,7 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
 
             response = self.client.post(
                 self.booking_action_url(self.club, booking, action_name),
-                {},
+                payload,
                 format="json",
             )
 
@@ -563,6 +586,34 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
                     entity_id=booking.id,
                 ).exists()
             )
+
+    def test_rescheduling_booking_creates_audit_log(self):
+        booking = self.create_booking(
+            self.court,
+            customer_phone="+201000001109",
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+            status=Booking.Status.CONFIRMED,
+        )
+
+        response = self.client.post(
+            self.booking_action_url(self.club, booking, "reschedule"),
+            {
+                "court": self.court.id,
+                "start_time": self.time_at(12).isoformat(),
+                "end_time": self.time_at(13).isoformat(),
+                "reason": "Audit reschedule",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        audit_log = AuditLog.objects.get(
+            action=AuditLog.Action.BOOKING_RESCHEDULED,
+            entity_type="Booking",
+            entity_id=booking.id,
+        )
+        self.assertEqual(audit_log.metadata["reason"], "Audit reschedule")
 
     def test_creating_transaction_creates_audit_log(self):
         booking = self.create_booking(
@@ -590,6 +641,43 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
                 action=AuditLog.Action.TRANSACTION_CREATED,
                 entity_type="Transaction",
                 entity_id=response.data["id"],
+            ).exists()
+        )
+
+    def test_voiding_transaction_creates_transaction_and_booking_audit_logs(self):
+        booking = self.create_booking(
+            self.court,
+            customer_phone="+201000001201",
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+            status=Booking.Status.CONFIRMED,
+        )
+        transaction_obj = self.create_transaction(
+            booking,
+            created_by=self.platform_admin,
+        )
+
+        response = self.client.post(
+            self.transaction_void_url(self.club, transaction_obj),
+            {"reason": "Audit correction"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        void_log = AuditLog.objects.get(
+            action=AuditLog.Action.TRANSACTION_VOIDED,
+            entity_type="Transaction",
+            entity_id=transaction_obj.id,
+        )
+        self.assertEqual(void_log.metadata["reason"], "Audit correction")
+        self.assertEqual(void_log.before_data["booking_status"], "CONFIRMED")
+        self.assertEqual(void_log.after_data["booking_status"], "HOLD")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action=AuditLog.Action.BOOKING_UPDATED,
+                entity_type="Booking",
+                entity_id=booking.id,
+                metadata__source="transaction_void",
             ).exists()
         )
 

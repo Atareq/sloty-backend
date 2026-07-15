@@ -1,7 +1,8 @@
-from datetime import time
+from datetime import time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from django.core.management import call_command
 from django.urls import resolve, reverse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -9,6 +10,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
+from apps.audit.models import AuditLog
 from apps.bookings.filters import BookingFilter
 from apps.bookings.models import Booking
 from apps.bookings.views import BookingViewSet
@@ -698,6 +700,13 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         "status",
         "source",
         "notes",
+        "cancellation_reason",
+        "no_show_reason",
+        "reschedule_reason",
+        "completed_at",
+        "cancelled_at",
+        "no_show_at",
+        "expired_at",
         "created_by",
         "created",
         "modified",
@@ -734,12 +743,12 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             ClubMembership.Role.OWNER,
         )
 
-    def post_lifecycle(self, club, booking, action_name, user):
+    def post_lifecycle(self, club, booking, action_name, user, payload=None):
         if user is not None:
             self.client.force_authenticate(user=user)
         return self.client.post(
             self.booking_lifecycle_url(club, booking, action_name),
-            {},
+            payload or {},
             format="json",
         )
 
@@ -763,33 +772,56 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CANCELLED)
+        self.assertIsNotNone(booking.cancelled_at)
 
     def test_owner_can_cancel_confirmed(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
 
-        response = self.post_lifecycle(self.club, booking, "cancel", self.owner)
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "cancel",
+            self.owner,
+            {"reason": "Customer cancelled"},
+        )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CANCELLED)
+        self.assertEqual(booking.cancellation_reason, "Customer cancelled")
 
     def test_manager_can_complete_confirmed(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
 
-        response = self.post_lifecycle(self.club, booking, "complete", self.manager)
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "complete",
+            self.manager,
+            {"confirm_collect_remaining_cash": True},
+        )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.COMPLETED)
+        self.assertIsNotNone(booking.completed_at)
 
     def test_staff_can_change_booking_status_for_assigned_court(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
 
-        response = self.post_lifecycle(self.club, booking, "no-show", self.staff)
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "no-show",
+            self.staff,
+            {"reason": "Customer did not arrive"},
+        )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.NO_SHOW)
+        self.assertEqual(booking.no_show_reason, "Customer did not arrive")
+        self.assertIsNotNone(booking.no_show_at)
 
     def test_staff_cannot_change_booking_status_for_another_court_in_same_club(self):
         booking = self.create_booking(
@@ -830,11 +862,17 @@ class BookingLifecycleActionTests(BookingAPITestCase):
                     customer_phone=f"+2010000003{phone_suffix:02d}",
                 )
 
+                payload = (
+                    {"confirm_collect_remaining_cash": True}
+                    if action_name == "complete"
+                    else {}
+                )
                 response = self.post_lifecycle(
                     self.club,
                     booking,
                     action_name,
                     self.platform_admin,
+                    payload,
                 )
 
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -899,6 +937,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
 
     def test_successful_action_returns_booking_detail_shape(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+        self.create_transaction(booking, amount=booking.total_price)
 
         response = self.post_lifecycle(
             self.club,
@@ -909,6 +948,432 @@ class BookingLifecycleActionTests(BookingAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(set(response.data), self.detail_response_fields)
+
+    def test_staff_cancel_requires_reason(self):
+        booking = self.create_booking(self.court, status=Booking.Status.HOLD)
+
+        response = self.post_lifecycle(self.club, booking, "cancel", self.staff)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("reason", response.data)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.HOLD)
+
+    def test_no_show_requires_confirmed_booking(self):
+        booking = self.create_booking(self.court, status=Booking.Status.HOLD)
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "no-show",
+            self.platform_admin,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.HOLD)
+
+    def test_expire_requires_hold_booking(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "expire",
+            self.platform_admin,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+
+    def test_complete_fully_paid_booking_succeeds_without_auto_cash(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+        self.create_transaction(booking, amount=booking.total_price)
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "complete",
+            self.platform_admin,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.COMPLETED)
+        self.assertEqual(booking.transactions.count(), 1)
+
+    def test_complete_with_remaining_amount_requires_confirmation(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+        self.create_transaction(booking, amount=Decimal("100.00"))
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "complete",
+            self.platform_admin,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("confirm_collect_remaining_cash", response.data)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+        self.assertEqual(booking.transactions.count(), 1)
+
+    def test_completion_remaining_amount_ignores_voided_transactions(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+        self.create_transaction(booking, amount=Decimal("100.00"))
+        self.create_transaction(
+            booking,
+            amount=Decimal("200.00"),
+            is_voided=True,
+            voided_by=self.platform_admin,
+            voided_at=timezone.now(),
+            void_reason="Wrong completion payment",
+        )
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "complete",
+            self.platform_admin,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("confirm_collect_remaining_cash", response.data)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+
+    def test_complete_with_confirmation_creates_remaining_cash_transaction(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+        self.create_transaction(booking, amount=Decimal("100.00"))
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "complete",
+            self.platform_admin,
+            {"confirm_collect_remaining_cash": True},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.COMPLETED)
+        auto_transaction = booking.transactions.order_by("id").last()
+        self.assertEqual(auto_transaction.amount, Decimal("200.00"))
+        self.assertEqual(
+            auto_transaction.payment_method, Transaction.PaymentMethod.CASH
+        )
+        self.assertEqual(auto_transaction.payment_reference, "")
+        self.assertEqual(auto_transaction.created_by, self.platform_admin)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action=AuditLog.Action.TRANSACTION_CREATED,
+                entity_type="Transaction",
+                entity_id=auto_transaction.id,
+            ).exists()
+        )
+
+    def test_reschedule_hold_booking_to_free_slot(self):
+        booking = self.create_booking(self.court, status=Booking.Status.HOLD)
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "reschedule",
+            self.platform_admin,
+            {
+                "court": self.same_club_other_court.id,
+                "start_time": self.time_at(22).isoformat(),
+                "end_time": self.time_at(23).isoformat(),
+                "reason": "Customer changed time",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.court, self.same_club_other_court)
+        self.assertEqual(booking.start_time, self.time_at(22))
+        self.assertEqual(booking.reschedule_reason, "Customer changed time")
+        self.assertEqual(booking.transactions.count(), 0)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action=AuditLog.Action.BOOKING_RESCHEDULED,
+                entity_type="Booking",
+                entity_id=booking.id,
+            ).exists()
+        )
+
+    def test_reschedule_confirmed_booking_keeps_transactions_attached(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+        transaction_obj = self.create_transaction(booking, amount=Decimal("50.00"))
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "reschedule",
+            self.platform_admin,
+            {
+                "court": self.court.id,
+                "start_time": self.time_at(22).isoformat(),
+                "end_time": self.time_at(23).isoformat(),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction_obj.refresh_from_db()
+        self.assertEqual(transaction_obj.booking_id, booking.id)
+
+    def test_reschedule_blocks_overlapping_active_booking(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            start_time=self.time_at(18),
+            end_time=self.time_at(19),
+            customer_phone="+201000000777",
+        )
+        self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            start_time=self.time_at(22),
+            end_time=self.time_at(23),
+            customer_phone="+201000000778",
+        )
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "reschedule",
+            self.platform_admin,
+            {
+                "court": self.court.id,
+                "start_time": self.time_at(22).isoformat(),
+                "end_time": self.time_at(23).isoformat(),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("start_time", response.data)
+
+    def test_reschedule_excludes_current_booking_from_overlap_check(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "reschedule",
+            self.platform_admin,
+            {
+                "court": self.court.id,
+                "start_time": self.time_at(20).isoformat(),
+                "end_time": self.time_at(21).isoformat(),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_staff_cannot_reschedule_outside_assigned_court(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "reschedule",
+            self.staff,
+            {
+                "court": self.same_club_other_court.id,
+                "start_time": self.time_at(22).isoformat(),
+                "end_time": self.time_at(23).isoformat(),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_reschedule_higher_price_updates_total_price(self):
+        expensive_court = self.create_court(
+            self.club,
+            "Expensive Court",
+            default_price=Decimal("450.00"),
+        )
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            total_price=Decimal("300.00"),
+        )
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "reschedule",
+            self.platform_admin,
+            {
+                "court": expensive_court.id,
+                "start_time": self.time_at(22).isoformat(),
+                "end_time": self.time_at(23).isoformat(),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.total_price, Decimal("450.00"))
+
+    def test_reschedule_lower_price_keeps_existing_total_price(self):
+        cheaper_court = self.create_court(
+            self.club,
+            "Cheaper Court",
+            default_price=Decimal("200.00"),
+        )
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            total_price=Decimal("300.00"),
+        )
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "reschedule",
+            self.platform_admin,
+            {
+                "court": cheaper_court.id,
+                "start_time": self.time_at(22).isoformat(),
+                "end_time": self.time_at(23).isoformat(),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.total_price, Decimal("300.00"))
+
+    def test_terminal_statuses_cannot_be_rescheduled(self):
+        for index, terminal_status in enumerate(Booking.LOCKED_STATUSES, start=1):
+            with self.subTest(terminal_status=terminal_status):
+                booking = self.create_booking(
+                    self.court,
+                    status=terminal_status,
+                    start_time=self.time_at(index),
+                    end_time=self.time_at(index + 1),
+                    customer_phone=f"+2010000009{index:02d}",
+                )
+
+                response = self.post_lifecycle(
+                    self.club,
+                    booking,
+                    "reschedule",
+                    self.platform_admin,
+                    {
+                        "court": self.court.id,
+                        "start_time": self.time_at(22).isoformat(),
+                        "end_time": self.time_at(23).isoformat(),
+                    },
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_expire_sets_timestamp_and_audit_log(self):
+        booking = self.create_booking(self.court, status=Booking.Status.HOLD)
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "expire",
+            self.platform_admin,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.EXPIRED)
+        self.assertIsNotNone(booking.expired_at)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action=AuditLog.Action.BOOKING_EXPIRED,
+                entity_type="Booking",
+                entity_id=booking.id,
+            ).exists()
+        )
+
+
+class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("expiry-admin")
+        self.club = self.create_club("Expiry Club", slug="expiry-club")
+        self.court = self.create_court(
+            self.club,
+            "Expiry Court",
+            internal_hold_expiry_hours=12,
+        )
+
+    def age_booking(self, booking, *, hours):
+        created = timezone.now() - timedelta(hours=hours)
+        Booking.objects.filter(pk=booking.pk).update(created=created)
+        booking.refresh_from_db()
+        return booking
+
+    def test_expire_hold_bookings_expires_due_holds_only_and_is_idempotent(self):
+        due_hold = self.age_booking(
+            self.create_booking(
+                self.court,
+                status=Booking.Status.HOLD,
+                start_time=self.time_at(8),
+                end_time=self.time_at(9),
+                customer_phone="+201000001001",
+            ),
+            hours=13,
+        )
+        not_due_hold = self.age_booking(
+            self.create_booking(
+                self.court,
+                status=Booking.Status.HOLD,
+                start_time=self.time_at(9),
+                end_time=self.time_at(10),
+                customer_phone="+201000001002",
+            ),
+            hours=2,
+        )
+        confirmed = self.age_booking(
+            self.create_booking(
+                self.court,
+                status=Booking.Status.CONFIRMED,
+                start_time=self.time_at(10),
+                end_time=self.time_at(11),
+                customer_phone="+201000001003",
+            ),
+            hours=13,
+        )
+        terminal = self.age_booking(
+            self.create_booking(
+                self.court,
+                status=Booking.Status.CANCELLED,
+                start_time=self.time_at(11),
+                end_time=self.time_at(12),
+                customer_phone="+201000001004",
+            ),
+            hours=13,
+        )
+
+        call_command("expire_hold_bookings", verbosity=0)
+        call_command("expire_hold_bookings", verbosity=0)
+
+        due_hold.refresh_from_db()
+        not_due_hold.refresh_from_db()
+        confirmed.refresh_from_db()
+        terminal.refresh_from_db()
+        self.assertEqual(due_hold.status, Booking.Status.EXPIRED)
+        self.assertIsNotNone(due_hold.expired_at)
+        self.assertEqual(not_due_hold.status, Booking.Status.HOLD)
+        self.assertEqual(confirmed.status, Booking.Status.CONFIRMED)
+        self.assertEqual(terminal.status, Booking.Status.CANCELLED)
+        audit_logs = AuditLog.objects.filter(
+            action=AuditLog.Action.BOOKING_EXPIRED,
+            entity_type="Booking",
+            entity_id=due_hold.id,
+        )
+        self.assertEqual(audit_logs.count(), 1)
+        self.assertIsNone(audit_logs.get().actor)
+        self.assertEqual(
+            audit_logs.get().metadata,
+            {"source": "automatic_hold_expiry"},
+        )
 
 
 class BookingFilterTests(BookingAPITestCase):
@@ -1161,6 +1626,32 @@ class BookingPaymentSummaryTests(BookingAPITestCase):
         self.assertEqual(response.data["paid_amount"], "300.00")
         self.assertEqual(response.data["remaining_amount"], "0.00")
         self.assertTrue(response.data["is_fully_paid"])
+
+    def test_payment_summary_ignores_voided_transactions(self):
+        self.create_transaction(self.booking, amount=Decimal("100.00"))
+        self.create_transaction(
+            self.booking,
+            amount=Decimal("200.00"),
+            is_voided=True,
+            voided_by=self.platform_admin,
+            voided_at=timezone.now(),
+            void_reason="Wrong payment",
+        )
+
+        detail_response = self.client.get(
+            self.booking_detail_url(self.club, self.booking)
+        )
+        list_response = self.client.get(self.booking_list_url(self.club))
+        list_item = next(
+            item
+            for item in list_response.data["results"]
+            if item["id"] == self.booking.id
+        )
+
+        for data in (detail_response.data, list_item):
+            self.assertEqual(data["paid_amount"], "100.00")
+            self.assertEqual(data["remaining_amount"], "200.00")
+            self.assertFalse(data["is_fully_paid"])
 
     def test_payment_summary_respects_club_scoped_booking_access(self):
         self.create_transaction(self.booking, amount=Decimal("100.00"))

@@ -381,6 +381,16 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             created=self.time_at(13),
             payment_reference="PREVIEW-SETTLED",
         )
+        self.voided_transaction = self.create_transaction(
+            self.booking,
+            amount=Decimal("40.00"),
+            created=self.time_at(12),
+            payment_reference="PREVIEW-VOIDED",
+            is_voided=True,
+            voided_by=self.platform_admin,
+            voided_at=timezone.now(),
+            void_reason="Wrong settlement amount",
+        )
         settlement = self.create_settlement(
             self.club,
             court=self.court,
@@ -402,6 +412,16 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["transaction_count"], 3)
         self.assertEqual(response.data["total_amount"], "150.00")
+
+    def test_preview_excludes_voided_transactions(self):
+        response = self.client.get(
+            self.settlement_preview_url(self.club),
+            self.settlement_payload(court=self.court.id),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["transaction_count"], 2)
+        self.assertEqual(response.data["total_amount"], "125.00")
 
     def test_preview_respects_court_filter(self):
         response = self.client.get(
@@ -464,6 +484,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             )
         )
         self.assertNotIn(self.already_settled.id, transaction_ids)
+        self.assertNotIn(self.voided_transaction.id, transaction_ids)
 
     def test_creation_with_no_unsettled_transactions_returns_400(self):
         SettlementTransaction.objects.create(

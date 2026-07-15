@@ -115,10 +115,11 @@ Useful booking list filters:
 - `date_from`
 - `date_to`
 
-## Sprint 4 Transaction Endpoints
+## Transaction Endpoints
 
 - `/api/v1/clubs/{club_slug}/transactions/`
 - `/api/v1/clubs/{club_slug}/transactions/{id}/`
+- `POST /api/v1/clubs/{club_slug}/transactions/{id}/void/`
 
 Useful transaction list filters:
 
@@ -129,23 +130,96 @@ Useful transaction list filters:
 - `date_from`
 - `date_to`
 - `created_by`
+- `is_voided`
 
 Creating the first valid transaction for a `HOLD` booking confirms it.
-Transactions are immutable through the API: no edit, delete, refund, reversal,
-or correction endpoint is implemented in Sprint 4. Duplicate non-blank payment
-references are rejected within the same club; blank references are allowed.
-Online payment gateway integration is not implemented.
+Transactions are immutable financial history: PATCH, PUT, and DELETE are not
+available. To correct an entry, void the original transaction with a reason,
+then create the corrected transaction through the normal transaction create
+endpoint:
+
+```json
+{"reason": "Wrong amount entered"}
+```
+
+Platform admins may void any eligible transaction in the selected club. Owners,
+managers, and staff may void only transactions they created and can access;
+staff remain limited to their assigned court. Already voided or settled
+transactions and transactions attached to terminal bookings cannot be voided.
+
+Voided transactions remain visible in list/detail responses and can be selected
+with `?is_voided=true` or `?is_voided=false`. They do not count toward booking
+paid/remaining amounts, completion collection, settlement preview/creation,
+calendar payment summaries, or dashboard revenue. If voiding removes the last
+valid payment from a `CONFIRMED` booking, the booking returns to `HOLD`.
+
+Duplicate non-blank payment references are rejected within the same club; blank
+references are allowed. Refunds, reversals, and online payment gateway
+integration are not implemented.
 
 ## Sprint 5 Booking Lifecycle Endpoints
 
 - `POST /api/v1/clubs/{club_slug}/bookings/{id}/cancel/`
 - `POST /api/v1/clubs/{club_slug}/bookings/{id}/complete/`
 - `POST /api/v1/clubs/{club_slug}/bookings/{id}/no-show/`
+- `POST /api/v1/clubs/{club_slug}/bookings/{id}/reschedule/`
 - `POST /api/v1/clubs/{club_slug}/bookings/{id}/expire/`
 
 Allowed transitions are `HOLD -> CANCELLED`, `HOLD -> EXPIRED`,
 `CONFIRMED -> CANCELLED`, `CONFIRMED -> COMPLETED`, and
 `CONFIRMED -> NO_SHOW`. Terminal statuses remain locked.
+
+Lifecycle request bodies:
+
+```json
+{"reason": "Customer cancelled"}
+```
+
+`cancel` accepts an optional reason for platform admins, owners, and managers.
+Court staff must provide a non-empty cancellation reason.
+
+```json
+{"reason": "Customer did not arrive"}
+```
+
+`no-show` accepts an optional reason and is allowed only for `CONFIRMED`
+bookings.
+
+```json
+{
+  "court": 1,
+  "start_time": "2026-07-20T20:00:00Z",
+  "end_time": "2026-07-20T21:00:00Z",
+  "reason": "Customer changed time"
+}
+```
+
+`reschedule` is allowed for `HOLD` and `CONFIRMED` bookings only. The new court
+must belong to the selected club and be accessible to the actor. The new slot
+must not overlap another active booking. Transactions stay attached to the same
+booking. If the recalculated price is higher, `total_price` increases; if it is
+lower or equal, the existing `total_price` remains.
+
+```json
+{"confirm_collect_remaining_cash": true}
+```
+
+`complete` is allowed only for `CONFIRMED` bookings. If the booking has a
+remaining amount, the request must explicitly confirm cash collection with
+`confirm_collect_remaining_cash=true`; the backend then creates a CASH
+transaction for the remaining amount before marking the booking completed. Fully
+paid bookings may be completed with an empty body.
+
+`expire` accepts an empty body and is allowed only for `HOLD` bookings.
+
+To expire due HOLD bookings manually, run:
+
+```bash
+python manage.py expire_hold_bookings
+```
+
+The command uses each court's `internal_hold_expiry_hours`, is idempotent, and
+does not require Celery or a scheduler.
 
 ## Sprint 6 Settlement Endpoints
 
@@ -155,7 +229,7 @@ Allowed transitions are `HOLD -> CANCELLED`, `HOLD -> EXPIRED`,
 - `GET /api/v1/clubs/{club_slug}/settlements/preview/`
 - `POST /api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`
 
-Settlement preview summarizes unsettled transactions for a selected period
+Settlement preview summarizes valid, non-voided unsettled transactions for a selected period
 without creating records. Settlement creation snapshots matching unsettled
 transactions into settlement lines. Mark-settled changes only `PENDING`
 settlements to `SETTLED`.
