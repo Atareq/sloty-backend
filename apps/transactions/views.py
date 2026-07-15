@@ -10,12 +10,12 @@ from apps.clubs.permissions import HasClubAccess
 from apps.transactions.filters import TransactionFilter
 from apps.transactions.models import Transaction
 from apps.transactions.serializers import (
+    TransactionCancelSerializer,
     TransactionCreateSerializer,
     TransactionDetailSerializer,
     TransactionListSerializer,
-    TransactionVoidSerializer,
 )
-from apps.transactions.services import void_transaction
+from apps.transactions.services import cancel_transaction
 
 
 @extend_schema_view(
@@ -50,7 +50,7 @@ class TransactionViewSet(
         return (
             self.get_access_context()
             .scoped_transactions_queryset()
-            .select_related("booking", "club", "court", "created_by", "voided_by")
+            .select_related("booking", "club", "court", "created_by", "cancelled_by")
             .order_by("-created", "-id")
         )
 
@@ -59,22 +59,22 @@ class TransactionViewSet(
             return TransactionListSerializer
         if self.action == "create":
             return TransactionCreateSerializer
-        if self.action == "void":
-            return TransactionVoidSerializer
+        if self.action == "cancel":
+            return TransactionCancelSerializer
         return TransactionDetailSerializer
 
     @extend_schema(
         tags=["Transactions"],
-        request=TransactionVoidSerializer,
+        request=TransactionCancelSerializer,
         responses=TransactionDetailSerializer,
     )
     @action(detail=True, methods=["post"])
-    def void(self, request, *args, **kwargs):
+    def cancel(self, request, *args, **kwargs):
         access = self.get_access_context()
         transaction_obj = self.get_object()
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        transaction_obj = void_transaction(
+        transaction_obj = cancel_transaction(
             access=access,
             transaction_obj=transaction_obj,
             reason=serializer.validated_data["reason"],

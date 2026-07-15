@@ -39,7 +39,7 @@ def unsettled_transactions_queryset(*, access, period_start, period_end, court=N
         created__gte=period_start,
         created__lt=period_end,
         settlement_line__isnull=True,
-        is_voided=False,
+        is_cancelled=False,
     )
     if court is not None:
         queryset = queryset.filter(court=court)

@@ -14,12 +14,12 @@ class TransactionAdmin(admin.ModelAdmin):
         "payment_method",
         "payment_reference",
         "created_by",
-        "is_voided",
-        "voided_by",
-        "voided_at",
+        "is_cancelled",
+        "cancelled_by",
+        "cancelled_at",
         "created",
     )
-    list_filter = ("payment_method", "is_voided", "club", "court", "created")
+    list_filter = ("payment_method", "is_cancelled", "club", "court", "created")
     search_fields = (
         "payment_reference",
         "booking__customer_name",
@@ -28,7 +28,7 @@ class TransactionAdmin(admin.ModelAdmin):
         "club__name",
         "club__slug",
         "created_by__username",
-        "void_reason",
+        "cancellation_reason",
     )
     readonly_fields = (
         "club",
@@ -38,10 +38,10 @@ class TransactionAdmin(admin.ModelAdmin):
         "payment_method",
         "payment_reference",
         "created_by",
-        "is_voided",
-        "voided_by",
-        "voided_at",
-        "void_reason",
+        "is_cancelled",
+        "cancelled_by",
+        "cancelled_at",
+        "cancellation_reason",
         "created",
         "modified",
     )

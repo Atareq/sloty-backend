@@ -143,9 +143,9 @@ class AuditAPITestCase(APITestCase):
     def transaction_list_url(self, club):
         return reverse("club-transaction-list", kwargs={"club_slug": club.slug})
 
-    def transaction_void_url(self, club, transaction_obj):
+    def transaction_cancel_url(self, club, transaction_obj):
         return reverse(
-            "club-transaction-void",
+            "club-transaction-cancel",
             kwargs={"club_slug": club.slug, "pk": transaction_obj.pk},
         )
 
@@ -644,7 +644,7 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             ).exists()
         )
 
-    def test_voiding_transaction_creates_transaction_and_booking_audit_logs(self):
+    def test_cancelling_transaction_creates_transaction_and_booking_audit_logs(self):
         booking = self.create_booking(
             self.court,
             customer_phone="+201000001201",
@@ -658,26 +658,26 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
         )
 
         response = self.client.post(
-            self.transaction_void_url(self.club, transaction_obj),
+            self.transaction_cancel_url(self.club, transaction_obj),
             {"reason": "Audit correction"},
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        void_log = AuditLog.objects.get(
-            action=AuditLog.Action.TRANSACTION_VOIDED,
+        cancel_log = AuditLog.objects.get(
+            action=AuditLog.Action.TRANSACTION_CANCELLED,
             entity_type="Transaction",
             entity_id=transaction_obj.id,
         )
-        self.assertEqual(void_log.metadata["reason"], "Audit correction")
-        self.assertEqual(void_log.before_data["booking_status"], "CONFIRMED")
-        self.assertEqual(void_log.after_data["booking_status"], "HOLD")
+        self.assertEqual(cancel_log.metadata["reason"], "Audit correction")
+        self.assertEqual(cancel_log.before_data["booking_status"], "CONFIRMED")
+        self.assertEqual(cancel_log.after_data["booking_status"], "HOLD")
         self.assertTrue(
             AuditLog.objects.filter(
                 action=AuditLog.Action.BOOKING_UPDATED,
                 entity_type="Booking",
                 entity_id=booking.id,
-                metadata__source="transaction_void",
+                metadata__source="transaction_cancel",
             ).exists()
         )
 

@@ -68,8 +68,8 @@ Current repo reality:
 - Sprint 9 completes MVP booking lifecycle behavior with reason capture,
   rescheduling, remaining-cash completion confirmation, automatic hold-expiry
   command support, and lifecycle audit logs
-- Sprint 10 adds logged transaction voiding for safe corrections, excludes
-  voided transactions from financial totals and settlements, and recalculates
+- Sprint 10 adds logged transaction cancelling for safe corrections, excludes
+  cancelled transactions from financial totals and settlements, and recalculates
   booking payment status from valid transactions
 - Planned shared app name is `apps/common/`
 - Domain apps beyond `accounts`, `clubs`, `courts`, `bookings`,
@@ -144,6 +144,10 @@ Current implemented app:
   Sprint 4 transactions use `requires_digital_payment_reference` for manual
   payment-reference validation. Hold-expiry behavior remains future lifecycle
   work and must not be implemented in Sprint 4.
+- Court working hours are court-scoped under
+  `/api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`. They remain one
+  `CourtWorkingHour` row per court plus weekday; do not move working-hour fields
+  onto `Court` or convert them to one-to-one settings.
 - Club/court scope must come from active `ClubMembership` rows, not from direct
   club or court fields on `User`.
 - `apps/bookings/` contains booking creation, list/detail APIs, schedule-style
@@ -162,11 +166,11 @@ Current implemented app:
   Automatic hold expiry is exposed through the `expire_hold_bookings`
   management command only; no Celery scheduler or background worker exists.
 - `apps/transactions/` contains immutable booking transaction recording,
-  transaction create/list/detail/void APIs, payment reference uniqueness inside
+  transaction create/list/detail/cancel APIs, payment reference uniqueness inside
   a club, and booking payment summary support.
 - Transaction creation confirms a HOLD booking to CONFIRMED. Other booking
   lifecycle actions are handled by the Sprint 5 booking lifecycle service.
-- Transaction corrections use a logged void of the original row followed by
+- Transaction corrections use a logged cancel of the original row followed by
   the normal create endpoint. Refunds, reversals, online payment gateway logic,
   and platform commission calculation remain future work.
 - Business APIs for memberships, courts, working hours, bookings, and
@@ -306,6 +310,8 @@ Rules for the flow:
   assigned court and cannot update courts.
 - Platform admins, owners, and managers can manage working hours for accessible
   courts. Staff can list working hours for their assigned court only.
+- The nested court working-hours endpoint is the primary API for frontend
+  settings pages. The older `/court-working-hours/` route is compatibility-only.
 - `CourtStaffAssignment` has been removed. Staff access is represented by
   `ClubMembership(role=STAFF, court=<court>)`.
 - Do not place booking, transaction, settlement, pricing, or audit behavior
@@ -367,7 +373,7 @@ Rules for the flow:
 
 - Transaction recording and Sprint 10 correction app.
 - Contains `Transaction`, transaction serializers, transaction viewsets,
-  transaction creation/void services, and transaction admin registration.
+  transaction creation/cancel services, and transaction admin registration.
 - Do not create `apps/transactions/permissions.py` by default.
 - Transaction access must be centralized through
   `apps/clubs/access.py -> ClubAccessContext`.
@@ -379,9 +385,9 @@ Rules for the flow:
   `access.can_create_transaction_for_booking(booking)`.
 - Object-level transaction checks, when needed, should call
   `access.can_access_transaction(transaction)`.
-- Transaction void authority should call
-  `access.can_void_transaction(transaction)`. Platform admins may void any
-  eligible scoped transaction; owners, managers, and staff may void only their
+- Transaction cancel authority should call
+  `access.can_cancel_transaction(transaction)`. Platform admins may cancel any
+  eligible scoped transaction; owners, managers, and staff may cancel only their
   own eligible scoped transactions.
 - Do not duplicate `ClubMembership` queries inside transaction views,
   serializers, or services.
@@ -390,17 +396,17 @@ Rules for the flow:
   and explain why before adding it.
 - Transactions are immutable financial history through the API: no PATCH, PUT,
   DELETE, refund, or reversal behavior exists. Corrections use
-  `POST .../transactions/{id}/void/` with a required reason, followed by normal
+  `POST .../transactions/{id}/cancel/` with a required reason, followed by normal
   transaction creation.
-- Voided transactions remain visible and may be filtered with `is_voided`, but
-  only non-voided transactions count toward paid/remaining amounts, completion
+- Cancelled transactions remain visible and may be filtered with `is_cancelled`, but
+  only non-cancelled transactions count toward paid/remaining amounts, completion
   collection, settlements, calendar summaries, and dashboard revenue.
-- Already voided or settled transactions and transactions attached to terminal
-  bookings cannot be voided. If no valid payment remains on a confirmed
-  booking, the void service returns the booking to `HOLD` in the same atomic,
+- Already cancelled or settled transactions and transactions attached to terminal
+  bookings cannot be cancelled. If no valid payment remains on a confirmed
+  booking, the cancel service returns the booking to `HOLD` in the same atomic,
   row-locked workflow.
 - Transaction creation may change booking status only from HOLD to CONFIRMED.
-  Transaction void may change booking status only from CONFIRMED to HOLD.
+  Transaction cancel may change booking status only from CONFIRMED to HOLD.
 
 `apps/settlements/`
 
@@ -424,7 +430,7 @@ Rules for the flow:
 - `SettlementTransaction.transaction` is a `OneToOneField` to `Transaction`;
   this prevents one transaction from being included in more than one
   settlement while keeping transaction rows immutable.
-- Settlements include non-voided already-recorded transactions by club,
+- Settlements include non-cancelled already-recorded transactions by club,
   optional court, period, and unsettled state. Booking lifecycle status is not
   used to decide settlement inclusion in Sprint 6.
 - Settlements do not implement refunds, reversals, corrections, commission,
@@ -459,7 +465,7 @@ Rules for the flow:
 - Sprint 9 adds `BOOKING_RESCHEDULED` and requires audit logs for cancellation,
   no-show, reschedule, completion, manual expiry, automatic expiry, and auto
   cash transaction creation on completion.
-- Sprint 10 adds `TRANSACTION_VOIDED`. A void records before/after void and
+- Sprint 10 adds `TRANSACTION_CANCELLED`. A cancel records before/after cancel and
   booking status data plus reason metadata; a CONFIRMED-to-HOLD recalculation
   also records an explicit `BOOKING_UPDATED` audit log.
 - Audit filters live in `apps/audit/filters.py` and must follow the standard
@@ -482,7 +488,7 @@ Rules for the flow:
 - Financial dashboard endpoints are overview, revenue, and court utilization.
   Staff cannot access these endpoints.
 - Calendar payment summaries and all financial dashboard transaction totals
-  include non-voided transactions only.
+  include non-cancelled transactions only.
 - Dashboard views must stay thin and use service functions plus
   `ClubAccessContext`; do not query `ClubMembership` in dashboard views,
   serializers, or services.
@@ -869,7 +875,8 @@ Notes:
   `/api/v1/clubs/`,
   `/api/v1/clubs/{club_slug}/memberships/`,
   `/api/v1/clubs/{club_slug}/courts/`,
-  `/api/v1/clubs/{club_slug}/court-working-hours/`,
+  `/api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`,
+  `/api/v1/clubs/{club_slug}/court-working-hours/` (deprecated compatibility),
   `/api/v1/clubs/{club_slug}/bookings/`,
   `/api/v1/clubs/{club_slug}/bookings/{id}/cancel/`,
   `/api/v1/clubs/{club_slug}/bookings/{id}/complete/`,
@@ -877,7 +884,7 @@ Notes:
   `/api/v1/clubs/{club_slug}/bookings/{id}/reschedule/`,
   `/api/v1/clubs/{club_slug}/bookings/{id}/expire/`,
   `/api/v1/clubs/{club_slug}/transactions/`,
-  `/api/v1/clubs/{club_slug}/transactions/{id}/void/`,
+  `/api/v1/clubs/{club_slug}/transactions/{id}/cancel/`,
   `/api/v1/clubs/{club_slug}/settlements/`,
   `/api/v1/clubs/{club_slug}/settlements/preview/`, and
   `/api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`,

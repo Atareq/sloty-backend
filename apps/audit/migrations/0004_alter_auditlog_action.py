@@ -23,7 +23,7 @@ class Migration(migrations.Migration):
                     ("BOOKING_EXPIRED", "Booking expired"),
                     ("BOOKING_RESCHEDULED", "Booking rescheduled"),
                     ("TRANSACTION_CREATED", "Transaction created"),
-                    ("TRANSACTION_VOIDED", "Transaction voided"),
+                    ("TRANSACTION_CANCELLED", "Transaction cancelled"),
                     ("SETTLEMENT_CREATED", "Settlement created"),
                     ("SETTLEMENT_MARKED_SETTLED", "Settlement marked settled"),
                 ],

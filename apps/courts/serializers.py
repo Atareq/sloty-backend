@@ -74,6 +74,48 @@ class CourtWorkingHourSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class CourtWorkingHourNestedRowSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True, allow_null=True)
+    weekday = serializers.ChoiceField(choices=CourtWorkingHour.Weekday.choices)
+    opens_at = serializers.TimeField(required=False, allow_null=True)
+    closes_at = serializers.TimeField(required=False, allow_null=True)
+    is_closed = serializers.BooleanField(default=False)
+
+    def validate(self, attrs):
+        is_closed = attrs.get("is_closed", False)
+        opens_at = attrs.get("opens_at")
+        closes_at = attrs.get("closes_at")
+
+        if is_closed:
+            if opens_at is not None or closes_at is not None:
+                raise serializers.ValidationError(
+                    "Closed working hours must not include opens_at or closes_at."
+                )
+            return attrs
+
+        if opens_at is None or closes_at is None:
+            raise serializers.ValidationError(
+                "Open working hours require both opens_at and closes_at."
+            )
+        if opens_at >= closes_at:
+            raise serializers.ValidationError(
+                {"opens_at": "opens_at must be before closes_at."}
+            )
+        return attrs
+
+
+class CourtWeeklyWorkingHoursSerializer(serializers.Serializer):
+    court = serializers.IntegerField(read_only=True)
+    court_name = serializers.CharField(read_only=True)
+    working_hours = CourtWorkingHourNestedRowSerializer(many=True)
+
+    def validate_working_hours(self, value):
+        weekdays = [row["weekday"] for row in value]
+        if len(weekdays) != len(set(weekdays)):
+            raise serializers.ValidationError("Duplicate weekdays are not allowed.")
+        return value
+
+
 class CourtListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Court

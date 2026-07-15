@@ -288,7 +288,7 @@ amount
 method
 reference
 collected_by
-is_voided
+is_cancelled
 is_settled
 created_at
 notes
@@ -302,12 +302,12 @@ booking total price - sum(valid transactions)
 Add booking status transition:
 Hold → Confirmed after first valid transaction
 Add transaction list API.
-Add void transaction API.
-Void rules:
-user can void only own unsettled transaction
+Add cancel transaction API.
+Cancel rules:
+user can cancel only own unsettled transaction
 booking must not be completed
 reason required
-If all valid transactions are voided:
+If all valid transactions are cancelled:
 Confirmed → Hold
 Add audit logs.
 Frontend Tasks
@@ -320,7 +320,7 @@ notes
 Show transaction list.
 Show total paid.
 Show remaining amount.
-Show void button only when allowed.
+Show cancel button only when allowed.
 Show payment method labels.
 Show reference requirement based on court policy.
 QA Tasks
@@ -329,13 +329,13 @@ Add Instapay transaction with/without reference depending on flag.
 Add e-wallet transaction.
 Prevent overpayment.
 First payment confirms Hold booking.
-Void own transaction before settlement.
-Cannot void others’ transactions.
+Cancel own transaction before settlement.
+Cannot cancel others’ transactions.
 Cannot add transaction to completed/cancelled/expired/no-show booking.
 Deliverables
 Payment recording works.
 Remaining amount calculated dynamically.
-Transaction correction by void works.
+Transaction correction by cancel works.
 Definition of Done
 No raw transaction edit exists.
 Money history is traceable.
@@ -443,7 +443,7 @@ Staff cannot settle.
 Manager cannot settle unless flag enabled.
 Manager cannot settle own transactions.
 Settled transactions become locked.
-Settled transactions cannot be voided.
+Settled transactions cannot be cancelled.
 Deliverables
 Staff shift settlement works.
 Owner can track staff-collected money.
@@ -642,7 +642,7 @@ Audit logs are core business value, not a luxury.
 
 4. Do not allow raw money edits
 
-Transactions must be voided/corrected, not edited.
+Transactions must be cancelled/corrected, not edited.
 
 5. Do not build a desktop-first UI
 

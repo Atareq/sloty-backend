@@ -82,7 +82,7 @@ class BookingViewSet(
                 paid_amount=Coalesce(
                     Sum(
                         "transactions__amount",
-                        filter=Q(transactions__is_voided=False),
+                        filter=Q(transactions__is_cancelled=False),
                     ),
                     Value(Decimal("0.00")),
                     output_field=DecimalField(max_digits=10, decimal_places=2),

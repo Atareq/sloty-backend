@@ -273,7 +273,7 @@ Cancel bookings with required reason
 Reschedule non-completed bookings
 Complete bookings
 Mark bookings as no-show
-Correct/void only his own unsettled transactions
+Correct/cancel only his own unsettled transactions
 
 Cannot:
 
@@ -501,7 +501,7 @@ Staff cannot change prices.
 Staff cannot hard delete bookings.
 Staff cannot edit completed bookings.
 Staff cancellation reason is required.
-Staff can void/correct only his own unsettled transactions.
+Staff can cancel/correct only his own unsettled transactions.
 
 Acceptance criteria:
 
@@ -620,7 +620,7 @@ So:
 Booking without transaction → Hold
 Booking with valid transaction → Confirmed
 
-If all valid transactions are voided:
+If all valid transactions are cancelled:
 
 Confirmed → Hold
 15. Slot Blocking Rule
@@ -863,7 +863,7 @@ After completion:
 
 Booking is locked.
 Transactions cannot be added.
-Transactions cannot be voided.
+Transactions cannot be cancelled.
 Booking cannot be rescheduled.
 Booking cannot be cancelled.
 Corrections require admin correction process later.
@@ -1031,7 +1031,7 @@ Change transaction from 50 EGP to 30 EGP silently
 
 Correct behavior:
 
-Void old transaction
+Cancel old transaction
 Create corrected transaction
 Log the reason
 
@@ -1039,9 +1039,9 @@ Reason:
 
 Transactions are financial history.
 
-36. Transaction Void / Correction
+36. Transaction Cancel / Correction
 
-A user can void/correct only transactions that:
+A user can cancel/correct only transactions that:
 
 Were created by himself.
 Are not settled.
@@ -1054,22 +1054,22 @@ Staff can correct only his own unsettled transactions.
 Manager can correct only his own unsettled transactions.
 Owner can correct only his own unsettled transactions.
 Platform Super Admin can correct through logged correction action.
-37. Transaction Void Flow
+37. Transaction Cancel Flow
 
 Flow:
 
 User opens transaction he created.
-User clicks Void.
+User clicks Cancel.
 System checks:
 User created it.
 Transaction is not settled.
 Booking is not completed.
 User enters reason.
-Transaction becomes voided.
+Transaction becomes cancelled.
 It no longer counts toward paid amount.
 Remaining amount recalculates.
 Booking status is re-evaluated.
-Void action is audit logged.
+Cancel action is audit logged.
 
 If no valid transactions remain:
 
@@ -1087,7 +1087,7 @@ It is locked.
 Normal users cannot:
 
 Edit it
-Void it
+Cancel it
 Delete it
 Change method
 Change amount
@@ -1102,7 +1102,7 @@ Platform Super Admin correction action only, fully logged.
 Once booking is completed:
 
 No more transactions can be added.
-No transaction can be voided.
+No transaction can be cancelled.
 No booking data can be edited.
 Booking becomes financial history.
 40. Staff Shift Settlement
@@ -1302,7 +1302,7 @@ Booking expired
 Booking status changed
 Transaction Actions
 Transaction created
-Transaction voided
+Transaction cancelled
 Correction created
 Transaction settled
 Auto-cash transaction created on completion
@@ -1356,9 +1356,9 @@ Payment methods	Cash / Instapay / E-wallet
 Remaining amount	Dynamic
 Store cached remaining	No
 Raw transaction edit	No
-Correction method	Void + new transaction
-User can void others’ transactions	No
-User can void own unsettled transaction	Yes
+Correction method	Cancel + new transaction
+User can cancel others’ transactions	No
+User can cancel own unsettled transaction	Yes
 Settled transaction editable	No
 Completed booking transaction editable	No
 Amount can exceed remaining	No in MVP
@@ -1480,7 +1480,7 @@ Rule:
 
 Block.
 
-3. Staff tries to void owner transaction
+3. Staff tries to cancel owner transaction
 
 Rule:
 
@@ -1500,7 +1500,7 @@ Rule:
 
 Locked.
 
-6. Voiding transaction removes all payments
+6. Canceling transaction removes all payments
 
 Result:
 
@@ -1581,7 +1581,7 @@ First transaction converts Hold to Confirmed.
 Multiple transactions are allowed.
 Remaining amount is calculated dynamically.
 Raw transaction edit is not allowed.
-User can void only his own unsettled transaction.
+User can cancel only his own unsettled transaction.
 Settled transaction is locked.
 Completed booking is locked.
 Completion with remaining amount creates cash transaction after confirmation.
@@ -1642,7 +1642,7 @@ Amount
 Method
 Reference
 Collected by
-Is voided
+Is cancelled
 Is settled
 Created at
 Notes
@@ -1824,7 +1824,7 @@ Recommendation 5
 Protect money records.
 
 No raw transaction edits.
-Use void/correction flow.
+Use cancel/correction flow.
 
 Recommendation 6
 

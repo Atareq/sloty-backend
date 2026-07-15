@@ -100,7 +100,35 @@ requests.
 - `/api/v1/clubs/`
 - `/api/v1/clubs/{club_slug}/memberships/`
 - `/api/v1/clubs/{club_slug}/courts/`
-- `/api/v1/clubs/{club_slug}/court-working-hours/`
+- `GET /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
+- `PUT /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
+
+Court working hours are court-scoped. The nested `working-hours` route returns
+the selected court name and seven weekday rows. `PUT` replaces the weekly
+schedule for that court:
+
+```json
+{
+  "working_hours": [
+    {
+      "weekday": 0,
+      "opens_at": "10:00:00",
+      "closes_at": "23:00:00",
+      "is_closed": false
+    },
+    {
+      "weekday": 1,
+      "opens_at": null,
+      "closes_at": null,
+      "is_closed": true
+    }
+  ]
+}
+```
+
+The older `/api/v1/clubs/{club_slug}/court-working-hours/` row-level route is
+kept temporarily for compatibility. New clients should use the nested court
+route.
 
 ## Sprint 3 Booking Endpoints
 
@@ -119,7 +147,7 @@ Useful booking list filters:
 
 - `/api/v1/clubs/{club_slug}/transactions/`
 - `/api/v1/clubs/{club_slug}/transactions/{id}/`
-- `POST /api/v1/clubs/{club_slug}/transactions/{id}/void/`
+- `POST /api/v1/clubs/{club_slug}/transactions/{id}/cancel/`
 
 Useful transaction list filters:
 
@@ -130,11 +158,11 @@ Useful transaction list filters:
 - `date_from`
 - `date_to`
 - `created_by`
-- `is_voided`
+- `is_cancelled`
 
 Creating the first valid transaction for a `HOLD` booking confirms it.
 Transactions are immutable financial history: PATCH, PUT, and DELETE are not
-available. To correct an entry, void the original transaction with a reason,
+available. To correct an entry, cancel the original transaction with a reason,
 then create the corrected transaction through the normal transaction create
 endpoint:
 
@@ -142,15 +170,15 @@ endpoint:
 {"reason": "Wrong amount entered"}
 ```
 
-Platform admins may void any eligible transaction in the selected club. Owners,
-managers, and staff may void only transactions they created and can access;
-staff remain limited to their assigned court. Already voided or settled
-transactions and transactions attached to terminal bookings cannot be voided.
+Platform admins may cancel any eligible transaction in the selected club. Owners,
+managers, and staff may cancel only transactions they created and can access;
+staff remain limited to their assigned court. Already cancelled or settled
+transactions and transactions attached to terminal bookings cannot be cancelled.
 
-Voided transactions remain visible in list/detail responses and can be selected
-with `?is_voided=true` or `?is_voided=false`. They do not count toward booking
+Cancelled transactions remain visible in list/detail responses and can be selected
+with `?is_cancelled=true` or `?is_cancelled=false`. They do not count toward booking
 paid/remaining amounts, completion collection, settlement preview/creation,
-calendar payment summaries, or dashboard revenue. If voiding removes the last
+calendar payment summaries, or dashboard revenue. If cancelling removes the last
 valid payment from a `CONFIRMED` booking, the booking returns to `HOLD`.
 
 Duplicate non-blank payment references are rejected within the same club; blank
@@ -229,7 +257,7 @@ does not require Celery or a scheduler.
 - `GET /api/v1/clubs/{club_slug}/settlements/preview/`
 - `POST /api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`
 
-Settlement preview summarizes valid, non-voided unsettled transactions for a selected period
+Settlement preview summarizes valid, non-cancelled unsettled transactions for a selected period
 without creating records. Settlement creation snapshots matching unsettled
 transactions into settlement lines. Mark-settled changes only `PENDING`
 settlements to `SETTLED`.

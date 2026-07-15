@@ -20,10 +20,10 @@ def normalize_payment_reference(payment_reference):
     return (payment_reference or "").strip()
 
 
-def get_booking_paid_amount(booking, *, include_voided=False) -> Decimal:
+def get_booking_paid_amount(booking, *, include_cancelled=False) -> Decimal:
     queryset = Transaction.objects.filter(booking=booking)
-    if not include_voided:
-        queryset = queryset.filter(is_voided=False)
+    if not include_cancelled:
+        queryset = queryset.filter(is_cancelled=False)
     return queryset.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
 
 
@@ -164,7 +164,7 @@ def create_booking_transaction(
         raise
 
 
-def recalculate_booking_status_after_transaction_void(booking):
+def recalculate_booking_status_after_transaction_cancel(booking):
     old_status = booking.status
     if booking.status == Booking.Status.CONFIRMED and get_booking_paid_amount(
         booking
@@ -174,15 +174,15 @@ def recalculate_booking_status_after_transaction_void(booking):
     return old_status, booking.status
 
 
-def void_transaction(*, access, transaction_obj, reason, actor):
+def cancel_transaction(*, access, transaction_obj, reason, actor):
     reason = (reason or "").strip()
     if not reason:
-        raise serializers.ValidationError({"reason": "A void reason is required."})
+        raise serializers.ValidationError({"reason": "A cancel reason is required."})
 
     with transaction.atomic():
         locked_transaction = (
             Transaction.objects.select_for_update(of=("self",))
-            .select_related("booking", "club", "court", "created_by", "voided_by")
+            .select_related("booking", "club", "court", "created_by", "cancelled_by")
             .get(pk=transaction_obj.pk)
         )
         locked_booking = (
@@ -192,39 +192,39 @@ def void_transaction(*, access, transaction_obj, reason, actor):
         )
         locked_transaction.booking = locked_booking
 
-        if not access.can_void_transaction(locked_transaction):
-            raise PermissionDenied("You cannot void this transaction.")
-        if locked_transaction.is_voided:
+        if not access.can_cancel_transaction(locked_transaction):
+            raise PermissionDenied("You cannot cancel this transaction.")
+        if locked_transaction.is_cancelled:
             raise serializers.ValidationError(
-                {"is_voided": "This transaction is already voided."}
+                {"is_cancelled": "This transaction is already cancelled."}
             )
         if Transaction.objects.filter(
             pk=locked_transaction.pk,
             settlement_line__isnull=False,
         ).exists():
             raise serializers.ValidationError(
-                {"transaction": "Settled transactions cannot be voided."}
+                {"transaction": "Settled transactions cannot be cancelled."}
             )
         if locked_booking.status in Booking.LOCKED_STATUSES:
             raise serializers.ValidationError(
-                {"booking": "Transactions on terminal bookings cannot be voided."}
+                {"booking": "Transactions on terminal bookings cannot be cancelled."}
             )
 
         old_booking_status = locked_booking.status
-        locked_transaction.is_voided = True
-        locked_transaction.voided_by = actor
-        locked_transaction.voided_at = timezone.now()
-        locked_transaction.void_reason = reason
+        locked_transaction.is_cancelled = True
+        locked_transaction.cancelled_by = actor
+        locked_transaction.cancelled_at = timezone.now()
+        locked_transaction.cancellation_reason = reason
         locked_transaction.save(
             update_fields=[
-                "is_voided",
-                "voided_by",
-                "voided_at",
-                "void_reason",
+                "is_cancelled",
+                "cancelled_by",
+                "cancelled_at",
+                "cancellation_reason",
                 "modified",
             ]
         )
-        _, new_booking_status = recalculate_booking_status_after_transaction_void(
+        _, new_booking_status = recalculate_booking_status_after_transaction_cancel(
             locked_booking
         )
 
@@ -232,17 +232,17 @@ def void_transaction(*, access, transaction_obj, reason, actor):
             club=locked_transaction.club,
             court=locked_transaction.court,
             actor=actor,
-            action=AuditLog.Action.TRANSACTION_VOIDED,
+            action=AuditLog.Action.TRANSACTION_CANCELLED,
             entity_type="Transaction",
             entity_id=locked_transaction.id,
             before_data={
-                "is_voided": False,
+                "is_cancelled": False,
                 "booking_status": old_booking_status,
             },
             after_data={
-                "is_voided": True,
-                "voided_by": actor.id,
-                "voided_at": locked_transaction.voided_at.isoformat(),
+                "is_cancelled": True,
+                "cancelled_by": actor.id,
+                "cancelled_at": locked_transaction.cancelled_at.isoformat(),
                 "booking_status": new_booking_status,
             },
             metadata={
@@ -261,7 +261,7 @@ def void_transaction(*, access, transaction_obj, reason, actor):
                 before_data={"status": old_booking_status},
                 after_data={"status": new_booking_status},
                 metadata={
-                    "source": "transaction_void",
+                    "source": "transaction_cancel",
                     "transaction_id": locked_transaction.id,
                 },
             )

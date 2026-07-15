@@ -75,6 +75,12 @@ class CourtAPITestCase(APITestCase):
             kwargs={"club_slug": club.slug, "pk": working_hour.pk},
         )
 
+    def nested_working_hour_url(self, club, court):
+        return reverse(
+            "club-court-nested-working-hour-list",
+            kwargs={"club_slug": club.slug, "court_id": court.pk},
+        )
+
     def list_ids(self, response):
         return {item["id"] for item in response.data["results"]}
 
@@ -360,6 +366,29 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
             format="json",
         )
 
+    def weekly_payload(self, *rows):
+        return {"working_hours": list(rows)}
+
+    def open_row(self, weekday=CourtWorkingHour.Weekday.MONDAY, **extra_fields):
+        data = {
+            "weekday": weekday,
+            "opens_at": "10:00:00",
+            "closes_at": "22:00:00",
+            "is_closed": False,
+        }
+        data.update(extra_fields)
+        return data
+
+    def closed_row(self, weekday=CourtWorkingHour.Weekday.TUESDAY, **extra_fields):
+        data = {
+            "weekday": weekday,
+            "opens_at": None,
+            "closes_at": None,
+            "is_closed": True,
+        }
+        data.update(extra_fields)
+        return data
+
     def test_owner_can_create_working_hours_for_owned_court(self):
         self.client.force_authenticate(user=self.owner)
 
@@ -443,3 +472,212 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(self.list_ids(list_response), {working_hour.id})
         self.assertEqual(create_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_nested_get_returns_selected_court_weekly_schedule(self):
+        CourtWorkingHour.objects.create(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.MONDAY,
+            opens_at="10:00",
+            closes_at="22:00",
+        )
+        CourtWorkingHour.objects.create(
+            court=self.other_court,
+            weekday=CourtWorkingHour.Weekday.MONDAY,
+            opens_at="09:00",
+            closes_at="21:00",
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.nested_working_hour_url(self.club, self.court))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["court"], self.court.id)
+        self.assertEqual(response.data["court_name"], self.court.name)
+        self.assertEqual(len(response.data["working_hours"]), 7)
+        monday = next(
+            item
+            for item in response.data["working_hours"]
+            if item["weekday"] == CourtWorkingHour.Weekday.MONDAY
+        )
+        self.assertEqual(monday["opens_at"], "10:00:00")
+
+    def test_nested_get_rejects_court_from_another_club(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(
+            self.nested_working_hour_url(self.club, self.other_court)
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_staff_can_read_assigned_nested_working_hours_only(self):
+        self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        assigned_response = self.client.get(
+            self.nested_working_hour_url(self.club, self.court)
+        )
+        other_response = self.client.get(
+            self.nested_working_hour_url(self.club, self.other_court)
+        )
+
+        self.assertEqual(assigned_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(other_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_nested_put_updates_full_weekly_schedule(self):
+        CourtWorkingHour.objects.create(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.MONDAY,
+            opens_at="08:00",
+            closes_at="12:00",
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(
+                self.open_row(CourtWorkingHour.Weekday.MONDAY),
+                self.closed_row(CourtWorkingHour.Weekday.TUESDAY),
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(CourtWorkingHour.objects.filter(court=self.court).count(), 7)
+        monday = CourtWorkingHour.objects.get(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.MONDAY,
+        )
+        tuesday = CourtWorkingHour.objects.get(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.TUESDAY,
+        )
+        self.assertEqual(monday.opens_at.isoformat(), "10:00:00")
+        self.assertTrue(tuesday.is_closed)
+        self.assertIsNone(tuesday.opens_at)
+        self.assertIsNone(tuesday.closes_at)
+
+    def test_nested_put_rejects_duplicate_weekday(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(
+                self.open_row(CourtWorkingHour.Weekday.MONDAY),
+                self.open_row(CourtWorkingHour.Weekday.MONDAY),
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_nested_put_rejects_invalid_weekday(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(self.open_row(weekday=99)),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_nested_put_rejects_open_day_without_times(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(
+                self.open_row(opens_at=None, closes_at=None),
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_nested_put_rejects_opens_at_after_closes_at(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(
+                self.open_row(opens_at="22:00:00", closes_at="10:00:00"),
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_nested_put_accepts_closed_day_with_null_times(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(self.closed_row(CourtWorkingHour.Weekday.FRIDAY)),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        friday = CourtWorkingHour.objects.get(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.FRIDAY,
+        )
+        self.assertTrue(friday.is_closed)
+
+    def test_nested_put_rejects_court_from_another_club(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.other_court),
+            self.weekly_payload(self.open_row()),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_unauthorized_user_cannot_manage_nested_working_hours(self):
+        self.client.force_authenticate(user=self.other_owner)
+
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(self.open_row()),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_staff_cannot_manage_nested_working_hours(self):
+        self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(self.open_row()),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_owner_and_manager_can_manage_nested_working_hours(self):
+        for actor in (self.owner, self.manager):
+            with self.subTest(actor=actor.username):
+                CourtWorkingHour.objects.filter(court=self.court).delete()
+                self.client.force_authenticate(user=actor)
+
+                response = self.client.put(
+                    self.nested_working_hour_url(self.club, self.court),
+                    self.weekly_payload(self.open_row()),
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)

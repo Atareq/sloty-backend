@@ -15,48 +15,48 @@ class Migration(migrations.Migration):
     operations = [
         migrations.AddField(
             model_name="transaction",
-            name="is_voided",
+            name="is_cancelled",
             field=models.BooleanField(db_index=True, default=False),
         ),
         migrations.AddField(
             model_name="transaction",
-            name="void_reason",
+            name="cancellation_reason",
             field=models.TextField(blank=True),
         ),
         migrations.AddField(
             model_name="transaction",
-            name="voided_at",
+            name="cancelled_at",
             field=models.DateTimeField(blank=True, db_index=True, null=True),
         ),
         migrations.AddField(
             model_name="transaction",
-            name="voided_by",
+            name="cancelled_by",
             field=models.ForeignKey(
                 blank=True,
                 null=True,
                 on_delete=django.db.models.deletion.SET_NULL,
-                related_name="voided_transactions",
+                related_name="cancelled_transactions",
                 to=settings.AUTH_USER_MODEL,
             ),
         ),
         migrations.AddIndex(
             model_name="transaction",
             index=models.Index(
-                fields=["club", "is_voided", "created"],
-                name="transaction_club_id_70bdab_idx",
+                fields=["club", "is_cancelled", "created"],
+                name="transaction_club_id_e57abc_idx",
             ),
         ),
         migrations.AddIndex(
             model_name="transaction",
             index=models.Index(
-                fields=["booking", "is_voided"], name="transaction_booking_489f61_idx"
+                fields=["booking", "is_cancelled"], name="transaction_booking_033bb6_idx"
             ),
         ),
         migrations.AddIndex(
             model_name="transaction",
             index=models.Index(
-                fields=["created_by", "is_voided", "created"],
-                name="transaction_created_a339c6_idx",
+                fields=["created_by", "is_cancelled", "created"],
+                name="transaction_created_34a250_idx",
             ),
         ),
     ]

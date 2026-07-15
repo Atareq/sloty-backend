@@ -52,16 +52,16 @@ class Transaction(models.Model):
         on_delete=models.SET_NULL,
         related_name="created_transactions",
     )
-    is_voided = models.BooleanField(default=False, db_index=True)
-    voided_by = models.ForeignKey(
+    is_cancelled = models.BooleanField(default=False, db_index=True)
+    cancelled_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         blank=True,
         null=True,
         on_delete=models.SET_NULL,
-        related_name="voided_transactions",
+        related_name="cancelled_transactions",
     )
-    voided_at = models.DateTimeField(blank=True, null=True, db_index=True)
-    void_reason = models.TextField(blank=True)
+    cancelled_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    cancellation_reason = models.TextField(blank=True)
     created = models.DateTimeField(auto_now_add=True, db_index=True)
     modified = models.DateTimeField(auto_now=True)
 
@@ -82,9 +82,9 @@ class Transaction(models.Model):
             models.Index(fields=["court", "created"]),
             models.Index(fields=["booking", "created"]),
             models.Index(fields=["created_by", "created"]),
-            models.Index(fields=["club", "is_voided", "created"]),
-            models.Index(fields=["booking", "is_voided"]),
-            models.Index(fields=["created_by", "is_voided", "created"]),
+            models.Index(fields=["club", "is_cancelled", "created"]),
+            models.Index(fields=["booking", "is_cancelled"]),
+            models.Index(fields=["created_by", "is_cancelled", "created"]),
             models.Index(fields=["payment_method"]),
             models.Index(fields=["payment_reference"]),
         ]

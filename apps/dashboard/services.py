@@ -130,7 +130,7 @@ def get_calendar_items(*, access, date_from, date_to, court=None, status=None):
         .annotate(
             paid_amount=money_sum(
                 "transactions__amount",
-                filter=Q(transactions__is_voided=False),
+                filter=Q(transactions__is_cancelled=False),
             ),
         )
         .order_by("start_time", "id")
@@ -187,7 +187,7 @@ def dashboard_transactions_queryset(*, access, date_from, date_to, court=None):
         court__in=access.scoped_dashboard_courts_queryset(),
         created__gte=date_from,
         created__lt=date_to,
-        is_voided=False,
+        is_cancelled=False,
     )
     if court is not None:
         queryset = queryset.filter(court=court)
@@ -219,7 +219,7 @@ def get_dashboard_overview(*, access, date_from, date_to, court=None):
     booking_paid = money(
         Transaction.objects.filter(
             booking__in=bookings.values("id"),
-            is_voided=False,
+            is_cancelled=False,
         ).aggregate(total=Sum("amount"))["total"]
     )
     transaction_summary = transactions.aggregate(
@@ -438,7 +438,7 @@ def get_court_utilization(*, access, date_from, date_to):
             court__in=courts,
             created__gte=date_from,
             created__lt=date_to,
-            is_voided=False,
+            is_cancelled=False,
         )
         .values("court_id")
         .annotate(total=money_sum("amount"))

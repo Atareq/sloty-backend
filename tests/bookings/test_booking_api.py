@@ -1020,16 +1020,16 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         self.assertEqual(booking.status, Booking.Status.CONFIRMED)
         self.assertEqual(booking.transactions.count(), 1)
 
-    def test_completion_remaining_amount_ignores_voided_transactions(self):
+    def test_completion_remaining_amount_ignores_cancelled_transactions(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
         self.create_transaction(booking, amount=Decimal("100.00"))
         self.create_transaction(
             booking,
             amount=Decimal("200.00"),
-            is_voided=True,
-            voided_by=self.platform_admin,
-            voided_at=timezone.now(),
-            void_reason="Wrong completion payment",
+            is_cancelled=True,
+            cancelled_by=self.platform_admin,
+            cancelled_at=timezone.now(),
+            cancellation_reason="Wrong completion payment",
         )
 
         response = self.post_lifecycle(
@@ -1627,15 +1627,15 @@ class BookingPaymentSummaryTests(BookingAPITestCase):
         self.assertEqual(response.data["remaining_amount"], "0.00")
         self.assertTrue(response.data["is_fully_paid"])
 
-    def test_payment_summary_ignores_voided_transactions(self):
+    def test_payment_summary_ignores_cancelled_transactions(self):
         self.create_transaction(self.booking, amount=Decimal("100.00"))
         self.create_transaction(
             self.booking,
             amount=Decimal("200.00"),
-            is_voided=True,
-            voided_by=self.platform_admin,
-            voided_at=timezone.now(),
-            void_reason="Wrong payment",
+            is_cancelled=True,
+            cancelled_by=self.platform_admin,
+            cancelled_at=timezone.now(),
+            cancellation_reason="Wrong payment",
         )
 
         detail_response = self.client.get(

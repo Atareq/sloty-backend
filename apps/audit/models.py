@@ -15,7 +15,7 @@ class AuditLog(models.Model):
         BOOKING_EXPIRED = "BOOKING_EXPIRED", "Booking expired"
         BOOKING_RESCHEDULED = "BOOKING_RESCHEDULED", "Booking rescheduled"
         TRANSACTION_CREATED = "TRANSACTION_CREATED", "Transaction created"
-        TRANSACTION_VOIDED = "TRANSACTION_VOIDED", "Transaction voided"
+        TRANSACTION_CANCELLED = "TRANSACTION_CANCELLED", "Transaction cancelled"
         SETTLEMENT_CREATED = "SETTLEMENT_CREATED", "Settlement created"
         SETTLEMENT_MARKED_SETTLED = (
             "SETTLEMENT_MARKED_SETTLED",
