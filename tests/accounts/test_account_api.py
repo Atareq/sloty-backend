@@ -4,6 +4,7 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.accounts.models import User
+from apps.accounts.services import find_orphan_business_users
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court
 
@@ -346,7 +347,7 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         self.assertEqual(response.data["username"], self.non_platform_user.username)
         self.assertNotIn("password", response.data)
 
-    def test_platform_admin_can_create_user(self):
+    def test_platform_admin_cannot_create_non_platform_user(self):
         self.authenticate_platform_admin()
 
         response = self.client.post(
@@ -364,16 +365,12 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        user = User.objects.get(username="created-user")
-        self.assertTrue(user.check_password("new-user-pass-123"))
-        self.assertEqual(user.created_by, self.platform_admin)
-        self.assertFalse(user.is_platform_admin)
-        self.assertFalse(user.is_staff)
-        self.assertFalse(user.is_superuser)
-        self.assertEqual(set(response.data), self.user_list_response_fields)
-        self.assertEqual(response.data["created_by"], self.platform_admin.id)
-        self.assertNotIn("password", response.data)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"][0],
+            "Club users must be created through a club-scoped membership endpoint.",
+        )
+        self.assertFalse(User.objects.filter(username="created-user").exists())
 
     def test_platform_admin_can_create_platform_admin_user(self):
         self.authenticate_platform_admin()
@@ -391,7 +388,33 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         user = User.objects.get(username="created-admin")
         self.assertTrue(user.is_platform_admin)
+        self.assertFalse(user.is_staff)
+        self.assertFalse(user.is_superuser)
+        self.assertEqual(user.created_by, self.platform_admin)
         self.assertTrue(response.data["is_platform_admin"])
+        self.assertNotIn("password", response.data)
+
+    def test_user_create_rejects_role_club_and_court_fields(self):
+        self.authenticate_platform_admin()
+
+        response = self.client.post(
+            reverse("user-list"),
+            {
+                "username": "bad-scope-user",
+                "password": "new-user-pass-123",
+                "is_platform_admin": True,
+                "role": ClubMembership.Role.STAFF,
+                "club": 1,
+                "court": 1,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("role", response.data)
+        self.assertIn("club", response.data)
+        self.assertIn("court", response.data)
+        self.assertFalse(User.objects.filter(username="bad-scope-user").exists())
 
     def test_create_payload_cannot_set_staff_or_superuser_flags(self):
         self.authenticate_platform_admin()
@@ -401,6 +424,7 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
             {
                 "username": "flagged-user",
                 "password": "new-user-pass-123",
+                "is_platform_admin": True,
                 "is_staff": True,
                 "is_superuser": True,
             },
@@ -409,6 +433,7 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         user = User.objects.get(username="flagged-user")
+        self.assertTrue(user.is_platform_admin)
         self.assertFalse(user.is_staff)
         self.assertFalse(user.is_superuser)
         self.assertNotIn("is_staff", response.data)
@@ -469,3 +494,22 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
             response.status_code,
             status.HTTP_405_METHOD_NOT_ALLOWED,
         )
+
+
+class OrphanBusinessUserIntegrityTests(AccountAPITestCase):
+    def test_find_orphan_business_users_identifies_active_non_platform_orphans(self):
+        orphan = self.create_user(username="orphan-business-user")
+        inactive_user = self.create_user(username="inactive-business-user")
+        inactive_user.is_active = False
+        inactive_user.save(update_fields=["is_active"])
+        platform_admin = self.create_platform_admin("orphan-platform-admin")
+        club = self.create_club("Scoped Club", "scoped-club")
+        scoped_user = self.create_user(username="scoped-business-user")
+        self.create_membership(scoped_user, club, ClubMembership.Role.OWNER)
+
+        orphan_ids = set(find_orphan_business_users().values_list("id", flat=True))
+
+        self.assertIn(orphan.id, orphan_ids)
+        self.assertNotIn(inactive_user.id, orphan_ids)
+        self.assertNotIn(platform_admin.id, orphan_ids)
+        self.assertNotIn(scoped_user.id, orphan_ids)

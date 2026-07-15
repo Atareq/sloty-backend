@@ -164,6 +164,9 @@ class UserListSerializer(serializers.ModelSerializer):
 
 class UserCreateSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
+    non_platform_user_error = (
+        "Club users must be created through a club-scoped membership endpoint."
+    )
 
     class Meta:
         model = User
@@ -183,9 +186,28 @@ class UserCreateSerializer(serializers.ModelSerializer):
             "username": {"required": True},
         }
 
+    def validate(self, attrs):
+        forbidden_fields = {"role", "club", "court", "membership", "memberships"}
+        submitted_forbidden_fields = forbidden_fields.intersection(self.initial_data)
+        if submitted_forbidden_fields:
+            raise serializers.ValidationError(
+                {
+                    field_name: "This field is not accepted by this endpoint."
+                    for field_name in sorted(submitted_forbidden_fields)
+                }
+            )
+        if not attrs.get("is_platform_admin"):
+            raise serializers.ValidationError({"detail": self.non_platform_user_error})
+        return attrs
+
     def create(self, validated_data):
         password = validated_data.pop("password")
-        return User.objects.create_user(password=password, **validated_data)
+        return User.objects.create_user(
+            password=password,
+            is_staff=False,
+            is_superuser=False,
+            **validated_data,
+        )
 
     def to_representation(self, instance):
         return UserListSerializer(instance, context=self.context).data

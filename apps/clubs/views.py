@@ -14,6 +14,7 @@ from apps.clubs.serializers import (
     ClubCreateSerializer,
     ClubDetailSerializer,
     ClubListSerializer,
+    ClubMembershipCreateSerializer,
     ClubMembershipSerializer,
     ClubUpdateSerializer,
 )
@@ -78,7 +79,7 @@ class ClubViewSet(
     list=extend_schema(tags=["Clubs"], responses=ClubMembershipSerializer),
     create=extend_schema(
         tags=["Clubs"],
-        request=ClubMembershipSerializer,
+        request=ClubMembershipCreateSerializer,
         responses=ClubMembershipSerializer,
     ),
     retrieve=extend_schema(tags=["Clubs"], responses=ClubMembershipSerializer),
@@ -110,5 +111,10 @@ class ClubMembershipViewSet(
             .order_by("id")
         )
 
+    def get_serializer_class(self):
+        if self.action == "create":
+            return ClubMembershipCreateSerializer
+        return ClubMembershipSerializer
+
     def perform_create(self, serializer):
-        serializer.save(club=self.get_club(), created_by=self.request.user)
+        serializer.save()

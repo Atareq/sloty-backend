@@ -102,13 +102,12 @@ if DB_ENGINE in {"postgres", "postgresql"}:
         }
     }
 else:
-    pass
-    # DATABASES = {
-    #     "default": {
-    #         "ENGINE": "django.db.backends.sqlite3",
-    #         "NAME": BASE_DIR / "db.sqlite3",
-    #     }
-    # }
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",

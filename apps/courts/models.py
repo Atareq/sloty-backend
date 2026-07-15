@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 from apps.clubs.models import Club
@@ -11,11 +11,20 @@ from apps.clubs.models import Club
 class Court(models.Model):
     class SportType(models.TextChoices):
         FOOTBALL = "FOOTBALL", "Football"
+        PADEL = "PADEL", "Padel"
+        TENNIS = "TENNIS", "Tennis"
 
     club = models.ForeignKey(
         Club,
         on_delete=models.CASCADE,
         related_name="courts",
+    )
+    players_count = models.PositiveIntegerField(
+        default=10,
+        validators=[
+            MinValueValidator(1),
+            MaxValueValidator(100),
+        ],
     )
     name = models.CharField(max_length=255)
     sport_type = models.CharField(
@@ -38,6 +47,7 @@ class Court(models.Model):
     internal_hold_expiry_hours = models.PositiveIntegerField(
         default=12,
         validators=[MinValueValidator(1)],
+        help_text="OnHold period without payment",
     )
     notes = models.TextField(blank=True)
     created_by = models.ForeignKey(

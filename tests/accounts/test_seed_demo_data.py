@@ -3,6 +3,7 @@ from django.db.models import Count
 from django.test import TestCase
 
 from apps.accounts.models import User
+from apps.accounts.services import find_orphan_business_users
 from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
@@ -185,3 +186,8 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertEqual(Settlement.objects.count(), counts["settlements"])
         self.assertEqual(SettlementTransaction.objects.count(), counts["lines"])
         self.assertEqual(AuditLog.objects.count(), counts["audit_logs"])
+
+    def test_seed_demo_data_leaves_no_active_non_platform_orphans(self):
+        self.run_seed_command()
+
+        self.assertFalse(find_orphan_business_users().exists())

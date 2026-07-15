@@ -49,8 +49,8 @@ and test authenticated requests by providing a bearer token.
 - `POST /api/v1/auth/token/refresh/` refreshes an access token.
 - `GET /api/v1/me/` returns the authenticated user's identity, platform admin
   flag, and active club memberships for frontend club selection.
-- `GET /api/v1/users/` and `POST /api/v1/users/` manage base user accounts for
-  platform admin users.
+- `GET /api/v1/users/` manages base user accounts for platform admin users.
+- `POST /api/v1/users/` creates platform admin users only.
 
 Login is global and does not require a club slug. After login, clients call
 `/api/v1/me/`, choose one of the returned membership clubs, then call the
@@ -71,6 +71,16 @@ These claims are derived at token issue time and are not stored on `User`:
 
 Business APIs still verify active club access from the database through
 `ClubAccessContext`; clients must not treat JWT club/court claims as authority.
+
+## Club User Onboarding
+
+Platform admins can be created through `/api/v1/users/`. Club users must be
+created through `/api/v1/clubs/{club_slug}/memberships/`, which creates the
+`User` and active `ClubMembership` together in one transaction.
+
+OWNER, MANAGER, and STAFF roles live on `ClubMembership`, not `User`. STAFF
+memberships require a court. OWNER and MANAGER memberships are club-level and
+must not include a court.
 
 ## Egypt Locations and Club Address Fields
 

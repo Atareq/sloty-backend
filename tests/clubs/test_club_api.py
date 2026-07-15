@@ -1,10 +1,15 @@
+from types import SimpleNamespace
+from unittest.mock import patch
+
 from django.db import IntegrityError, transaction
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
+from apps.clubs.access import ClubAccessContext
 from apps.clubs.models import Club, ClubMembership
+from apps.clubs.services import create_club_member
 from apps.courts.models import Court
 
 
@@ -408,6 +413,28 @@ class ClubMembershipAPITests(ClubAPITestCase):
         data.update(extra_fields)
         return self.client.post(self.membership_list_url(club), data, format="json")
 
+    def nested_user_payload(self, username, **extra_fields):
+        data = {
+            "username": username,
+            "email": f"{username}@example.com",
+            "password": self.password,
+            "first_name": "Nested",
+            "last_name": "User",
+            "phone_number": "+201000000010",
+        }
+        data.update(extra_fields)
+        return data
+
+    def post_nested_membership(self, club, role, username, court=None, **extra_fields):
+        data = {
+            "user": self.nested_user_payload(username),
+            "role": role,
+        }
+        if court is not None:
+            data["court"] = court.id
+        data.update(extra_fields)
+        return self.client.post(self.membership_list_url(club), data, format="json")
+
     def test_platform_admin_can_assign_owner_manager_and_staff(self):
         self.authenticate_platform_admin()
 
@@ -432,6 +459,61 @@ class ClubMembershipAPITests(ClubAPITestCase):
         self.assertEqual(manager_response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(staff_response.status_code, status.HTTP_201_CREATED)
 
+    def test_platform_admin_can_create_owner_with_nested_user_payload(self):
+        self.authenticate_platform_admin()
+
+        response = self.post_nested_membership(
+            self.club,
+            ClubMembership.Role.OWNER,
+            "nested-owner",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(username="nested-owner")
+        membership = ClubMembership.objects.get(user=user, club=self.club)
+        self.assertEqual(membership.role, ClubMembership.Role.OWNER)
+        self.assertTrue(membership.is_active)
+        self.assertFalse(user.is_platform_admin)
+        self.assertFalse(user.is_staff)
+        self.assertFalse(user.is_superuser)
+        self.assertTrue(user.check_password(self.password))
+        self.assertEqual(response.data["user"], user.id)
+        self.assertEqual(response.data["user_summary"]["username"], "nested-owner")
+        self.assertNotIn("password", response.data)
+        self.assertNotIn("password", response.data["user_summary"])
+
+    def test_platform_admin_can_create_manager_with_nested_user_payload(self):
+        self.authenticate_platform_admin()
+
+        response = self.post_nested_membership(
+            self.club,
+            ClubMembership.Role.MANAGER,
+            "nested-manager",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(username="nested-manager")
+        membership = ClubMembership.objects.get(user=user, club=self.club)
+        self.assertEqual(membership.role, ClubMembership.Role.MANAGER)
+        self.assertIsNone(membership.court)
+
+    def test_platform_admin_can_create_staff_with_nested_user_payload_and_court(self):
+        self.authenticate_platform_admin()
+
+        response = self.post_nested_membership(
+            self.club,
+            ClubMembership.Role.STAFF,
+            "nested-staff",
+            court=self.court,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(username="nested-staff")
+        membership = ClubMembership.objects.get(user=user, club=self.club)
+        self.assertEqual(membership.role, ClubMembership.Role.STAFF)
+        self.assertEqual(membership.court, self.court)
+        self.assertEqual(response.data["court"], self.court.id)
+
     def test_owner_can_create_manager_and_staff_inside_owned_club(self):
         self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
         self.client.force_authenticate(user=self.owner)
@@ -445,6 +527,25 @@ class ClubMembershipAPITests(ClubAPITestCase):
             self.club,
             self.staff,
             ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+
+        self.assertEqual(manager_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(staff_response.status_code, status.HTTP_201_CREATED)
+
+    def test_owner_can_create_manager_and_staff_with_nested_user_payload(self):
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.client.force_authenticate(user=self.owner)
+
+        manager_response = self.post_nested_membership(
+            self.club,
+            ClubMembership.Role.MANAGER,
+            "owner-created-manager",
+        )
+        staff_response = self.post_nested_membership(
+            self.club,
+            ClubMembership.Role.STAFF,
+            "owner-created-staff",
             court=self.court,
         )
 
@@ -523,6 +624,19 @@ class ClubMembershipAPITests(ClubAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_nested_staff_without_court_does_not_create_user(self):
+        self.authenticate_platform_admin()
+
+        response = self.post_nested_membership(
+            self.club,
+            ClubMembership.Role.STAFF,
+            "staff-without-court",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("court", response.data)
+        self.assertFalse(User.objects.filter(username="staff-without-court").exists())
+
     def test_staff_court_must_belong_to_url_club(self):
         self.authenticate_platform_admin()
 
@@ -535,6 +649,21 @@ class ClubMembershipAPITests(ClubAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_nested_staff_with_other_club_court_does_not_create_user(self):
+        self.authenticate_platform_admin()
+
+        response = self.post_nested_membership(
+            self.club,
+            ClubMembership.Role.STAFF,
+            "staff-other-club-court",
+            court=self.other_court,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(
+            User.objects.filter(username="staff-other-club-court").exists()
+        )
+
     def test_duplicate_active_memberships_are_rejected(self):
         self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
         self.authenticate_platform_admin()
@@ -546,6 +675,89 @@ class ClubMembershipAPITests(ClubAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_duplicate_nested_username_is_rejected(self):
+        self.create_user("duplicate-nested-user")
+        self.authenticate_platform_admin()
+
+        response = self.post_nested_membership(
+            self.club,
+            ClubMembership.Role.MANAGER,
+            "duplicate-nested-user",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("user", response.data)
+
+    def test_existing_user_can_be_attached_with_user_id(self):
+        self.authenticate_platform_admin()
+
+        response = self.client.post(
+            self.membership_list_url(self.club),
+            {
+                "user_id": self.other_user.id,
+                "role": ClubMembership.Role.MANAGER,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        membership = ClubMembership.objects.get(user=self.other_user, club=self.club)
+        self.assertEqual(membership.role, ClubMembership.Role.MANAGER)
+
+    def test_platform_admin_existing_user_cannot_be_attached_as_club_user(self):
+        self.authenticate_platform_admin()
+
+        response = self.client.post(
+            self.membership_list_url(self.club),
+            {
+                "user_id": self.platform_admin.id,
+                "role": ClubMembership.Role.OWNER,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("user_id", response.data)
+
+    def test_membership_creation_requires_exactly_one_user_source(self):
+        self.authenticate_platform_admin()
+
+        missing_response = self.client.post(
+            self.membership_list_url(self.club),
+            {"role": ClubMembership.Role.MANAGER},
+            format="json",
+        )
+        both_response = self.client.post(
+            self.membership_list_url(self.club),
+            {
+                "user": self.nested_user_payload("two-user-sources"),
+                "user_id": self.other_user.id,
+                "role": ClubMembership.Role.MANAGER,
+            },
+            format="json",
+        )
+
+        self.assertEqual(missing_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(both_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_club_member_rolls_back_user_when_membership_create_fails(self):
+        request = SimpleNamespace(user=self.platform_admin)
+        access = ClubAccessContext(request=request, club=self.club)
+
+        with patch(
+            "apps.clubs.services.ClubMembership.objects.create"
+        ) as mocked_create:
+            mocked_create.side_effect = RuntimeError("membership create failed")
+            with self.assertRaises(RuntimeError):
+                create_club_member(
+                    access=access,
+                    role=ClubMembership.Role.MANAGER,
+                    created_by=self.platform_admin,
+                    user_data=self.nested_user_payload("rollback-user"),
+                )
+
+        self.assertFalse(User.objects.filter(username="rollback-user").exists())
 
     def test_manager_can_have_only_one_active_club_membership(self):
         self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)

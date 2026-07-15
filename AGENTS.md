@@ -102,9 +102,14 @@ Current implemented app:
   `is_platform_admin`; it does not store club-scoped OWNER, MANAGER, or STAFF
   roles.
 - Platform user management APIs are restricted to Platform Super Admin users.
-  They may manage identity fields, `is_active`, and `is_platform_admin`; they
-  must not expose or accept Django `is_staff`, `is_superuser`, or passwords in
-  read responses.
+  They may manage identity fields, `is_active`, and `is_platform_admin`; generic
+  create may create platform admin users only. They must not expose or accept
+  Django `is_staff`, `is_superuser`, or passwords in read responses.
+- Do not create active non-platform users from generic user APIs. Club business
+  users must be created through club-scoped membership onboarding so `User` and
+  active `ClubMembership` are created atomically.
+- Do not create orphan business users in tests, seed data, or APIs unless a
+  test explicitly checks rejection or diagnostics.
 - It must not contain club, court, booking, transaction, settlement, pricing,
   staff shift, marketplace, or assignment business logic.
 - `apps/clubs/` contains club setup, club membership assignment logic, and the
@@ -124,6 +129,9 @@ Current implemented app:
 - `ClubMembership` is the single source of OWNER, MANAGER, and STAFF authority
   inside a club. STAFF memberships are tied to a court through
   `ClubMembership.court`.
+- `POST /api/v1/clubs/{club_slug}/memberships/` supports club-scoped onboarding:
+  nested user data plus membership role/court are persisted together through
+  `apps/clubs/services.py`.
 - `apps/courts/` contains court setup and court working hours logic.
 - `Court` stores `default_price`, `slot_duration_minutes`,
   `requires_digital_payment_reference`, and `internal_hold_expiry_hours`.
@@ -251,6 +259,10 @@ Rules for the flow:
 - `User.is_platform_super_admin()` is a temporary compatibility helper that
   returns `is_platform_admin`.
 - Do not add or reintroduce club-scoped business roles on `User`.
+- `/api/v1/users/` must not create active non-platform users; use the
+  club-scoped membership endpoint for club owners, managers, and staff.
+- `apps/accounts/services.py` owns lightweight account diagnostics such as
+  `find_orphan_business_users()`.
 - Do not place unrelated domain behavior here.
 
 `apps/clubs/`
@@ -266,10 +278,14 @@ Rules for the flow:
 - Active MANAGER memberships are currently limited to one club per user.
   Active STAFF memberships are currently limited to one court assignment per
   user.
+- Club-scoped member onboarding creates a non-platform active `User` plus active
+  `ClubMembership` in one `transaction.atomic()` workflow.
 - `apps/clubs/access.py` contains `ClubAccessContext`, the central source of
   truth for club-scoped access checks and scoped querysets.
 - `apps/clubs/mixins.py` contains `ClubScopedAccessMixin` for club-scoped
   ViewSets.
+- `apps/clubs/services.py` owns membership onboarding workflows; serializers and
+  views should not create club users and memberships as separate requests.
 - Do not place court, booking, transaction, settlement, pricing, or audit
   behavior here.
 
