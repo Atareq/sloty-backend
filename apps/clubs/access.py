@@ -175,6 +175,12 @@ class ClubAccessContext:
     def can_view_dashboard(self):
         return self.is_platform_admin or self.is_owner or self.is_manager
 
+    def can_view_dashboard_summary(self):
+        return self.has_any_club_access()
+
+    def can_view_financial_summary(self):
+        return self.is_platform_admin or self.is_owner or self.is_manager
+
     def scoped_courts_queryset(self):
         from apps.courts.models import Court
 
@@ -204,6 +210,17 @@ class ClubAccessContext:
         queryset = Court.objects.filter(club=self.club)
         if self.can_view_dashboard():
             return queryset
+        return queryset.none()
+
+    def scoped_dashboard_summary_courts_queryset(self):
+        from apps.courts.models import Court
+
+        queryset = Court.objects.filter(club=self.club)
+        if self.can_view_dashboard_summary():
+            if self.can_view_financial_summary():
+                return queryset
+            if self.is_staff:
+                return queryset.filter(id__in=self.staff_court_ids)
         return queryset.none()
 
     def scoped_transactions_queryset(self):

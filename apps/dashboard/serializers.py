@@ -150,6 +150,53 @@ class DashboardOverviewQuerySerializer(AccessScopedCourtMixin, serializers.Seria
         return attrs
 
 
+class DashboardSummaryQuerySerializer(AccessScopedCourtMixin, serializers.Serializer):
+    date = serializers.DateField(required=False)
+    date_from = serializers.CharField(required=False, allow_blank=True)
+    date_to = serializers.CharField(required=False, allow_blank=True)
+    court = serializers.PrimaryKeyRelatedField(
+        queryset=Court.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+
+    def validate(self, attrs):
+        has_date = bool(attrs.get("date"))
+        has_date_from = bool(attrs.get("date_from"))
+        has_date_to = bool(attrs.get("date_to"))
+
+        if has_date and (has_date_from or has_date_to):
+            raise serializers.ValidationError(
+                "date cannot be combined with date_from or date_to."
+            )
+
+        if has_date:
+            attrs["date_from"], attrs["date_to"] = day_bounds(attrs["date"])
+        elif has_date_from or has_date_to:
+            if not has_date_from or not has_date_to:
+                raise serializers.ValidationError(
+                    "date_from and date_to must be supplied together."
+                )
+            attrs["date_from"] = parse_query_datetime(
+                attrs["date_from"],
+                field_name="date_from",
+            )
+            attrs["date_to"] = parse_query_datetime(
+                attrs["date_to"],
+                field_name="date_to",
+                date_is_end=True,
+            )
+        else:
+            attrs["date_from"], attrs["date_to"] = today_bounds()
+
+        if attrs["date_from"] >= attrs["date_to"]:
+            raise serializers.ValidationError(
+                {"date_to": "date_to must be after date_from."}
+            )
+        attrs["court"] = self.validate_court_access(attrs.get("court"))
+        return attrs
+
+
 class RevenueQuerySerializer(AccessScopedCourtMixin, serializers.Serializer):
     date_from = serializers.CharField(required=False, allow_blank=True)
     date_to = serializers.CharField(required=False, allow_blank=True)
@@ -307,6 +354,135 @@ class DashboardOverviewSerializer(serializers.Serializer):
     settled_settlement_count = serializers.IntegerField()
     court_count = serializers.IntegerField()
     active_court_count = serializers.IntegerField()
+
+
+class DashboardSummaryClubSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    slug = serializers.CharField()
+    name = serializers.CharField()
+
+
+class DashboardSummaryScopeSerializer(serializers.Serializer):
+    role = serializers.CharField()
+    court = serializers.IntegerField(allow_null=True)
+    court_ids = serializers.ListField(child=serializers.IntegerField())
+    financial_visible = serializers.BooleanField()
+
+
+class DashboardSummaryPeriodSerializer(serializers.Serializer):
+    date_from = serializers.DateTimeField()
+    date_to = serializers.DateTimeField()
+
+
+class DashboardSummaryMetricsSerializer(serializers.Serializer):
+    court_count = serializers.IntegerField()
+    active_court_count = serializers.IntegerField()
+    total_bookings = serializers.IntegerField()
+    hold_bookings = serializers.IntegerField()
+    confirmed_bookings = serializers.IntegerField()
+    completed_bookings = serializers.IntegerField()
+    cancelled_bookings = serializers.IntegerField()
+    no_show_bookings = serializers.IntegerField()
+    expired_bookings = serializers.IntegerField()
+    total_booking_value = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    total_paid_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    total_remaining_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    transaction_count = serializers.IntegerField(allow_null=True)
+    transaction_total = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    unsettled_transaction_count = serializers.IntegerField(allow_null=True)
+    unsettled_transaction_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    settled_transaction_count = serializers.IntegerField(allow_null=True)
+    settled_transaction_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    pending_settlement_count = serializers.IntegerField(allow_null=True)
+    pending_settlement_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    settled_settlement_count = serializers.IntegerField(allow_null=True)
+    settled_settlement_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+
+
+class DashboardSummaryCourtSerializer(serializers.Serializer):
+    court = serializers.IntegerField()
+    court_name = serializers.CharField()
+    is_active = serializers.BooleanField()
+    total_bookings = serializers.IntegerField()
+    hold_bookings = serializers.IntegerField()
+    confirmed_bookings = serializers.IntegerField()
+    completed_bookings = serializers.IntegerField()
+    cancelled_bookings = serializers.IntegerField()
+    no_show_bookings = serializers.IntegerField()
+    expired_bookings = serializers.IntegerField()
+    total_booking_value = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    total_paid_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    total_remaining_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    transaction_count = serializers.IntegerField(allow_null=True)
+    transaction_total = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    unsettled_transaction_count = serializers.IntegerField(allow_null=True)
+    unsettled_transaction_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    settled_transaction_count = serializers.IntegerField(allow_null=True)
+    settled_transaction_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+
+
+class DashboardSummaryResponseSerializer(serializers.Serializer):
+    club = DashboardSummaryClubSerializer()
+    scope = DashboardSummaryScopeSerializer()
+    period = DashboardSummaryPeriodSerializer()
+    summary = DashboardSummaryMetricsSerializer()
+    courts = DashboardSummaryCourtSerializer(many=True)
 
 
 class RevenueSummaryItemSerializer(serializers.Serializer):

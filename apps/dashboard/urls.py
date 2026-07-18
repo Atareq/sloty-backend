@@ -6,6 +6,7 @@ from apps.dashboard.views import (
     CourtUtilizationAPIView,
     DashboardOverviewAPIView,
     DashboardRevenueAPIView,
+    DashboardSummaryAPIView,
 )
 
 urlpatterns = [
@@ -23,6 +24,11 @@ urlpatterns = [
         "clubs/<slug:club_slug>/dashboard/overview/",
         DashboardOverviewAPIView.as_view(),
         name="club-dashboard-overview",
+    ),
+    path(
+        "clubs/<slug:club_slug>/dashboard/summary/",
+        DashboardSummaryAPIView.as_view(),
+        name="club-dashboard-summary",
     ),
     path(
         "clubs/<slug:club_slug>/dashboard/revenue/",

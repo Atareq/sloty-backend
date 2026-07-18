@@ -124,3 +124,8 @@ class CanViewClubAuditLogs(BasePermission):
 class CanViewClubDashboard(BasePermission):
     def has_permission(self, request, view) -> bool:
         return view.get_access_context().can_view_dashboard()
+
+
+class CanViewDashboardSummary(BasePermission):
+    def has_permission(self, request, view) -> bool:
+        return view.get_access_context().can_view_dashboard_summary()

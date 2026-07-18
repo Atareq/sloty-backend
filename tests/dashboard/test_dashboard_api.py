@@ -19,6 +19,7 @@ from apps.dashboard.views import (
     CourtUtilizationAPIView,
     DashboardOverviewAPIView,
     DashboardRevenueAPIView,
+    DashboardSummaryAPIView,
 )
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
@@ -152,6 +153,9 @@ class DashboardAPITestCase(APITestCase):
 
     def overview_url(self, club):
         return reverse("club-dashboard-overview", kwargs={"club_slug": club.slug})
+
+    def summary_url(self, club):
+        return reverse("club-dashboard-summary", kwargs={"club_slug": club.slug})
 
     def revenue_url(self, club):
         return reverse("club-dashboard-revenue", kwargs={"club_slug": club.slug})
@@ -548,6 +552,196 @@ class DashboardOverviewTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(response.data["court_count"], 1)
 
 
+class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
+    def test_anonymous_rejected(self):
+        response = self.client.get(self.summary_url(self.club), self.range_params())
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_platform_admin_owner_and_manager_get_all_selected_club_courts(self):
+        for user, expected_role in (
+            (self.platform_admin, "PLATFORM_ADMIN"),
+            (self.owner, "OWNER"),
+            (self.manager, "MANAGER"),
+        ):
+            self.client.force_authenticate(user=user)
+            response = self.client.get(self.summary_url(self.club), self.range_params())
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(response.data["scope"]["role"], expected_role)
+            self.assertEqual(
+                set(response.data["scope"]["court_ids"]),
+                {self.court.id, self.other_court.id},
+            )
+            self.assertTrue(response.data["scope"]["financial_visible"])
+
+    def test_staff_gets_assigned_court_operational_summary_only(self):
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(self.summary_url(self.club), self.range_params())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["scope"]["role"], "STAFF")
+        self.assertEqual(response.data["scope"]["court_ids"], [self.court.id])
+        self.assertFalse(response.data["scope"]["financial_visible"])
+        self.assertEqual(response.data["summary"]["total_bookings"], 6)
+        self.assertEqual(response.data["summary"]["confirmed_bookings"], 1)
+        self.assertIsNone(response.data["summary"]["total_booking_value"])
+        self.assertIsNone(response.data["summary"]["transaction_total"])
+        self.assertIsNone(response.data["summary"]["pending_settlement_amount"])
+        self.assertEqual(len(response.data["courts"]), 1)
+        self.assertEqual(response.data["courts"][0]["court"], self.court.id)
+        self.assertIsNone(response.data["courts"][0]["total_paid_amount"])
+
+    def test_other_club_and_no_membership_users_are_rejected(self):
+        no_membership_user = self.create_user("dashboard-no-membership")
+
+        for user in (self.other_staff, no_membership_user):
+            self.client.force_authenticate(user=user)
+            response = self.client.get(self.summary_url(self.club), self.range_params())
+
+            self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_date_query_filters_one_day_and_default_uses_today(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        date_response = self.client.get(
+            self.summary_url(self.club),
+            {"date": "2026-07-06"},
+        )
+        default_response = self.client.get(self.summary_url(self.club))
+
+        self.assertEqual(date_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(date_response.data["summary"]["total_bookings"], 7)
+        self.assertEqual(default_response.status_code, status.HTTP_200_OK)
+        self.assertIn("date_from", default_response.data["period"])
+        self.assertIn("date_to", default_response.data["period"])
+
+    def test_date_range_validation(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        reversed_response = self.client.get(
+            self.summary_url(self.club),
+            {
+                "date_from": self.time_at(12).isoformat(),
+                "date_to": self.time_at(10).isoformat(),
+            },
+        )
+        mixed_response = self.client.get(
+            self.summary_url(self.club),
+            {
+                "date": "2026-07-06",
+                "date_from": self.time_at(0).isoformat(),
+                "date_to": self.time_at(23).isoformat(),
+            },
+        )
+        partial_response = self.client.get(
+            self.summary_url(self.club),
+            {"date_from": self.time_at(0).isoformat()},
+        )
+
+        self.assertEqual(reversed_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("date_to", reversed_response.data)
+        self.assertEqual(mixed_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(partial_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_owner_manager_and_staff_court_filter_scope(self):
+        for user in (self.owner, self.manager):
+            self.client.force_authenticate(user=user)
+            response = self.client.get(
+                self.summary_url(self.club),
+                {
+                    **self.range_params(),
+                    "court": self.court.id,
+                },
+            )
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(response.data["scope"]["court"], self.court.id)
+            self.assertEqual(response.data["scope"]["court_ids"], [self.court.id])
+            self.assertEqual(len(response.data["courts"]), 1)
+
+        self.client.force_authenticate(user=self.staff)
+        assigned_response = self.client.get(
+            self.summary_url(self.club),
+            {
+                **self.range_params(),
+                "court": self.court.id,
+            },
+        )
+        other_court_response = self.client.get(
+            self.summary_url(self.club),
+            {
+                **self.range_params(),
+                "court": self.other_court.id,
+            },
+        )
+
+        self.assertEqual(assigned_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(assigned_response.data["scope"]["court_ids"], [self.court.id])
+        self.assertEqual(other_court_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_cross_club_court_filter_rejected(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(
+            self.summary_url(self.club),
+            {
+                **self.range_params(),
+                "court": self.cross_club_court.id,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_summary_booking_transaction_and_settlement_totals(self):
+        other_club_settlement = self.create_settlement(
+            self.other_club,
+            court=self.cross_club_court,
+            status=Settlement.Status.PENDING,
+            total_amount=Decimal("999.00"),
+            transaction_count=1,
+            created=self.time_at(14),
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(self.summary_url(self.club), self.range_params())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        summary = response.data["summary"]
+        self.assertEqual(summary["total_bookings"], 7)
+        self.assertEqual(summary["hold_bookings"], 1)
+        self.assertEqual(summary["confirmed_bookings"], 2)
+        self.assertEqual(summary["completed_bookings"], 1)
+        self.assertEqual(summary["cancelled_bookings"], 1)
+        self.assertEqual(summary["no_show_bookings"], 1)
+        self.assertEqual(summary["expired_bookings"], 1)
+        self.assertEqual(summary["total_booking_value"], "2100.00")
+        self.assertEqual(summary["total_paid_amount"], "480.00")
+        self.assertEqual(summary["total_remaining_amount"], "1620.00")
+        self.assertEqual(summary["transaction_count"], 3)
+        self.assertEqual(summary["transaction_total"], "480.00")
+        self.assertEqual(summary["unsettled_transaction_count"], 1)
+        self.assertEqual(summary["unsettled_transaction_amount"], "80.00")
+        self.assertEqual(summary["settled_transaction_count"], 2)
+        self.assertEqual(summary["settled_transaction_amount"], "400.00")
+        self.assertEqual(summary["pending_settlement_count"], 1)
+        self.assertEqual(summary["pending_settlement_amount"], "100.00")
+        self.assertEqual(summary["settled_settlement_count"], 1)
+        self.assertEqual(summary["settled_settlement_amount"], "300.00")
+        self.assertNotEqual(
+            summary["pending_settlement_amount"], other_club_settlement.total_amount
+        )
+
+        courts = {item["court"]: item for item in response.data["courts"]}
+        self.assertEqual(courts[self.court.id]["total_bookings"], 6)
+        self.assertEqual(courts[self.court.id]["transaction_total"], "400.00")
+        self.assertEqual(courts[self.other_court.id]["total_bookings"], 1)
+        self.assertEqual(courts[self.other_court.id]["transaction_total"], "80.00")
+        court_total = sum(item["total_bookings"] for item in response.data["courts"])
+        self.assertEqual(summary["total_bookings"], court_total)
+
+
 class RevenueTests(DashboardDataMixin, DashboardAPITestCase):
     def test_staff_rejected(self):
         self.client.force_authenticate(user=self.staff)
@@ -655,6 +849,7 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(docs_response.status_code, status.HTTP_200_OK)
         self.assertIn("/api/v1/clubs/{club_slug}/calendar/", schema)
         self.assertIn("/api/v1/clubs/{club_slug}/dashboard/overview/", schema)
+        self.assertIn("/api/v1/clubs/{club_slug}/dashboard/summary/", schema)
         self.assertIn("/api/v1/clubs/{club_slug}/dashboard/revenue/", schema)
         self.assertIn(
             "/api/v1/clubs/{club_slug}/dashboard/court-utilization/",
@@ -686,6 +881,7 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
             (repo_root / "apps" / "dashboard" / "views.py").read_text(),
         )
         self.assertFalse(hasattr(DashboardOverviewAPIView, "post"))
+        self.assertFalse(hasattr(DashboardSummaryAPIView, "post"))
         self.assertFalse(hasattr(DashboardRevenueAPIView, "post"))
         self.assertFalse(hasattr(CourtUtilizationAPIView, "post"))
         self.assertFalse(hasattr(ClubCalendarAPIView, "post"))

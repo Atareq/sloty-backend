@@ -482,13 +482,19 @@ Rules for the flow:
 - Contains dashboard serializers, services, views, and URL routing. It has no
   models or migrations in Sprint 8.
 - Dashboard APIs are frontend summary APIs for availability, calendar,
-  overview, revenue, and court utilization.
+  operational/financial summary, overview, revenue, and court utilization.
 - Availability and calendar are operational APIs. Staff can access only their
   assigned court through `ClubAccessContext`.
+- Dashboard summary uses `ClubAccessContext.can_view_dashboard_summary()` and
+  `scoped_dashboard_summary_courts_queryset()`. Staff may access this summary
+  for their assigned court only.
+- Dashboard summary financial visibility is separate from operational access:
+  use `ClubAccessContext.can_view_financial_summary()`. Staff receive stable
+  response fields with financial values set to `null`.
 - Financial dashboard endpoints are overview, revenue, and court utilization.
   Staff cannot access these endpoints.
-- Calendar payment summaries and all financial dashboard transaction totals
-  include non-cancelled transactions only.
+- Calendar payment summaries, dashboard summary financial totals, and all
+  financial dashboard transaction totals include non-cancelled transactions only.
 - Dashboard views must stay thin and use service functions plus
   `ClubAccessContext`; do not query `ClubMembership` in dashboard views,
   serializers, or services.
@@ -894,6 +900,7 @@ Notes:
   `/api/v1/clubs/{club_slug}/courts/{court_id}/availability/`,
   `/api/v1/clubs/{club_slug}/calendar/`,
   `/api/v1/clubs/{club_slug}/dashboard/overview/`,
+  `/api/v1/clubs/{club_slug}/dashboard/summary/`,
   `/api/v1/clubs/{club_slug}/dashboard/revenue/`, and
   `/api/v1/clubs/{club_slug}/dashboard/court-utilization/`.
 - Global API routes currently include `/api/v1/me/`, `/api/v1/users/`,

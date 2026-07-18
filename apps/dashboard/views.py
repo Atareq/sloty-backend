@@ -4,7 +4,11 @@ from rest_framework.generics import GenericAPIView
 from rest_framework.response import Response
 
 from apps.clubs.mixins import ClubScopedAccessMixin
-from apps.clubs.permissions import CanViewClubDashboard, HasClubAccess
+from apps.clubs.permissions import (
+    CanViewClubDashboard,
+    CanViewDashboardSummary,
+    HasClubAccess,
+)
 from apps.courts.models import Court
 from apps.dashboard.serializers import (
     AvailabilityQuerySerializer,
@@ -15,6 +19,8 @@ from apps.dashboard.serializers import (
     CourtUtilizationSerializer,
     DashboardOverviewQuerySerializer,
     DashboardOverviewSerializer,
+    DashboardSummaryQuerySerializer,
+    DashboardSummaryResponseSerializer,
     RevenueQuerySerializer,
     RevenueSummarySerializer,
 )
@@ -23,6 +29,7 @@ from apps.dashboard.services import (
     get_court_availability,
     get_court_utilization,
     get_dashboard_overview,
+    get_dashboard_summary,
     get_revenue_summary,
 )
 
@@ -105,6 +112,28 @@ class DashboardOverviewAPIView(DashboardAPIView):
         query = self.validate_query()
         return self.respond(
             get_dashboard_overview(
+                access=self.get_access_context(),
+                date_from=query["date_from"],
+                date_to=query["date_to"],
+                court=query.get("court"),
+            )
+        )
+
+
+class DashboardSummaryAPIView(DashboardAPIView):
+    permission_classes = (CanViewDashboardSummary,)
+    query_serializer_class = DashboardSummaryQuerySerializer
+    response_serializer_class = DashboardSummaryResponseSerializer
+
+    @extend_schema(
+        tags=["Dashboard"],
+        parameters=[DashboardSummaryQuerySerializer],
+        responses=DashboardSummaryResponseSerializer,
+    )
+    def get(self, request, *args, **kwargs):
+        query = self.validate_query()
+        return self.respond(
+            get_dashboard_summary(
                 access=self.get_access_context(),
                 date_from=query["date_from"],
                 date_to=query["date_to"],

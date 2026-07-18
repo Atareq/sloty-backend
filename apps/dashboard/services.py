@@ -194,6 +194,302 @@ def dashboard_transactions_queryset(*, access, date_from, date_to, court=None):
     return queryset
 
 
+BOOKING_STATUS_SUMMARY_FIELDS = {
+    Booking.Status.HOLD: "hold_bookings",
+    Booking.Status.CONFIRMED: "confirmed_bookings",
+    Booking.Status.COMPLETED: "completed_bookings",
+    Booking.Status.CANCELLED: "cancelled_bookings",
+    Booking.Status.NO_SHOW: "no_show_bookings",
+    Booking.Status.EXPIRED: "expired_bookings",
+}
+
+SUMMARY_FINANCIAL_FIELDS = (
+    "total_booking_value",
+    "total_paid_amount",
+    "total_remaining_amount",
+    "transaction_count",
+    "transaction_total",
+    "unsettled_transaction_count",
+    "unsettled_transaction_amount",
+    "settled_transaction_count",
+    "settled_transaction_amount",
+    "pending_settlement_count",
+    "pending_settlement_amount",
+    "settled_settlement_count",
+    "settled_settlement_amount",
+)
+
+COURT_FINANCIAL_FIELDS = (
+    "total_booking_value",
+    "total_paid_amount",
+    "total_remaining_amount",
+    "transaction_count",
+    "transaction_total",
+    "unsettled_transaction_count",
+    "unsettled_transaction_amount",
+    "settled_transaction_count",
+    "settled_transaction_amount",
+)
+
+
+def validate_dashboard_summary_access(access):
+    if not access.can_view_dashboard_summary():
+        raise PermissionDenied("You cannot access dashboard summaries.")
+
+
+def dashboard_summary_role(access):
+    if access.is_platform_admin:
+        return "PLATFORM_ADMIN"
+    if access.is_owner:
+        return "OWNER"
+    if access.is_manager:
+        return "MANAGER"
+    if access.is_staff:
+        return "STAFF"
+    return "NONE"
+
+
+def base_booking_counts():
+    return {
+        "total_bookings": 0,
+        **{field: 0 for field in BOOKING_STATUS_SUMMARY_FIELDS.values()},
+    }
+
+
+def null_financial_fields(data, fields):
+    for field in fields:
+        data[field] = None
+    return data
+
+
+def summary_courts_queryset(*, access, court=None):
+    courts = access.scoped_dashboard_summary_courts_queryset().order_by("id")
+    if court is not None:
+        if not access.can_access_court(court):
+            raise PermissionDenied("You cannot access this court.")
+        courts = courts.filter(id=court.id)
+    return courts
+
+
+def booking_count_rows(bookings):
+    return bookings.values("court_id", "status").annotate(total=Count("id"))
+
+
+def booking_value_rows(bookings):
+    return bookings.values("court_id").annotate(total=money_sum("total_price"))
+
+
+def booking_paid_rows(bookings):
+    return (
+        Transaction.objects.filter(
+            booking__in=bookings.values("id"),
+            is_cancelled=False,
+        )
+        .values("booking__court_id")
+        .annotate(total=money_sum("amount"))
+    )
+
+
+def transaction_summary_rows(transactions):
+    return transactions.values("court_id").annotate(
+        transaction_total=money_sum("amount"),
+        transaction_count=Count("id"),
+        unsettled_transaction_amount=money_sum(
+            "amount",
+            filter=Q(settlement_line__isnull=True),
+        ),
+        unsettled_transaction_count=Count(
+            "id",
+            filter=Q(settlement_line__isnull=True),
+        ),
+        settled_transaction_amount=money_sum(
+            "amount",
+            filter=Q(settlement_line__isnull=False),
+        ),
+        settled_transaction_count=Count(
+            "id",
+            filter=Q(settlement_line__isnull=False),
+        ),
+    )
+
+
+def settlement_querysets(*, access, courts, court, date_from, date_to):
+    settlements = Settlement.objects.filter(club=access.club)
+    if court is not None:
+        settlements = settlements.filter(court=court)
+    else:
+        settlements = settlements.filter(Q(court__in=courts) | Q(court__isnull=True))
+
+    pending_settlements = settlements.filter(
+        status=Settlement.Status.PENDING,
+        created__gte=date_from,
+        created__lt=date_to,
+    )
+    settled_settlements = settlements.filter(status=Settlement.Status.SETTLED).filter(
+        Q(settled_at__gte=date_from, settled_at__lt=date_to)
+        | Q(settled_at__isnull=True, created__gte=date_from, created__lt=date_to)
+    )
+    return pending_settlements, settled_settlements
+
+
+def get_dashboard_summary(*, access, date_from, date_to, court=None):
+    validate_dashboard_summary_access(access)
+
+    financial_visible = access.can_view_financial_summary()
+    courts = list(summary_courts_queryset(access=access, court=court))
+    court_ids = [court_obj.id for court_obj in courts]
+    bookings = Booking.objects.filter(
+        court__in=courts,
+        start_time__gte=date_from,
+        start_time__lt=date_to,
+    )
+    transactions = Transaction.objects.filter(
+        court__in=courts,
+        created__gte=date_from,
+        created__lt=date_to,
+        is_cancelled=False,
+    )
+
+    counts_by_court = {court_obj.id: base_booking_counts() for court_obj in courts}
+    total_counts = base_booking_counts()
+    for row in booking_count_rows(bookings):
+        field = BOOKING_STATUS_SUMMARY_FIELDS[row["status"]]
+        court_counts = counts_by_court[row["court_id"]]
+        court_counts[field] = row["total"]
+        court_counts["total_bookings"] += row["total"]
+        total_counts[field] += row["total"]
+        total_counts["total_bookings"] += row["total"]
+
+    booking_values = {
+        row["court_id"]: money(row["total"]) for row in booking_value_rows(bookings)
+    }
+    booking_paid = {
+        row["booking__court_id"]: money(row["total"])
+        for row in booking_paid_rows(bookings)
+    }
+    transaction_summaries = {
+        row["court_id"]: row for row in transaction_summary_rows(transactions)
+    }
+
+    court_results = []
+    for court_obj in courts:
+        court_booking_value = booking_values.get(court_obj.id, ZERO)
+        court_paid = booking_paid.get(court_obj.id, ZERO)
+        transaction_summary = transaction_summaries.get(court_obj.id, {})
+        court_data = {
+            "court": court_obj.id,
+            "court_name": court_obj.name,
+            "is_active": court_obj.is_active,
+            **counts_by_court[court_obj.id],
+            "total_booking_value": court_booking_value,
+            "total_paid_amount": court_paid,
+            "total_remaining_amount": court_booking_value - court_paid,
+            "transaction_count": transaction_summary.get("transaction_count", 0),
+            "transaction_total": transaction_summary.get("transaction_total", ZERO),
+            "unsettled_transaction_count": transaction_summary.get(
+                "unsettled_transaction_count",
+                0,
+            ),
+            "unsettled_transaction_amount": transaction_summary.get(
+                "unsettled_transaction_amount",
+                ZERO,
+            ),
+            "settled_transaction_count": transaction_summary.get(
+                "settled_transaction_count",
+                0,
+            ),
+            "settled_transaction_amount": transaction_summary.get(
+                "settled_transaction_amount",
+                ZERO,
+            ),
+        }
+        if not financial_visible:
+            court_data = null_financial_fields(court_data, COURT_FINANCIAL_FIELDS)
+        court_results.append(court_data)
+
+    booking_value = sum(booking_values.values(), ZERO)
+    paid_amount = sum(booking_paid.values(), ZERO)
+    transaction_summary = transactions.aggregate(
+        transaction_total=money_sum("amount"),
+        transaction_count=Count("id"),
+        unsettled_transaction_amount=money_sum(
+            "amount",
+            filter=Q(settlement_line__isnull=True),
+        ),
+        unsettled_transaction_count=Count(
+            "id",
+            filter=Q(settlement_line__isnull=True),
+        ),
+        settled_transaction_amount=money_sum(
+            "amount",
+            filter=Q(settlement_line__isnull=False),
+        ),
+        settled_transaction_count=Count(
+            "id",
+            filter=Q(settlement_line__isnull=False),
+        ),
+    )
+    pending_settlements, settled_settlements = settlement_querysets(
+        access=access,
+        courts=courts,
+        court=court,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    pending_summary = pending_settlements.aggregate(
+        amount=money_sum("total_amount"),
+        count=Count("id"),
+    )
+    settled_summary = settled_settlements.aggregate(
+        amount=money_sum("total_amount"),
+        count=Count("id"),
+    )
+    summary = {
+        "court_count": len(courts),
+        "active_court_count": sum(1 for court_obj in courts if court_obj.is_active),
+        **total_counts,
+        "total_booking_value": booking_value,
+        "total_paid_amount": paid_amount,
+        "total_remaining_amount": booking_value - paid_amount,
+        "transaction_count": transaction_summary["transaction_count"],
+        "transaction_total": transaction_summary["transaction_total"],
+        "unsettled_transaction_count": transaction_summary[
+            "unsettled_transaction_count"
+        ],
+        "unsettled_transaction_amount": transaction_summary[
+            "unsettled_transaction_amount"
+        ],
+        "settled_transaction_count": transaction_summary["settled_transaction_count"],
+        "settled_transaction_amount": transaction_summary["settled_transaction_amount"],
+        "pending_settlement_count": pending_summary["count"],
+        "pending_settlement_amount": pending_summary["amount"],
+        "settled_settlement_count": settled_summary["count"],
+        "settled_settlement_amount": settled_summary["amount"],
+    }
+    if not financial_visible:
+        summary = null_financial_fields(summary, SUMMARY_FINANCIAL_FIELDS)
+
+    return {
+        "club": {
+            "id": access.club.id,
+            "slug": access.club.slug,
+            "name": access.club.name,
+        },
+        "scope": {
+            "role": dashboard_summary_role(access),
+            "court": court.id if court else None,
+            "court_ids": court_ids,
+            "financial_visible": financial_visible,
+        },
+        "period": {
+            "date_from": date_from,
+            "date_to": date_to,
+        },
+        "summary": summary,
+        "courts": court_results,
+    }
+
+
 def get_dashboard_overview(*, access, date_from, date_to, court=None):
     validate_dashboard_access(access)
     if court is not None and not access.can_access_court(court):

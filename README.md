@@ -302,6 +302,7 @@ Useful audit log filters:
 - `GET /api/v1/clubs/{club_slug}/courts/{court_id}/availability/`
 - `GET /api/v1/clubs/{club_slug}/calendar/`
 - `GET /api/v1/clubs/{club_slug}/dashboard/overview/`
+- `GET /api/v1/clubs/{club_slug}/dashboard/summary/`
 - `GET /api/v1/clubs/{club_slug}/dashboard/revenue/`
 - `GET /api/v1/clubs/{club_slug}/dashboard/court-utilization/`
 
@@ -312,6 +313,25 @@ Calendar returns frontend-friendly booking items with payment summary fields.
 Staff can use availability and calendar only for their assigned court. Platform
 admins, owners, and managers can access all selected-club courts.
 
+Summary returns compact operational booking counts, scoped court metadata, and
+financial totals for the selected club and date/range. Platform admins and
+owners see all selected-club courts. Managers see all selected-club courts under
+the current club-level manager architecture. Staff can access summary for their
+assigned court only and receive operational counts with
+`financial_visible=false`; financial fields are returned as `null`.
+
+Summary response shape:
+
+- `club`: selected club id, slug, and name.
+- `scope`: role, optional filtered court, visible court ids, and
+  `financial_visible`.
+- `period`: `date_from` and `date_to`.
+- `summary`: court counts, booking status counts, booking value/paid/remaining,
+  transaction totals, unsettled/settled transaction totals, and
+  pending/settled settlement totals.
+- `courts`: per-court booking counts plus court-level booking and transaction
+  totals.
+
 Overview, revenue, and court-utilization endpoints are financial dashboard
 summaries. Platform admins, owners, and managers can access them. Staff cannot.
 
@@ -320,6 +340,7 @@ Useful Sprint 8 query parameters:
 - Availability: `date`
 - Calendar: `date`, `date_from`, `date_to`, `court`, `status`
 - Overview: `date_from`, `date_to`, `court`
+- Summary: `date`, `date_from`, `date_to`, `court`
 - Revenue: `date_from`, `date_to`, `group_by`, `court`, `payment_method`
 - Court utilization: `date_from`, `date_to`
 
