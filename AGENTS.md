@@ -44,6 +44,7 @@ Current repo reality:
 - Current public utility endpoints include `/api/v1/egypt-locations/`
 - Current account endpoints include `/api/v1/me/` and platform-admin-only
   `/api/v1/users/`
+- Current club users endpoint is `/api/v1/clubs/{club_slug}/users/`
 - Project docs live under `docs/`
 - Requirements are split into `requirements/base.txt` and `requirements/dev.txt`
 - Style tooling exists through `.pre-commit-config.yaml`, `pyproject.toml`, and
@@ -138,6 +139,9 @@ Current implemented app:
 - `POST /api/v1/clubs/{club_slug}/memberships/` supports club-scoped onboarding:
   nested user data plus membership role/court are persisted together through
   `apps/clubs/services.py`.
+- `GET /api/v1/clubs/{club_slug}/users/` is a read-only, club-scoped,
+  membership-based users list. Platform admins and owners see all selected-club
+  memberships. Managers and staff cannot list club users.
 - `apps/courts/` contains court setup and court working hours logic.
 - `Court` stores `default_price`, `slot_duration_minutes`,
   `requires_digital_payment_reference`, and `internal_hold_expiry_hours`.
@@ -175,6 +179,10 @@ Current implemented app:
   and platform commission calculation remain future work.
 - Business APIs for memberships, courts, working hours, bookings, and
   transactions are club-scoped under `/api/v1/clubs/{club_slug}/...`.
+- Club user listing is club-scoped under
+  `/api/v1/clubs/{club_slug}/users/`, is read-only, and returns users through
+  `ClubMembership` rows. It is limited to platform admins and club owners and
+  must not add `User.role`, `User.club`, or `User.court`.
 - Login remains global. The frontend logs in, calls `/api/v1/me/` to read active
   memberships and club slugs, then sends selected-club requests to
   `/api/v1/clubs/{club_slug}/...`. Never trust frontend-selected club context
@@ -253,6 +261,12 @@ Rules for the flow:
 - `docs/business-analysis.txt` and `docs/documentation.txt` are required
   overview references before planning code changes when they exist.
 - `docs/sprints.txt` tracks sprint planning context.
+
+`locale/`
+
+- Project-level Django translation catalogs. Arabic API translations currently
+  live under `locale/ar/LC_MESSAGES/`; compile `.po` changes to `.mo` files
+  before relying on translated runtime responses.
 
 `apps/`
 
@@ -427,12 +441,21 @@ Rules for the flow:
 - Managers can access settlements only when
   `club.manager_can_settle_transactions=True`.
 - Staff cannot access settlement endpoints in Sprint 6.
+- For settlement preview/create, platform admins and owners may settle their
+  own collected transactions. Managers must not settle their own transactions,
+  even when `club.manager_can_settle_transactions=True`.
+- Settlement preview/create are user/collector-based through
+  `Settlement.collected_by`; new preview/create requests require `collected_by`
+  and do not require date range fields. The backend selects all valid,
+  non-cancelled, unsettled transactions where `Transaction.created_by` is the
+  selected collector in the selected club, computes `period_start` from the
+  earliest selected transaction, and sets `period_end` to creation time.
 - `SettlementTransaction.transaction` is a `OneToOneField` to `Transaction`;
   this prevents one transaction from being included in more than one
   settlement while keeping transaction rows immutable.
 - Settlements include non-cancelled already-recorded transactions by club,
-  optional court, period, and unsettled state. Booking lifecycle status is not
-  used to decide settlement inclusion in Sprint 6.
+  collected_by user, and unsettled state. Booking lifecycle status is not used
+  to decide settlement inclusion in Sprint 6.
 - Settlements do not implement refunds, reversals, corrections, commission,
   payout automation, dashboards, or automatic settlement jobs.
 - Settlement filters live in `apps/settlements/filters.py` and must follow the

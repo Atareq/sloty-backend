@@ -3,15 +3,14 @@ from decimal import Decimal
 from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
-NO_UNSETTLED_TRANSACTIONS_MESSAGE = (
-    "No unsettled transactions found for the selected period."
-)
+NO_UNSETTLED_TRANSACTIONS_MESSAGE = "No unsettled transactions found for this user."
 DOUBLE_SETTLEMENT_MESSAGE = (
     "One or more transactions were already settled. Please retry."
 )
@@ -33,47 +32,102 @@ def validate_settlement_access(*, access, court=None):
         raise PermissionDenied("You cannot manage settlements for this club.")
 
 
-def unsettled_transactions_queryset(*, access, period_start, period_end, court=None):
+def get_user_display_name(user):
+    full_name = user.get_full_name().strip()
+    return full_name or user.username
+
+
+def validate_collected_by(*, access, collected_by, actor):
+    if actor and collected_by.id == actor.id:
+        if access.is_platform_admin or access.is_owner:
+            return
+        raise serializers.ValidationError(
+            {"detail": _("You cannot settle your own transactions.")}
+        )
+    if not access.user_has_active_membership(collected_by):
+        raise serializers.ValidationError(
+            {"collected_by": "User must have an active membership in this club."}
+        )
+
+
+def unsettled_transactions_queryset(*, access, collected_by):
     queryset = Transaction.objects.filter(
         club=access.club,
-        created__gte=period_start,
-        created__lt=period_end,
+        created_by=collected_by,
+        amount__gt=0,
         settlement_line__isnull=True,
         is_cancelled=False,
     )
-    if court is not None:
-        queryset = queryset.filter(court=court)
     return queryset.select_related("booking", "club", "court", "created_by").order_by(
         "created", "id"
     )
 
 
-def build_settlement_summary(*, access, period_start, period_end, court, queryset):
+def build_totals_by_payment_method(queryset):
+    totals = {
+        str(payment_method): Decimal("0.00")
+        for payment_method, _label in Transaction.PaymentMethod.choices
+    }
+    for item in (
+        queryset.order_by().values("payment_method").annotate(total=Sum("amount"))
+    ):
+        totals[str(item["payment_method"])] = item["total"] or Decimal("0.00")
+    return totals
+
+
+def serialize_preview_transactions(transactions):
+    return [
+        {
+            "id": transaction_obj.id,
+            "booking": transaction_obj.booking_id,
+            "court": transaction_obj.court_id,
+            "court_name": transaction_obj.court.name,
+            "amount": transaction_obj.amount,
+            "payment_method": transaction_obj.payment_method,
+            "payment_reference": transaction_obj.payment_reference,
+            "created": transaction_obj.created,
+        }
+        for transaction_obj in transactions
+    ]
+
+
+def build_settlement_summary(
+    *, access, collected_by, period_start, period_end, queryset
+):
+    transactions = list(queryset)
     aggregate = queryset.aggregate(total=Sum("amount"))
     return {
         "club": access.club.id,
-        "court": court.id if court else None,
+        "collected_by": collected_by.id,
+        "collected_by_name": get_user_display_name(collected_by),
         "period_start": period_start,
         "period_end": period_end,
-        "transaction_count": queryset.count(),
+        "transaction_count": len(transactions),
         "total_amount": aggregate["total"] or Decimal("0.00"),
+        "totals_by_payment_method": build_totals_by_payment_method(queryset),
+        "transactions": serialize_preview_transactions(transactions),
     }
 
 
-def preview_settlement(*, access, period_start, period_end, court=None):
-    validate_period(period_start, period_end)
-    validate_settlement_access(access=access, court=court)
+def preview_settlement(*, access, collected_by, actor):
+    validate_settlement_access(access=access)
+    validate_collected_by(access=access, collected_by=collected_by, actor=actor)
     queryset = unsettled_transactions_queryset(
         access=access,
-        period_start=period_start,
-        period_end=period_end,
-        court=court,
+        collected_by=collected_by,
     )
+    first_transaction = queryset.first()
+    if first_transaction is None:
+        raise serializers.ValidationError(
+            {"transactions": NO_UNSETTLED_TRANSACTIONS_MESSAGE}
+        )
+    period_start = first_transaction.created
+    period_end = timezone.now()
     return build_settlement_summary(
         access=access,
+        collected_by=collected_by,
         period_start=period_start,
         period_end=period_end,
-        court=court,
         queryset=queryset,
     )
 
@@ -81,38 +135,41 @@ def preview_settlement(*, access, period_start, period_end, court=None):
 def create_settlement(
     *,
     access,
-    period_start,
-    period_end,
-    court=None,
+    collected_by,
     notes="",
     created_by,
 ):
     try:
         with transaction.atomic():
-            validate_period(period_start, period_end)
-            validate_settlement_access(access=access, court=court)
+            validate_settlement_access(access=access)
+            validate_collected_by(
+                access=access,
+                collected_by=collected_by,
+                actor=created_by,
+            )
             candidates = list(
                 unsettled_transactions_queryset(
                     access=access,
-                    period_start=period_start,
-                    period_end=period_end,
-                    court=court,
+                    collected_by=collected_by,
                 )
                 .select_for_update(of=("self",))
-                .order_by("id")
+                .order_by("created", "id")
             )
             if not candidates:
                 raise serializers.ValidationError(
                     {"transactions": NO_UNSETTLED_TRANSACTIONS_MESSAGE}
                 )
 
+            period_start = candidates[0].created
+            period_end = timezone.now()
             total_amount = sum(
                 (transaction_obj.amount for transaction_obj in candidates),
                 Decimal("0.00"),
             )
             created_settlement = Settlement.objects.create(
                 club=access.club,
-                court=court,
+                court=None,
+                collected_by=collected_by,
                 period_start=period_start,
                 period_end=period_end,
                 status=Settlement.Status.PENDING,
@@ -144,10 +201,14 @@ def create_settlement(
                 after_data={
                     "settlement_id": created_settlement.id,
                     "court_id": created_settlement.court_id,
+                    "collected_by_id": created_settlement.collected_by_id,
                     "period_start": created_settlement.period_start.isoformat(),
                     "period_end": created_settlement.period_end.isoformat(),
                     "total_amount": str(created_settlement.total_amount),
                     "transaction_count": created_settlement.transaction_count,
+                    "transaction_ids": [
+                        transaction_obj.id for transaction_obj in candidates
+                    ],
                 },
             )
             return created_settlement
@@ -161,7 +222,13 @@ def mark_settlement_settled(*, access, settlement, actor):
     with transaction.atomic():
         locked_settlement = (
             Settlement.objects.select_for_update(of=("self",))
-            .select_related("club", "court", "created_by", "settled_by")
+            .select_related(
+                "club",
+                "court",
+                "collected_by",
+                "created_by",
+                "settled_by",
+            )
             .get(pk=settlement.pk)
         )
         if not access.can_access_settlement(locked_settlement):
@@ -194,6 +261,7 @@ def mark_settlement_settled(*, access, settlement, actor):
                 "status": Settlement.Status.SETTLED,
                 "settled_at": locked_settlement.settled_at.isoformat(),
                 "settled_by_id": actor.id if actor else None,
+                "collected_by_id": locked_settlement.collected_by_id,
             },
         )
         return locked_settlement

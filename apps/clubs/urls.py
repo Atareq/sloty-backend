@@ -1,7 +1,7 @@
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
-from apps.clubs.views import ClubMembershipViewSet, ClubViewSet
+from apps.clubs.views import ClubMembershipViewSet, ClubUserListViewSet, ClubViewSet
 
 router = DefaultRouter()
 router.register("clubs", ClubViewSet, basename="club")
@@ -18,9 +18,15 @@ membership_detail = ClubMembershipViewSet.as_view(
         "patch": "partial_update",
     }
 )
+club_user_list = ClubUserListViewSet.as_view({"get": "list"})
 
 urlpatterns = [
     *router.urls,
+    path(
+        "clubs/<slug:club_slug>/users/",
+        club_user_list,
+        name="club-user-list",
+    ),
     path(
         "clubs/<slug:club_slug>/memberships/",
         membership_list,

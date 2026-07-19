@@ -8,6 +8,7 @@ class SettlementFilter(django_filters.FilterSet):
     court = django_filters.NumberFilter(field_name="court_id")
     period_from = django_filters.IsoDateTimeFilter(method="filter_period_from")
     period_to = django_filters.IsoDateTimeFilter(method="filter_period_to")
+    collected_by = django_filters.NumberFilter(field_name="collected_by_id")
     created_by = django_filters.NumberFilter(field_name="created_by_id")
     settled_by = django_filters.NumberFilter(field_name="settled_by_id")
 
@@ -18,6 +19,7 @@ class SettlementFilter(django_filters.FilterSet):
             "court",
             "period_from",
             "period_to",
+            "collected_by",
             "created_by",
             "settled_by",
         )

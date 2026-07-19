@@ -66,6 +66,15 @@ class CanManageClubMemberships(BasePermission):
         return access.is_owner and obj.role != ClubMembership.Role.OWNER
 
 
+class CanListClubUsers(BasePermission):
+    def has_permission(self, request, view) -> bool:
+        return view.get_access_context().can_list_club_users()
+
+    def has_object_permission(self, request, view, obj) -> bool:
+        access = view.get_access_context()
+        return obj.club_id == access.club.id and access.can_list_club_users()
+
+
 class CanManageClubCourts(BasePermission):
     def has_permission(self, request, view) -> bool:
         access = view.get_access_context()

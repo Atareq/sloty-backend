@@ -66,7 +66,17 @@ class ClubAccessContext:
     def has_any_club_access(self):
         return self.is_platform_admin or bool(self.active_memberships)
 
+    def user_has_active_membership(self, user):
+        return ClubMembership.objects.filter(
+            club=self.club,
+            user=user,
+            is_active=True,
+        ).exists()
+
     def can_manage_memberships(self):
+        return self.is_platform_admin or self.is_owner
+
+    def can_list_club_users(self):
         return self.is_platform_admin or self.is_owner
 
     def can_create_membership(self, role, court=None):
@@ -247,5 +257,11 @@ class ClubAccessContext:
     def scoped_memberships_queryset(self):
         queryset = ClubMembership.objects.filter(club=self.club)
         if self.can_manage_memberships():
+            return queryset
+        return queryset.none()
+
+    def scoped_club_users_queryset(self):
+        queryset = ClubMembership.objects.filter(club=self.club)
+        if self.can_list_club_users():
             return queryset
         return queryset.none()

@@ -82,6 +82,24 @@ OWNER, MANAGER, and STAFF roles live on `ClubMembership`, not `User`. STAFF
 memberships require a court. OWNER and MANAGER memberships are club-level and
 must not include a court.
 
+## Club Users Endpoint
+
+- `GET /api/v1/clubs/{club_slug}/users/`
+
+This read-only endpoint returns users through their `ClubMembership` rows,
+including identity fields, role, court assignment, and membership active state.
+It does not create or update users.
+
+Useful filters:
+
+- `role`
+- `court`
+- `is_active`
+- `search`
+
+Platform admins and club owners can list memberships in the selected club.
+Managers and staff cannot list club users.
+
 ## Egypt Locations and Club Address Fields
 
 - `GET /api/v1/egypt-locations/` returns public dropdown data for Egypt
@@ -257,10 +275,30 @@ does not require Celery or a scheduler.
 - `GET /api/v1/clubs/{club_slug}/settlements/preview/`
 - `POST /api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`
 
-Settlement preview summarizes valid, non-cancelled unsettled transactions for a selected period
-without creating records. Settlement creation snapshots matching unsettled
-transactions into settlement lines. Mark-settled changes only `PENDING`
-settlements to `SETTLED`.
+Settlement is user-based. The owner/admin/allowed manager selects a collector
+from the club users list, previews that user's open balance, then creates a
+settlement for all currently unsettled valid transactions recorded by that user
+in the selected club.
+
+Preview:
+
+```text
+GET /api/v1/clubs/{club_slug}/settlements/preview/?collected_by={user_id}
+```
+
+Create:
+
+```json
+{
+  "collected_by": 15,
+  "notes": "End of shift settlement"
+}
+```
+
+No date range is required for preview or creation. `period_start` is computed
+from the earliest selected transaction and `period_end` is the creation time.
+Cancelled transactions are excluded, and settled transactions cannot be included
+again. Mark-settled changes only `PENDING` settlements to `SETTLED`.
 
 Platform admins and owners can manage settlements. Managers can manage
 settlements only when the club has `manager_can_settle_transactions=True`.
@@ -272,6 +310,7 @@ Useful settlement list filters:
 - `court`
 - `period_from`
 - `period_to`
+- `collected_by`
 - `created_by`
 - `settled_by`
 

@@ -489,6 +489,13 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             manager_can_settle_transactions=True,
         )
         self.court = self.create_court(self.club, "Audit Business Court")
+        self.staff = self.create_user("audit-business-staff")
+        self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
         self.client.force_authenticate(user=self.platform_admin)
 
     def booking_payload(self, hour=10, **extra_fields):
@@ -693,6 +700,7 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             booking,
             amount=Decimal("80.00"),
             payment_reference="AUDIT-SETTLEMENT-1",
+            created_by=self.staff,
         )
         Transaction.objects.filter(pk=transaction_obj.pk).update(
             created=self.time_at(22)
@@ -700,23 +708,19 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
 
         create_response = self.client.post(
             self.settlement_list_url(self.club),
-            {
-                "court": self.court.id,
-                "period_start": self.time_at(21).isoformat(),
-                "period_end": self.time_at(23).isoformat(),
-            },
+            {"collected_by": self.staff.id},
             format="json",
         )
 
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
         settlement = Settlement.objects.get(pk=create_response.data["id"])
-        self.assertTrue(
-            AuditLog.objects.filter(
-                action=AuditLog.Action.SETTLEMENT_CREATED,
-                entity_type="Settlement",
-                entity_id=settlement.id,
-            ).exists()
+        create_log = AuditLog.objects.get(
+            action=AuditLog.Action.SETTLEMENT_CREATED,
+            entity_type="Settlement",
+            entity_id=settlement.id,
         )
+        self.assertEqual(create_log.after_data["collected_by_id"], self.staff.id)
+        self.assertEqual(create_log.after_data["transaction_ids"], [transaction_obj.id])
 
         settle_response = self.client.post(
             self.settlement_mark_settled_url(self.club, settlement),
@@ -725,13 +729,12 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
         )
 
         self.assertEqual(settle_response.status_code, status.HTTP_200_OK)
-        self.assertTrue(
-            AuditLog.objects.filter(
-                action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
-                entity_type="Settlement",
-                entity_id=settlement.id,
-            ).exists()
+        settle_log = AuditLog.objects.get(
+            action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
+            entity_type="Settlement",
+            entity_id=settlement.id,
         )
+        self.assertEqual(settle_log.after_data["collected_by_id"], self.staff.id)
 
 
 class AuditSeedSchemaTests(AuditAPITestCase):

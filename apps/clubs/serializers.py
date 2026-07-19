@@ -304,6 +304,77 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class ClubUserListSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(source="user_id", read_only=True)
+    membership_id = serializers.IntegerField(source="id", read_only=True)
+    username = serializers.CharField(source="user.username", read_only=True)
+    first_name = serializers.CharField(source="user.first_name", read_only=True)
+    last_name = serializers.CharField(source="user.last_name", read_only=True)
+    email = serializers.EmailField(source="user.email", read_only=True)
+    phone_number = serializers.CharField(
+        source="user.phone_number",
+        read_only=True,
+        allow_null=True,
+    )
+    is_user_active = serializers.BooleanField(source="user.is_active", read_only=True)
+    club_slug = serializers.SlugField(source="club.slug", read_only=True)
+    court_name = serializers.SerializerMethodField()
+    membership_is_active = serializers.BooleanField(source="is_active", read_only=True)
+    can_change_pricing = serializers.SerializerMethodField()
+    can_manage_working_hours = serializers.SerializerMethodField()
+    can_manage_settlements = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClubMembership
+        fields = (
+            "id",
+            "membership_id",
+            "username",
+            "first_name",
+            "last_name",
+            "email",
+            "phone_number",
+            "is_user_active",
+            "role",
+            "club",
+            "club_slug",
+            "court",
+            "court_name",
+            "membership_is_active",
+            "can_change_pricing",
+            "can_manage_working_hours",
+            "can_manage_settlements",
+        )
+        read_only_fields = fields
+
+    def get_can_change_pricing(self, membership):
+        if membership.role == ClubMembership.Role.OWNER:
+            return True
+        return (
+            membership.role == ClubMembership.Role.MANAGER
+            and membership.club.manager_can_change_pricing
+        )
+
+    def get_court_name(self, membership):
+        if membership.court is None:
+            return None
+        return membership.court.name
+
+    def get_can_manage_working_hours(self, membership):
+        return membership.role in {
+            ClubMembership.Role.OWNER,
+            ClubMembership.Role.MANAGER,
+        }
+
+    def get_can_manage_settlements(self, membership):
+        if membership.role == ClubMembership.Role.OWNER:
+            return True
+        return (
+            membership.role == ClubMembership.Role.MANAGER
+            and membership.club.manager_can_settle_transactions
+        )
+
+
 class ClubMembershipCreateSerializer(serializers.Serializer):
     user = serializers.JSONField(required=False, write_only=True)
     user_id = serializers.PrimaryKeyRelatedField(

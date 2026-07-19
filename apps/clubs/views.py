@@ -1,3 +1,4 @@
+from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework.mixins import (
     CreateModelMixin,
@@ -7,9 +8,14 @@ from rest_framework.mixins import (
 )
 from rest_framework.viewsets import GenericViewSet
 
+from apps.clubs.filters import ClubUserFilter
 from apps.clubs.mixins import ClubScopedAccessMixin
 from apps.clubs.models import Club, ClubMembership
-from apps.clubs.permissions import CanManageClubMemberships, CanManageClubs
+from apps.clubs.permissions import (
+    CanListClubUsers,
+    CanManageClubMemberships,
+    CanManageClubs,
+)
 from apps.clubs.serializers import (
     ClubCreateSerializer,
     ClubDetailSerializer,
@@ -17,6 +23,7 @@ from apps.clubs.serializers import (
     ClubMembershipCreateSerializer,
     ClubMembershipSerializer,
     ClubUpdateSerializer,
+    ClubUserListSerializer,
 )
 
 
@@ -118,3 +125,28 @@ class ClubMembershipViewSet(
 
     def perform_create(self, serializer):
         serializer.save()
+
+
+@extend_schema_view(
+    list=extend_schema(tags=["Clubs"], responses=ClubUserListSerializer),
+)
+class ClubUserListViewSet(
+    ClubScopedAccessMixin,
+    ListModelMixin,
+    GenericViewSet,
+):
+    serializer_class = ClubUserListSerializer
+    permission_classes = (CanListClubUsers,)
+    filter_backends = (DjangoFilterBackend,)
+    filterset_class = ClubUserFilter
+    http_method_names = ("get", "head", "options")
+
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return ClubMembership.objects.none()
+        return (
+            self.get_access_context()
+            .scoped_club_users_queryset()
+            .select_related("user", "club", "court")
+            .order_by("id")
+        )

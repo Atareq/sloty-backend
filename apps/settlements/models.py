@@ -43,6 +43,13 @@ class Settlement(models.Model):
     )
     transaction_count = models.PositiveIntegerField(default=0)
     notes = models.TextField(blank=True)
+    collected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="collected_settlements",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         blank=True,
@@ -81,6 +88,7 @@ class Settlement(models.Model):
             models.Index(fields=["club", "status"]),
             models.Index(fields=["club", "period_start", "period_end"]),
             models.Index(fields=["court", "period_start", "period_end"]),
+            models.Index(fields=["club", "collected_by", "created"]),
             models.Index(fields=["settled_at"]),
         ]
 

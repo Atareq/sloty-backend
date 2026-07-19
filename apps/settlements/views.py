@@ -46,7 +46,7 @@ class SettlementViewSet(
         queryset = (
             self.get_access_context()
             .scoped_settlements_queryset()
-            .select_related("club", "court", "created_by", "settled_by")
+            .select_related("club", "court", "collected_by", "created_by", "settled_by")
             .order_by("-created", "-id")
         )
         if self.action == "retrieve":

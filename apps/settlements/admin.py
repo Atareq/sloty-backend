@@ -19,19 +19,26 @@ class SettlementAdmin(admin.ModelAdmin):
         "status",
         "total_amount",
         "transaction_count",
+        "collected_by",
         "created_by",
         "settled_by",
         "settled_at",
         "created",
     )
-    list_filter = ("status", "club", "court", "created", "settled_at")
-    search_fields = ("club__slug", "club__name", "court__name")
+    list_filter = ("status", "club", "court", "collected_by", "created", "settled_at")
+    search_fields = (
+        "club__slug",
+        "club__name",
+        "court__name",
+        "collected_by__username",
+    )
     readonly_fields = (
         "club",
         "court",
         "status",
         "total_amount",
         "transaction_count",
+        "collected_by",
         "created_by",
         "settled_by",
         "settled_at",

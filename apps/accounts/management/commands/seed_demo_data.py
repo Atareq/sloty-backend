@@ -394,6 +394,7 @@ class Command(BaseCommand):
                 status=Settlement.Status.PENDING,
                 defaults={
                     "court": courts[club_key][1],
+                    "collected_by": pending_transaction.created_by,
                     "total_amount": pending_transaction.amount,
                     "transaction_count": 1,
                     "notes": "Demo pending settlement.",
@@ -418,6 +419,7 @@ class Command(BaseCommand):
                 status=Settlement.Status.SETTLED,
                 defaults={
                     "court": courts[club_key][1],
+                    "collected_by": settled_transaction.created_by,
                     "total_amount": settled_transaction.amount,
                     "transaction_count": 1,
                     "notes": "Demo settled settlement.",
