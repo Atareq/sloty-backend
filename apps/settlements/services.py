@@ -10,11 +10,12 @@ from rest_framework.exceptions import PermissionDenied
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
-NO_UNSETTLED_TRANSACTIONS_MESSAGE = "No unsettled transactions found for this user."
+NO_UNSETTLED_TRANSACTIONS_MESSAGE = _("No unsettled transactions found for this user.")
 DOUBLE_SETTLEMENT_MESSAGE = (
     "One or more transactions were already settled. Please retry."
 )
 SELF_APPROVAL_MESSAGE = _("You cannot approve your own settlement.")
+ALREADY_SETTLED_MESSAGE = _("This settlement is already settled.")
 
 
 def validate_period(period_start, period_end):
@@ -73,7 +74,7 @@ def validate_approval_collected_by(*, access, collected_by, actor):
         raise PermissionDenied("You cannot approve settlements for this user.")
 
 
-def unsettled_transactions_queryset(*, access, collected_by):
+def get_settlement_candidate_transactions(*, access, collected_by, lock=False):
     queryset = access.scoped_transactions_queryset().filter(
         club=access.club,
         created_by=collected_by,
@@ -81,6 +82,8 @@ def unsettled_transactions_queryset(*, access, collected_by):
         settlement_line__isnull=True,
         is_cancelled=False,
     )
+    if lock:
+        queryset = queryset.select_for_update(of=("self",))
     return queryset.select_related("booking", "club", "court", "created_by").order_by(
         "created", "id"
     )
@@ -136,15 +139,16 @@ def build_settlement_summary(
     }
 
 
-def preview_settlement(*, access, collected_by, actor):
+def build_settlement_preview(*, access, collected_by, actor):
     validate_preview_collected_by(
         access=access,
         collected_by=collected_by,
         actor=actor,
     )
-    queryset = unsettled_transactions_queryset(
+    queryset = get_settlement_candidate_transactions(
         access=access,
         collected_by=collected_by,
+        lock=False,
     )
     first_transaction = queryset.first()
     if first_transaction is None:
@@ -163,28 +167,32 @@ def preview_settlement(*, access, collected_by, actor):
     )
 
 
-def create_settlement(
-    *,
-    access,
-    collected_by,
-    notes="",
-    created_by,
-):
+def preview_settlement(*, access, collected_by, actor):
+    preview = build_settlement_preview(
+        access=access,
+        collected_by=collected_by,
+        actor=actor,
+    )
+    preview["dry_run"] = True
+    preview["created"] = False
+    return preview
+
+
+def create_approved_settlement(*, access, collected_by, notes="", actor):
     try:
         with transaction.atomic():
             validate_settlement_access(access=access)
             validate_approval_collected_by(
                 access=access,
                 collected_by=collected_by,
-                actor=created_by,
+                actor=actor,
             )
             candidates = list(
-                unsettled_transactions_queryset(
+                get_settlement_candidate_transactions(
                     access=access,
                     collected_by=collected_by,
-                )
-                .select_for_update(of=("self",))
-                .order_by("created", "id")
+                    lock=True,
+                ).order_by("created", "id")
             )
             if not candidates:
                 raise serializers.ValidationError(
@@ -193,6 +201,7 @@ def create_settlement(
 
             period_start = candidates[0].created
             period_end = timezone.now()
+            settled_at = timezone.now()
             total_amount = sum(
                 (transaction_obj.amount for transaction_obj in candidates),
                 Decimal("0.00"),
@@ -203,11 +212,13 @@ def create_settlement(
                 collected_by=collected_by,
                 period_start=period_start,
                 period_end=period_end,
-                status=Settlement.Status.PENDING,
+                status=Settlement.Status.SETTLED,
                 total_amount=total_amount,
                 transaction_count=len(candidates),
                 notes=notes,
-                created_by=created_by,
+                created_by=actor,
+                settled_by=actor,
+                settled_at=settled_at,
             )
             SettlementTransaction.objects.bulk_create(
                 [
@@ -225,16 +236,20 @@ def create_settlement(
             record_audit_log(
                 club=created_settlement.club,
                 court=created_settlement.court,
-                actor=created_by,
+                actor=actor,
                 action=AuditLog.Action.SETTLEMENT_CREATED,
                 entity_type="Settlement",
                 entity_id=created_settlement.id,
                 after_data={
+                    "dry_run": False,
                     "settlement_id": created_settlement.id,
                     "court_id": created_settlement.court_id,
                     "collected_by_id": created_settlement.collected_by_id,
                     "period_start": created_settlement.period_start.isoformat(),
                     "period_end": created_settlement.period_end.isoformat(),
+                    "status": created_settlement.status,
+                    "settled_by_id": created_settlement.settled_by_id,
+                    "settled_at": created_settlement.settled_at.isoformat(),
                     "total_amount": str(created_settlement.total_amount),
                     "transaction_count": created_settlement.transaction_count,
                     "transaction_ids": [
@@ -247,6 +262,39 @@ def create_settlement(
         raise serializers.ValidationError(
             {"transactions": DOUBLE_SETTLEMENT_MESSAGE}
         ) from exc
+
+
+def process_settlement_request(
+    *,
+    access,
+    actor,
+    collected_by=None,
+    dry_run=True,
+    notes="",
+):
+    if collected_by is None:
+        collected_by = actor
+    if dry_run:
+        return preview_settlement(
+            access=access,
+            collected_by=collected_by,
+            actor=actor,
+        )
+    return create_approved_settlement(
+        access=access,
+        collected_by=collected_by,
+        notes=notes,
+        actor=actor,
+    )
+
+
+def create_settlement(*, access, collected_by, notes="", created_by):
+    return create_approved_settlement(
+        access=access,
+        collected_by=collected_by,
+        notes=notes,
+        actor=created_by,
+    )
 
 
 def mark_settlement_settled(*, access, settlement, actor):
@@ -266,6 +314,8 @@ def mark_settlement_settled(*, access, settlement, actor):
             raise PermissionDenied("You cannot access this settlement.")
         if not access.can_manage_settlements():
             raise PermissionDenied("You cannot manage settlements for this club.")
+        if locked_settlement.status == Settlement.Status.SETTLED:
+            raise serializers.ValidationError({"status": ALREADY_SETTLED_MESSAGE})
         if locked_settlement.status != Settlement.Status.PENDING:
             raise serializers.ValidationError(
                 {"status": "Only pending settlements can be marked as settled."}

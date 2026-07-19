@@ -117,7 +117,7 @@ class CanManageClubBookings(BasePermission):
 class CanManageClubSettlements(BasePermission):
     def has_permission(self, request, view) -> bool:
         access = view.get_access_context()
-        if view.action == "preview":
+        if view.action in {"create", "preview"}:
             return access.has_any_club_access()
         return access.can_manage_settlements()
 

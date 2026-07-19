@@ -276,7 +276,7 @@ does not require Celery or a scheduler.
 - `POST /api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`
 
 Settlement is user-based. The owner/admin/allowed manager selects a collector
-from the club users list, previews that user's open balance, then creates a
+from the club users list, previews that user's open balance, then approves a
 settlement for all currently unsettled valid transactions recorded by that user
 in the selected club.
 
@@ -286,19 +286,34 @@ Preview:
 GET /api/v1/clubs/{club_slug}/settlements/preview/?collected_by={user_id}
 ```
 
-Create:
+Dry-run through `POST` is also supported and is the default when `dry_run` is
+omitted. It creates no settlement rows, settlement lines, audit rows, or status
+changes:
 
 ```json
 {
+  "dry_run": true,
+  "collected_by": 15
+}
+```
+
+Approve:
+
+```json
+{
+  "dry_run": false,
   "collected_by": 15,
   "notes": "End of shift settlement"
 }
 ```
 
-No date range is required for preview or creation. `period_start` is computed
-from the earliest selected transaction and `period_end` is the creation time.
+No date range is required for preview or approval. `period_start` is computed
+from the earliest selected transaction and `period_end` is the approval time.
 Cancelled transactions are excluded, and settled transactions cannot be included
-again. Mark-settled changes only `PENDING` settlements to `SETTLED`.
+again. API approval creates settlements directly as `SETTLED` with
+`created_by`, `settled_by`, and `settled_at` set to the approving actor.
+Mark-settled remains for legacy `PENDING` settlements and rejects already
+`SETTLED` settlements.
 
 Platform admins and owners can manage settlements. Managers can manage
 settlements only when the club has `manager_can_settle_transactions=True`.

@@ -17,3 +17,12 @@ msgstr "لا يمكنك تسوية معاملاتك بنفسك."
 
 msgid "You cannot approve your own settlement."
 msgstr "لا يمكنك اعتماد التسوية الخاصة بك."
+
+msgid "This field is required when dry_run is false."
+msgstr "هذا الحقل مطلوب عند إنشاء التسوية."
+
+msgid "No unsettled transactions found for this user."
+msgstr "لا توجد معاملات غير مسواة لهذا المستخدم."
+
+msgid "This settlement is already settled."
+msgstr "تمت تسوية هذه التسوية بالفعل."

@@ -1,5 +1,6 @@
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
+from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.mixins import CreateModelMixin, ListModelMixin, RetrieveModelMixin
 from rest_framework.response import Response
@@ -62,6 +63,18 @@ class SettlementViewSet(
         if self.action == "create":
             return SettlementCreateSerializer
         return SettlementDetailSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        response_status = (
+            status.HTTP_200_OK
+            if serializer.data.get("dry_run")
+            else status.HTTP_201_CREATED
+        )
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=response_status, headers=headers)
 
     @extend_schema(
         tags=["Settlements"],

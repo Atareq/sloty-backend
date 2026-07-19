@@ -437,10 +437,12 @@ Rules for the flow:
 - Settlement serializers must receive `context["club_access"]`.
 - Settlement views should call `access.scoped_settlements_queryset()` for
   list/detail scoping.
-- Settlement preview is a read-only dry-run endpoint. Any active selected-club
-  user can preview their own unsettled transactions, and omitted `collected_by`
-  defaults to `request.user`. Preview must not create `Settlement`,
-  `SettlementTransaction`, audit rows, locks, or status changes.
+- Settlement preview is read-only dry-run behavior, available through both
+  `GET .../settlements/preview/` and `POST .../settlements/` with
+  `dry_run=true` or omitted. Any active selected-club user can preview their own
+  unsettled transactions, and omitted `collected_by` defaults to `request.user`.
+  Dry-run preview must not create `Settlement`, `SettlementTransaction`, audit
+  rows, locks, or status changes.
 - Platform admins and owners can preview active users in the selected club and
   can create, list, retrieve, and mark settlements as settled.
 - Managers can create/list/retrieve/mark settlements only when
@@ -453,13 +455,19 @@ Rules for the flow:
 - For settlement create/approval, platform admins and owners may approve their
   own collected transactions. Managers and staff must not approve their own
   settlement.
-- Settlement preview/create are user/collector-based through
-  `Settlement.collected_by`; create requests require `collected_by`, while
-  preview defaults it to `request.user` when omitted. Date ranges are not
-  accepted. The backend selects all valid, non-cancelled, unsettled
-  transactions where `Transaction.created_by` is the selected collector in the
-  selected club and accessible court scope, computes `period_start` from the
-  earliest selected transaction, and sets `period_end` to creation time.
+- Settlement preview/approval is user/collector-based through
+  `Settlement.collected_by`. `POST .../settlements/` defaults to
+  `dry_run=true`; `dry_run=false` is the approval path and requires
+  `collected_by`. Date ranges are not accepted. The backend selects all valid,
+  non-cancelled, unsettled transactions where `Transaction.created_by` is the
+  selected collector in the selected club and accessible court scope, computes
+  `period_start` from the earliest selected transaction, and sets `period_end`
+  to creation time.
+- New API-approved settlements are created directly as `SETTLED` with
+  `created_by`, `settled_by`, and `settled_at` set to the approving actor. The
+  `PENDING` status and mark-settled endpoint remain only for legacy pending
+  settlements and manual testing data; new API approval must not create
+  `PENDING` settlements.
 - `SettlementTransaction.transaction` is a `OneToOneField` to `Transaction`;
   this prevents one transaction from being included in more than one
   settlement while keeping transaction rows immutable.

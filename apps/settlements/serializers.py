@@ -1,8 +1,9 @@
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 from apps.accounts.models import User
 from apps.settlements.models import Settlement, SettlementTransaction
-from apps.settlements.services import create_settlement, preview_settlement
+from apps.settlements.services import preview_settlement, process_settlement_request
 
 
 class SettlementListSerializer(serializers.ModelSerializer):
@@ -114,28 +115,50 @@ class SettlementDetailSerializer(serializers.ModelSerializer):
 
 
 class SettlementCreateSerializer(serializers.ModelSerializer):
-    collected_by = serializers.PrimaryKeyRelatedField(queryset=User.objects.all())
+    collected_by = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(),
+        required=False,
+    )
+    dry_run = serializers.BooleanField(default=True, write_only=True)
 
     class Meta:
         model = Settlement
         fields = (
             "id",
             "collected_by",
+            "dry_run",
             "notes",
         )
         read_only_fields = ("id",)
         extra_kwargs = {"notes": {"required": False, "allow_blank": True}}
 
+    def validate(self, attrs):
+        if attrs.get("dry_run") is False and attrs.get("collected_by") is None:
+            raise serializers.ValidationError(
+                {"collected_by": [_("This field is required when dry_run is false.")]}
+            )
+        return attrs
+
     def create(self, validated_data):
         request = self.context["request"]
-        return create_settlement(
+        return process_settlement_request(
             access=self.context["club_access"],
-            created_by=request.user,
+            actor=request.user,
             **validated_data,
         )
 
     def to_representation(self, instance):
-        return SettlementDetailSerializer(instance, context=self.context).data
+        if isinstance(instance, dict):
+            return SettlementPreviewResponseSerializer(
+                instance,
+                context=self.context,
+            ).data
+        data = SettlementDetailSerializer(instance, context=self.context).data
+        created_at = data.get("created")
+        data["dry_run"] = False
+        data["created"] = True
+        data["created_at"] = created_at
+        return data
 
 
 class SettlementPreviewRequestSerializer(serializers.Serializer):
@@ -174,6 +197,8 @@ class SettlementPreviewTransactionSerializer(serializers.Serializer):
 
 
 class SettlementPreviewResponseSerializer(serializers.Serializer):
+    dry_run = serializers.BooleanField()
+    created = serializers.BooleanField()
     club = serializers.IntegerField()
     collected_by = serializers.IntegerField()
     collected_by_name = serializers.CharField()
