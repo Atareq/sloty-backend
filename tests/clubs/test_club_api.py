@@ -74,6 +74,9 @@ class ClubAPITestCase(APITestCase):
             kwargs={"club_slug": club.slug, "pk": membership.pk},
         )
 
+    def club_user_list_url(self, club):
+        return reverse("club-user-list", kwargs={"club_slug": club.slug})
+
 
 class ClubAPITests(ClubAPITestCase):
     def setUp(self):
@@ -810,3 +813,493 @@ class ClubMembershipAPITests(ClubAPITestCase):
         self.client.force_authenticate(user=self.owner)
         scoped_response = self.client.get(reverse("club-list"))
         self.assertEqual(self.list_ids(scoped_response), set())
+
+
+class ClubUserListAPITests(ClubAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("club-users-admin")
+        self.owner = self.create_user("club-users-owner")
+        self.other_owner = self.create_user("club-users-other-owner")
+        self.manager = self.create_user("club-users-manager")
+        self.restricted_manager = self.create_user("club-users-restricted-manager")
+        self.staff = self.create_user(
+            "staff-ahmed",
+            first_name="Ahmed",
+            last_name="Ali",
+            phone_number="+201000000099",
+        )
+        self.inactive_staff = self.create_user("club-users-inactive-staff")
+        self.other_staff = self.create_user("club-users-other-staff")
+        self.club = self.create_club(
+            "Club Users Club",
+            slug="club-users",
+            manager_can_settle_transactions=True,
+        )
+        self.restricted_club = self.create_club(
+            "Restricted Club Users Club",
+            slug="restricted-club-users",
+            manager_can_settle_transactions=False,
+        )
+        self.other_club = self.create_club(
+            "Other Club Users Club",
+            slug="other-club-users",
+        )
+        self.court = self.create_court(self.club, "Court A")
+        self.other_court = self.create_court(self.club, "Court B")
+        self.external_court = self.create_court(self.other_club, "External Court")
+        self.owner_membership = self.create_membership(
+            self.owner,
+            self.club,
+            ClubMembership.Role.OWNER,
+        )
+        self.manager_membership = self.create_membership(
+            self.manager,
+            self.club,
+            ClubMembership.Role.MANAGER,
+        )
+        self.restricted_manager_membership = self.create_membership(
+            self.restricted_manager,
+            self.restricted_club,
+            ClubMembership.Role.MANAGER,
+        )
+        self.staff_membership = self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.inactive_membership = self.create_membership(
+            self.inactive_staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.other_court,
+            is_active=False,
+        )
+        self.other_membership = self.create_membership(
+            self.other_staff,
+            self.other_club,
+            ClubMembership.Role.STAFF,
+            court=self.external_court,
+        )
+        self.create_membership(
+            self.other_owner,
+            self.other_club,
+            ClubMembership.Role.OWNER,
+        )
+
+    def test_unauthenticated_user_cannot_list_club_users(self):
+        response = self.client.get(self.club_user_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_platform_admin_can_list_users_in_any_club(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(self.club_user_list_url(self.other_club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self.list_ids(response),
+            {self.other_owner.id, self.other_staff.id},
+        )
+
+    def test_owner_can_list_users_in_owned_club(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.club_user_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self.list_ids(response),
+            {
+                self.owner.id,
+                self.manager.id,
+                self.staff.id,
+                self.inactive_staff.id,
+            },
+        )
+
+    def test_owner_cannot_list_users_in_another_club(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.club_user_list_url(self.other_club))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_manager_with_settlement_permission_can_list_active_employees_only(self):
+        self.client.force_authenticate(user=self.manager)
+
+        response = self.client.get(self.club_user_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {self.manager.id, self.staff.id})
+        self.assertNotIn(self.owner.id, self.list_ids(response))
+        self.assertNotIn(self.inactive_staff.id, self.list_ids(response))
+        self.assertNotIn(self.other_staff.id, self.list_ids(response))
+
+    def test_manager_without_settlement_permission_cannot_list_users(self):
+        self.client.force_authenticate(user=self.restricted_manager)
+
+        response = self.client.get(self.club_user_list_url(self.restricted_club))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_staff_cannot_list_club_users(self):
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(self.club_user_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_role_filter_returns_only_selected_role(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"role": ClubMembership.Role.STAFF},
+        )
+
+        self.assertEqual(
+            self.list_ids(response),
+            {self.staff.id, self.inactive_staff.id},
+        )
+
+    def test_court_filter_returns_only_users_assigned_to_court(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"court": self.court.id},
+        )
+
+        self.assertEqual(self.list_ids(response), {self.staff.id})
+
+    def test_role_and_court_filter_work_together(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"role": ClubMembership.Role.STAFF, "court": self.court.id},
+        )
+
+        self.assertEqual(self.list_ids(response), {self.staff.id})
+
+    def test_is_active_filter_works(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"is_active": "false"},
+        )
+
+        self.assertEqual(self.list_ids(response), {self.inactive_staff.id})
+
+    def test_search_filter_works(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"search": "ahmed"},
+        )
+
+        self.assertEqual(self.list_ids(response), {self.staff.id})
+
+    def test_manager_role_owner_filter_returns_empty(self):
+        self.client.force_authenticate(user=self.manager)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"role": ClubMembership.Role.OWNER},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), set())
+
+    def test_manager_inactive_filter_returns_empty(self):
+        self.client.force_authenticate(user=self.manager)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"is_active": "false"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), set())
+
+    def test_manager_can_filter_by_court_and_search_employees(self):
+        self.client.force_authenticate(user=self.manager)
+
+        court_response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"court": self.court.id},
+        )
+        search_response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"search": "ahmed"},
+        )
+
+        self.assertEqual(self.list_ids(court_response), {self.staff.id})
+        self.assertEqual(self.list_ids(search_response), {self.staff.id})
+
+    def test_response_includes_identity_and_membership_fields(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"role": ClubMembership.Role.STAFF, "court": self.court.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item = response.data["results"][0]
+        self.assertEqual(item["id"], self.staff.id)
+        self.assertEqual(item["membership_id"], self.staff_membership.id)
+        self.assertEqual(item["username"], self.staff.username)
+        self.assertEqual(item["first_name"], "Ahmed")
+        self.assertEqual(item["last_name"], "Ali")
+        self.assertEqual(item["phone_number"], "+201000000099")
+        self.assertEqual(item["role"], ClubMembership.Role.STAFF)
+        self.assertEqual(item["club"], self.club.id)
+        self.assertEqual(item["club_slug"], self.club.slug)
+        self.assertEqual(item["court"], self.court.id)
+        self.assertEqual(item["court_name"], self.court.name)
+        self.assertTrue(item["membership_is_active"])
+
+    def test_user_model_does_not_gain_club_role_or_court_fields(self):
+        user_fields = {field.name for field in User._meta.get_fields()}
+
+        self.assertNotIn("role", user_fields)
+        self.assertNotIn("club", user_fields)
+        self.assertNotIn("court", user_fields)
+
+
+class ClubUserListResponseFieldAPITests(ClubAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("club-users-admin")
+        self.owner = self.create_user("club-users-owner")
+        self.other_owner = self.create_user("club-users-other-owner")
+        self.manager = self.create_user(
+            "club-users-manager",
+            first_name="Mona",
+            last_name="Manager",
+            phone_number="+201000000101",
+        )
+        self.staff = self.create_user(
+            "club-users-staff-ahmed",
+            first_name="Ahmed",
+            last_name="Ali",
+            phone_number="+201000000102",
+        )
+        self.other_staff = self.create_user(
+            "club-users-staff-other",
+            first_name="Omar",
+            last_name="Other",
+            phone_number="+201000000103",
+        )
+        self.inactive_staff = self.create_user(
+            "club-users-inactive",
+            first_name="Inactive",
+            phone_number="+201000000104",
+        )
+        self.club = self.create_club(
+            "Club Users Club",
+            slug="club-users",
+            manager_can_settle_transactions=True,
+            manager_can_change_pricing=True,
+        )
+        self.other_club = self.create_club(
+            "Other Club Users Club",
+            slug="other-club-users",
+        )
+        self.court = self.create_court(self.club, "Court A")
+        self.other_court = self.create_court(self.club, "Court B")
+        self.other_club_court = self.create_court(self.other_club, "Other Court")
+        self.owner_membership = self.create_membership(
+            self.owner,
+            self.club,
+            ClubMembership.Role.OWNER,
+        )
+        self.manager_membership = self.create_membership(
+            self.manager,
+            self.club,
+            ClubMembership.Role.MANAGER,
+        )
+        self.staff_membership = self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.other_staff_membership = self.create_membership(
+            self.other_staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.other_court,
+        )
+        self.inactive_staff_membership = self.create_membership(
+            self.inactive_staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+            is_active=False,
+        )
+        self.other_owner_membership = self.create_membership(
+            self.other_owner,
+            self.other_club,
+            ClubMembership.Role.OWNER,
+        )
+
+    def test_unauthenticated_user_cannot_list_club_users(self):
+        response = self.client.get(self.club_user_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_platform_admin_can_list_users_in_any_club(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        selected_club_response = self.client.get(self.club_user_list_url(self.club))
+        other_club_response = self.client.get(self.club_user_list_url(self.other_club))
+
+        self.assertEqual(selected_club_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(other_club_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self.list_ids(other_club_response),
+            {self.other_owner.id},
+        )
+
+    def test_owner_can_list_owned_club_users(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.club_user_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(self.staff.id, self.list_ids(response))
+
+    def test_owner_cannot_list_other_club_users(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.club_user_list_url(self.other_club))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_manager_with_settlement_permission_can_list_active_employees(self):
+        self.client.force_authenticate(user=self.manager)
+
+        response = self.client.get(self.club_user_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self.list_ids(response),
+            {self.manager.id, self.staff.id, self.other_staff.id},
+        )
+        self.assertNotIn(self.owner.id, self.list_ids(response))
+        self.assertNotIn(self.inactive_staff.id, self.list_ids(response))
+
+    def test_staff_cannot_list_club_users(self):
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(self.club_user_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_role_filter_returns_only_selected_role(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"role": ClubMembership.Role.STAFF},
+        )
+
+        self.assertEqual(
+            self.list_ids(response),
+            {self.staff.id, self.other_staff.id, self.inactive_staff.id},
+        )
+
+    def test_court_filter_returns_only_users_assigned_to_court(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"court": self.court.id},
+        )
+
+        self.assertEqual(
+            self.list_ids(response),
+            {self.staff.id, self.inactive_staff.id},
+        )
+
+    def test_role_and_court_filter_work_together(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        staff_response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"role": ClubMembership.Role.STAFF, "court": self.court.id},
+        )
+        manager_response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"role": ClubMembership.Role.MANAGER, "court": self.court.id},
+        )
+
+        self.assertEqual(
+            self.list_ids(staff_response),
+            {self.staff.id, self.inactive_staff.id},
+        )
+        self.assertEqual(self.list_ids(manager_response), set())
+
+    def test_is_active_filter_uses_membership_active_state(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"is_active": "false"},
+        )
+
+        self.assertEqual(self.list_ids(response), {self.inactive_staff.id})
+
+    def test_search_filter_matches_user_identity_fields(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"search": "ahmed"},
+        )
+
+        self.assertEqual(self.list_ids(response), {self.staff.id})
+
+    def test_users_from_another_club_do_not_leak(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(self.club_user_list_url(self.club))
+
+        self.assertNotIn(self.other_owner.id, self.list_ids(response))
+
+    def test_response_includes_user_identity_and_membership_fields(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"role": ClubMembership.Role.STAFF, "court": self.court.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item = response.data["results"][0]
+        self.assertEqual(item["id"], self.staff.id)
+        self.assertEqual(item["membership_id"], self.staff_membership.id)
+        self.assertEqual(item["username"], self.staff.username)
+        self.assertEqual(item["first_name"], "Ahmed")
+        self.assertEqual(item["phone_number"], "+201000000102")
+        self.assertEqual(item["role"], ClubMembership.Role.STAFF)
+        self.assertEqual(item["club"], self.club.id)
+        self.assertEqual(item["club_slug"], self.club.slug)
+        self.assertEqual(item["court"], self.court.id)
+        self.assertEqual(item["court_name"], self.court.name)
+        self.assertTrue(item["membership_is_active"])
+        self.assertFalse(item["can_change_pricing"])
+        self.assertFalse(item["can_manage_working_hours"])
+        self.assertFalse(item["can_manage_settlements"])
+
+    def test_no_user_scope_fields_were_added(self):
+        user_fields = {field.name for field in User._meta.get_fields()}
+
+        self.assertNotIn("role", user_fields)
+        self.assertNotIn("club", user_fields)
+        self.assertNotIn("court", user_fields)

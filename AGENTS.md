@@ -141,7 +141,8 @@ Current implemented app:
   `apps/clubs/services.py`.
 - `GET /api/v1/clubs/{club_slug}/users/` is a read-only, club-scoped,
   membership-based users list. Platform admins and owners see all selected-club
-  memberships. Managers and staff cannot list club users.
+  memberships. Managers can list active MANAGER/STAFF employees only when
+  `club.manager_can_settle_transactions=True`. Staff cannot list club users.
 - `apps/courts/` contains court setup and court working hours logic.
 - `Court` stores `default_price`, `slot_duration_minutes`,
   `requires_digital_payment_reference`, and `internal_hold_expiry_hours`.
@@ -436,19 +437,28 @@ Rules for the flow:
 - Settlement serializers must receive `context["club_access"]`.
 - Settlement views should call `access.scoped_settlements_queryset()` for
   list/detail scoping.
-- Platform admins and owners can preview, create, list, retrieve, and mark
-  settlements as settled in the selected club.
-- Managers can access settlements only when
-  `club.manager_can_settle_transactions=True`.
-- Staff cannot access settlement endpoints in Sprint 6.
-- For settlement preview/create, platform admins and owners may settle their
-  own collected transactions. Managers must not settle their own transactions,
-  even when `club.manager_can_settle_transactions=True`.
+- Settlement preview is a read-only dry-run endpoint. Any active selected-club
+  user can preview their own unsettled transactions, and omitted `collected_by`
+  defaults to `request.user`. Preview must not create `Settlement`,
+  `SettlementTransaction`, audit rows, locks, or status changes.
+- Platform admins and owners can preview active users in the selected club and
+  can create, list, retrieve, and mark settlements as settled.
+- Managers can create/list/retrieve/mark settlements only when
+  `club.manager_can_settle_transactions=True`. Managers with that flag can
+  preview/create for active STAFF and MANAGER users in the selected club, but
+  not OWNER users by default. Managers can preview their own transactions as a
+  dry run but must not approve/create their own settlement.
+- Staff can preview only their own unsettled transactions and cannot create,
+  list, retrieve, or mark settlements.
+- For settlement create/approval, platform admins and owners may approve their
+  own collected transactions. Managers and staff must not approve their own
+  settlement.
 - Settlement preview/create are user/collector-based through
-  `Settlement.collected_by`; new preview/create requests require `collected_by`
-  and do not require date range fields. The backend selects all valid,
-  non-cancelled, unsettled transactions where `Transaction.created_by` is the
-  selected collector in the selected club, computes `period_start` from the
+  `Settlement.collected_by`; create requests require `collected_by`, while
+  preview defaults it to `request.user` when omitted. Date ranges are not
+  accepted. The backend selects all valid, non-cancelled, unsettled
+  transactions where `Transaction.created_by` is the selected collector in the
+  selected club and accessible court scope, computes `period_start` from the
   earliest selected transaction, and sets `period_end` to creation time.
 - `SettlementTransaction.transaction` is a `OneToOneField` to `Transaction`;
   this prevents one transaction from being included in more than one

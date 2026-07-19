@@ -139,13 +139,20 @@ class SettlementCreateSerializer(serializers.ModelSerializer):
 
 
 class SettlementPreviewRequestSerializer(serializers.Serializer):
-    collected_by = serializers.PrimaryKeyRelatedField(queryset=User.objects.all())
+    collected_by = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(),
+        required=False,
+    )
 
     def create(self, validated_data):
         raise NotImplementedError
 
     def update(self, instance, validated_data):
         raise NotImplementedError
+
+    def validate(self, attrs):
+        attrs.setdefault("collected_by", self.context["request"].user)
+        return attrs
 
     def preview(self):
         return preview_settlement(
@@ -170,6 +177,9 @@ class SettlementPreviewResponseSerializer(serializers.Serializer):
     club = serializers.IntegerField()
     collected_by = serializers.IntegerField()
     collected_by_name = serializers.CharField()
+    is_self_preview = serializers.BooleanField()
+    can_approve = serializers.BooleanField()
+    approval_required = serializers.BooleanField()
     period_start = serializers.DateTimeField()
     period_end = serializers.DateTimeField()
     transaction_count = serializers.IntegerField()

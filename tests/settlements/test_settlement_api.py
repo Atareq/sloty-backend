@@ -518,6 +518,12 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             start_time=self.time_at(45),
             end_time=self.time_at(46),
         )
+        self.manager_denied_self_booking = self.create_booking(
+            self.manager_denied_court,
+            customer_phone="+201000000024",
+            start_time=self.time_at(47),
+            end_time=self.time_at(48),
+        )
         self.owner_transaction = self.create_transaction(
             self.owner_booking,
             amount=Decimal("80.00"),
@@ -563,6 +569,13 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             created=self.time_at(18),
             payment_reference="PREVIEW-MANAGER-SELF",
             created_by=self.manager,
+        )
+        self.manager_denied_self_transaction = self.create_transaction(
+            self.manager_denied_self_booking,
+            amount=Decimal("140.00"),
+            created=self.time_at(19),
+            payment_reference="PREVIEW-MANAGER-DENIED-SELF",
+            created_by=self.manager_without_permission,
         )
         self.already_settled = self.create_transaction(
             self.booking,
@@ -617,6 +630,9 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.assertEqual(response.data["total_amount"], "150.00")
         self.assertEqual(response.data["collected_by"], self.staff.id)
         self.assertEqual(response.data["collected_by_name"], "Ahmed Ali")
+        self.assertFalse(response.data["is_self_preview"])
+        self.assertTrue(response.data["can_approve"])
+        self.assertFalse(response.data["approval_required"])
         self.assertEqual(
             response.data["totals_by_payment_method"][Transaction.PaymentMethod.CASH],
             "150.00",
@@ -630,11 +646,12 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             },
         )
 
-    def test_preview_requires_collected_by(self):
+    def test_preview_without_collected_by_defaults_to_request_user(self):
         response = self.client.get(self.settlement_preview_url(self.club))
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("collected_by", response.data)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["collected_by"], self.platform_admin.id)
+        self.assertTrue(response.data["is_self_preview"])
 
     def test_preview_does_not_require_period_start_or_period_end(self):
         response = self.client.get(
@@ -701,6 +718,47 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("collected_by", response.data)
+
+    def test_staff_can_preview_himself_without_collected_by(self):
+        before_settlements = Settlement.objects.count()
+        before_lines = SettlementTransaction.objects.count()
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(self.settlement_preview_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["collected_by"], self.staff.id)
+        self.assertTrue(response.data["is_self_preview"])
+        self.assertFalse(response.data["can_approve"])
+        self.assertTrue(response.data["approval_required"])
+        self.assertEqual(response.data["transaction_count"], 2)
+        self.assertEqual(response.data["total_amount"], "125.00")
+        self.assertEqual(Settlement.objects.count(), before_settlements)
+        self.assertEqual(SettlementTransaction.objects.count(), before_lines)
+
+    def test_staff_cannot_preview_another_user(self):
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(
+            self.settlement_preview_url(self.club),
+            self.settlement_payload(collected_by=self.owner.id),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_owner_can_preview_any_active_club_user(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(
+            self.settlement_preview_url(self.club),
+            self.settlement_payload(collected_by=self.staff.id),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["collected_by"], self.staff.id)
+        self.assertFalse(response.data["is_self_preview"])
+        self.assertTrue(response.data["can_approve"])
+        self.assertFalse(response.data["approval_required"])
 
     def test_create_settlement_from_unsettled_transactions(self):
         response = self.client.post(
@@ -812,6 +870,9 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.assertEqual(response.data["collected_by"], self.owner.id)
         self.assertEqual(response.data["transaction_count"], 2)
         self.assertEqual(response.data["total_amount"], "170.00")
+        self.assertTrue(response.data["is_self_preview"])
+        self.assertTrue(response.data["can_approve"])
+        self.assertFalse(response.data["approval_required"])
         self.assertEqual(
             {item["id"] for item in response.data["transactions"]},
             {self.owner_transaction.id, self.owner_second_transaction.id},
@@ -904,7 +965,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.assertEqual(preview_response.status_code, status.HTTP_200_OK)
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
 
-    def test_manager_with_settlement_permission_cannot_preview_himself(self):
+    def test_manager_with_settlement_permission_can_preview_himself(self):
         self.client.force_authenticate(user=self.manager)
 
         response = self.client.get(
@@ -912,26 +973,29 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             self.settlement_payload(collected_by=self.manager.id),
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(
-            response.data["detail"],
-            "You cannot settle your own transactions.",
-        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["collected_by"], self.manager.id)
+        self.assertTrue(response.data["is_self_preview"])
+        self.assertFalse(response.data["can_approve"])
+        self.assertTrue(response.data["approval_required"])
+        self.assertEqual(response.data["transaction_count"], 1)
+        self.assertEqual(response.data["total_amount"], "130.00")
 
-    def test_manager_self_preview_error_supports_arabic(self):
-        self.client.force_authenticate(user=self.manager)
+    def test_manager_without_settlement_permission_can_preview_himself(self):
+        self.client.force_authenticate(user=self.manager_without_permission)
 
         response = self.client.get(
-            self.settlement_preview_url(self.manager_club),
-            self.settlement_payload(collected_by=self.manager.id),
-            HTTP_ACCEPT_LANGUAGE="ar",
+            self.settlement_preview_url(self.manager_denied_club)
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
-            response.data["detail"],
-            "لا يمكنك تسوية معاملاتك بنفسك.",
+            response.data["collected_by"],
+            self.manager_without_permission.id,
         )
+        self.assertTrue(response.data["is_self_preview"])
+        self.assertFalse(response.data["can_approve"])
+        self.assertTrue(response.data["approval_required"])
 
     def test_manager_with_settlement_permission_cannot_create_for_himself(self):
         self.client.force_authenticate(user=self.manager)
@@ -945,7 +1009,23 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(
             response.data["detail"],
-            "You cannot settle your own transactions.",
+            "You cannot approve your own settlement.",
+        )
+
+    def test_manager_self_create_error_supports_arabic(self):
+        self.client.force_authenticate(user=self.manager)
+
+        response = self.client.post(
+            self.settlement_list_url(self.manager_club),
+            self.settlement_payload(collected_by=self.manager.id),
+            format="json",
+            HTTP_ACCEPT_LANGUAGE="ar",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "لا يمكنك اعتماد التسوية الخاصة بك.",
         )
 
     def test_manager_without_settlement_permission_cannot_settle(self):
@@ -964,7 +1044,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.assertEqual(preview_response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(create_response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_manager_with_permission_can_settle_owner_collector(self):
+    def test_manager_with_permission_cannot_settle_owner_collector(self):
         manager_club_owner = self.create_user("preview-manager-club-owner")
         self.create_membership(
             manager_club_owner,
@@ -991,7 +1071,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_manager_cannot_settle_inactive_employee_by_default(self):
         inactive_manager_employee = self.create_user("preview-manager-inactive")

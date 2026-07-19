@@ -14,6 +14,7 @@ NO_UNSETTLED_TRANSACTIONS_MESSAGE = "No unsettled transactions found for this us
 DOUBLE_SETTLEMENT_MESSAGE = (
     "One or more transactions were already settled. Please retry."
 )
+SELF_APPROVAL_MESSAGE = _("You cannot approve your own settlement.")
 
 
 def validate_period(period_start, period_end):
@@ -37,21 +38,43 @@ def get_user_display_name(user):
     return full_name or user.username
 
 
-def validate_collected_by(*, access, collected_by, actor):
-    if actor and collected_by.id == actor.id:
-        if access.is_platform_admin or access.is_owner:
-            return
-        raise serializers.ValidationError(
-            {"detail": _("You cannot settle your own transactions.")}
-        )
+def validate_collected_by_membership(*, access, collected_by, actor):
+    if actor and collected_by.id == actor.id and access.is_platform_admin:
+        return
     if not access.user_has_active_membership(collected_by):
         raise serializers.ValidationError(
             {"collected_by": "User must have an active membership in this club."}
         )
 
 
+def validate_preview_collected_by(*, access, collected_by, actor):
+    validate_collected_by_membership(
+        access=access,
+        collected_by=collected_by,
+        actor=actor,
+    )
+    if not access.can_preview_settlement_for_user(collected_by):
+        raise PermissionDenied("You cannot preview settlements for this user.")
+
+
+def validate_approval_collected_by(*, access, collected_by, actor):
+    validate_collected_by_membership(
+        access=access,
+        collected_by=collected_by,
+        actor=actor,
+    )
+    if (
+        actor
+        and collected_by.id == actor.id
+        and not (access.is_platform_admin or access.is_owner)
+    ):
+        raise serializers.ValidationError({"detail": SELF_APPROVAL_MESSAGE})
+    if not access.can_approve_settlement_for_user(collected_by):
+        raise PermissionDenied("You cannot approve settlements for this user.")
+
+
 def unsettled_transactions_queryset(*, access, collected_by):
-    queryset = Transaction.objects.filter(
+    queryset = access.scoped_transactions_queryset().filter(
         club=access.club,
         created_by=collected_by,
         amount__gt=0,
@@ -92,14 +115,18 @@ def serialize_preview_transactions(transactions):
 
 
 def build_settlement_summary(
-    *, access, collected_by, period_start, period_end, queryset
+    *, access, collected_by, actor, period_start, period_end, queryset
 ):
     transactions = list(queryset)
     aggregate = queryset.aggregate(total=Sum("amount"))
+    can_approve = access.can_approve_settlement_for_user(collected_by)
     return {
         "club": access.club.id,
         "collected_by": collected_by.id,
         "collected_by_name": get_user_display_name(collected_by),
+        "is_self_preview": bool(actor and collected_by.id == actor.id),
+        "can_approve": can_approve,
+        "approval_required": not can_approve,
         "period_start": period_start,
         "period_end": period_end,
         "transaction_count": len(transactions),
@@ -110,8 +137,11 @@ def build_settlement_summary(
 
 
 def preview_settlement(*, access, collected_by, actor):
-    validate_settlement_access(access=access)
-    validate_collected_by(access=access, collected_by=collected_by, actor=actor)
+    validate_preview_collected_by(
+        access=access,
+        collected_by=collected_by,
+        actor=actor,
+    )
     queryset = unsettled_transactions_queryset(
         access=access,
         collected_by=collected_by,
@@ -126,6 +156,7 @@ def preview_settlement(*, access, collected_by, actor):
     return build_settlement_summary(
         access=access,
         collected_by=collected_by,
+        actor=actor,
         period_start=period_start,
         period_end=period_end,
         queryset=queryset,
@@ -142,7 +173,7 @@ def create_settlement(
     try:
         with transaction.atomic():
             validate_settlement_access(access=access)
-            validate_collected_by(
+            validate_approval_collected_by(
                 access=access,
                 collected_by=collected_by,
                 actor=created_by,
