@@ -4,18 +4,24 @@ from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
-from rest_framework import serializers
+from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
+from apps.common.exceptions import SlotyAPIException
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
-NO_UNSETTLED_TRANSACTIONS_MESSAGE = _("No unsettled transactions found for this user.")
-DOUBLE_SETTLEMENT_MESSAGE = (
+NO_UNSETTLED_TRANSACTIONS_MESSAGE = _(
+    "There are no unsettled transactions for this user."
+)
+DOUBLE_SETTLEMENT_MESSAGE = _(
     "One or more transactions were already settled. Please retry."
 )
 SELF_APPROVAL_MESSAGE = _("You cannot approve your own settlement.")
 ALREADY_SETTLED_MESSAGE = _("This settlement is already settled.")
+INVALID_SETTLEMENT_STATUS_MESSAGE = _(
+    "Only pending settlements can be marked as settled."
+)
 
 
 def validate_period(period_start, period_end):
@@ -69,7 +75,11 @@ def validate_approval_collected_by(*, access, collected_by, actor):
         and collected_by.id == actor.id
         and not (access.is_platform_admin or access.is_owner)
     ):
-        raise serializers.ValidationError({"detail": SELF_APPROVAL_MESSAGE})
+        raise SlotyAPIException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="SELF_SETTLEMENT_APPROVAL_FORBIDDEN",
+            message=SELF_APPROVAL_MESSAGE,
+        )
     if not access.can_approve_settlement_for_user(collected_by):
         raise PermissionDenied("You cannot approve settlements for this user.")
 
@@ -152,8 +162,10 @@ def build_settlement_preview(*, access, collected_by, actor):
     )
     first_transaction = queryset.first()
     if first_transaction is None:
-        raise serializers.ValidationError(
-            {"transactions": NO_UNSETTLED_TRANSACTIONS_MESSAGE}
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="NO_UNSETTLED_TRANSACTIONS",
+            message=NO_UNSETTLED_TRANSACTIONS_MESSAGE,
         )
     period_start = first_transaction.created
     period_end = timezone.now()
@@ -195,8 +207,10 @@ def create_approved_settlement(*, access, collected_by, notes="", actor):
                 ).order_by("created", "id")
             )
             if not candidates:
-                raise serializers.ValidationError(
-                    {"transactions": NO_UNSETTLED_TRANSACTIONS_MESSAGE}
+                raise SlotyAPIException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    code="NO_UNSETTLED_TRANSACTIONS",
+                    message=NO_UNSETTLED_TRANSACTIONS_MESSAGE,
                 )
 
             period_start = candidates[0].created
@@ -259,8 +273,10 @@ def create_approved_settlement(*, access, collected_by, notes="", actor):
             )
             return created_settlement
     except IntegrityError as exc:
-        raise serializers.ValidationError(
-            {"transactions": DOUBLE_SETTLEMENT_MESSAGE}
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="SETTLEMENT_CONFLICT",
+            message=DOUBLE_SETTLEMENT_MESSAGE,
         ) from exc
 
 
@@ -315,10 +331,16 @@ def mark_settlement_settled(*, access, settlement, actor):
         if not access.can_manage_settlements():
             raise PermissionDenied("You cannot manage settlements for this club.")
         if locked_settlement.status == Settlement.Status.SETTLED:
-            raise serializers.ValidationError({"status": ALREADY_SETTLED_MESSAGE})
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="SETTLEMENT_ALREADY_SETTLED",
+                message=ALREADY_SETTLED_MESSAGE,
+            )
         if locked_settlement.status != Settlement.Status.PENDING:
-            raise serializers.ValidationError(
-                {"status": "Only pending settlements can be marked as settled."}
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="SETTLEMENT_INVALID_STATUS",
+                message=INVALID_SETTLEMENT_STATUS_MESSAGE,
             )
 
         locked_settlement.status = Settlement.Status.SETTLED

@@ -197,7 +197,16 @@ class UserCreateSerializer(serializers.ModelSerializer):
                 }
             )
         if not attrs.get("is_platform_admin"):
-            raise serializers.ValidationError({"detail": self.non_platform_user_error})
+            raise serializers.ValidationError(
+                {
+                    "non_field_errors": [
+                        serializers.ErrorDetail(
+                            self.non_platform_user_error,
+                            code="invalid",
+                        )
+                    ]
+                }
+            )
         return attrs
 
     def create(self, validated_data):

@@ -3,7 +3,13 @@ from rest_framework import serializers
 from apps.audit.models import AuditLog
 
 
-class AuditLogListSerializer(serializers.ModelSerializer):
+class AuditLogActionLabelMixin:
+    def get_action_label(self, obj):
+        return str(obj.get_action_display())
+
+
+class AuditLogListSerializer(AuditLogActionLabelMixin, serializers.ModelSerializer):
+    action_label = serializers.SerializerMethodField()
     actor = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
@@ -11,6 +17,7 @@ class AuditLogListSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "action",
+            "action_label",
             "entity_type",
             "entity_id",
             "actor",
@@ -20,7 +27,8 @@ class AuditLogListSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class AuditLogDetailSerializer(serializers.ModelSerializer):
+class AuditLogDetailSerializer(AuditLogActionLabelMixin, serializers.ModelSerializer):
+    action_label = serializers.SerializerMethodField()
     actor = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
@@ -31,6 +39,7 @@ class AuditLogDetailSerializer(serializers.ModelSerializer):
             "court",
             "actor",
             "action",
+            "action_label",
             "entity_type",
             "entity_id",
             "before_data",

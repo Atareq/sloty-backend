@@ -174,8 +174,8 @@ class TransactionCancelAPITests(TransactionAPITestCase):
 
         self.assertEqual(missing_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(blank_response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("reason", missing_response.data)
-        self.assertIn("reason", blank_response.data)
+        self.assert_field_error(missing_response, "reason")
+        self.assert_field_error(blank_response, "reason")
 
     def test_already_cancelled_transaction_cannot_be_cancelled_again(self):
         transaction_obj = self.create_transaction(
@@ -189,8 +189,9 @@ class TransactionCancelAPITests(TransactionAPITestCase):
 
         response = self.post_cancel(self.club, transaction_obj, self.owner)
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("is_cancelled", response.data)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "PAYMENT_ALREADY_CANCELLED")
+        self.assertNotIn("transaction", response.data)
 
     def test_settled_transaction_cannot_be_cancelled(self):
         transaction_obj = self.create_transaction(
@@ -213,7 +214,9 @@ class TransactionCancelAPITests(TransactionAPITestCase):
 
         response = self.post_cancel(self.club, transaction_obj, self.owner)
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "PAYMENT_SETTLED_CANNOT_BE_CANCELLED")
+        self.assertNotIn("transaction", response.data)
         transaction_obj.refresh_from_db()
         self.assertFalse(transaction_obj.is_cancelled)
 
@@ -234,7 +237,9 @@ class TransactionCancelAPITests(TransactionAPITestCase):
 
                 response = self.post_cancel(self.club, transaction_obj, self.owner)
 
-                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+                self.assert_api_error(response, "PAYMENT_BOOKING_LOCKED")
+                self.assertNotIn("booking", response.data)
                 transaction_obj.refresh_from_db()
                 self.assertFalse(transaction_obj.is_cancelled)
 

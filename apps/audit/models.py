@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.utils.translation import gettext_lazy as _
 
 from apps.clubs.models import Club
 from apps.courts.models import Court
@@ -7,19 +8,19 @@ from apps.courts.models import Court
 
 class AuditLog(models.Model):
     class Action(models.TextChoices):
-        BOOKING_CREATED = "BOOKING_CREATED", "Booking created"
-        BOOKING_UPDATED = "BOOKING_UPDATED", "Booking updated"
-        BOOKING_CANCELLED = "BOOKING_CANCELLED", "Booking cancelled"
-        BOOKING_COMPLETED = "BOOKING_COMPLETED", "Booking completed"
-        BOOKING_NO_SHOW = "BOOKING_NO_SHOW", "Booking no-show"
-        BOOKING_EXPIRED = "BOOKING_EXPIRED", "Booking expired"
-        BOOKING_RESCHEDULED = "BOOKING_RESCHEDULED", "Booking rescheduled"
-        TRANSACTION_CREATED = "TRANSACTION_CREATED", "Transaction created"
-        TRANSACTION_CANCELLED = "TRANSACTION_CANCELLED", "Transaction cancelled"
-        SETTLEMENT_CREATED = "SETTLEMENT_CREATED", "Settlement created"
+        BOOKING_CREATED = "BOOKING_CREATED", _("Booking created")
+        BOOKING_UPDATED = "BOOKING_UPDATED", _("Booking updated")
+        BOOKING_CANCELLED = "BOOKING_CANCELLED", _("Booking cancelled")
+        BOOKING_COMPLETED = "BOOKING_COMPLETED", _("Booking completed")
+        BOOKING_NO_SHOW = "BOOKING_NO_SHOW", _("Booking no-show")
+        BOOKING_EXPIRED = "BOOKING_EXPIRED", _("Booking expired")
+        BOOKING_RESCHEDULED = "BOOKING_RESCHEDULED", _("Booking rescheduled")
+        TRANSACTION_CREATED = "TRANSACTION_CREATED", _("Transaction created")
+        TRANSACTION_CANCELLED = "TRANSACTION_CANCELLED", _("Transaction cancelled")
+        SETTLEMENT_CREATED = "SETTLEMENT_CREATED", _("Settlement created")
         SETTLEMENT_MARKED_SETTLED = (
             "SETTLEMENT_MARKED_SETTLED",
-            "Settlement marked settled",
+            _("Settlement marked settled"),
         )
 
     club = models.ForeignKey(

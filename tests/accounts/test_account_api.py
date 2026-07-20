@@ -253,7 +253,9 @@ class JWTAPITests(AccountAPITestCase):
         response = self.obtain_token(user.username, club_slug="missing-club")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("club_slug", response.data)
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
+        self.assertIn("club_slug", response.data["field_errors"])
 
     def test_club_slug_without_membership_is_rejected_for_non_platform_user(self):
         user = self.create_user(username="unauthorized-club-token-user")
@@ -262,7 +264,9 @@ class JWTAPITests(AccountAPITestCase):
         response = self.obtain_token(user.username, club_slug=club.slug)
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("club_slug", response.data)
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
+        self.assertIn("club_slug", response.data["field_errors"])
 
     def test_refresh_preserves_custom_claims(self):
         staff = self.create_user(username="refresh-claims-staff")
@@ -367,9 +371,11 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(
-            response.data["detail"][0],
+            response.data["field_errors"]["non_field_errors"][0]["message"],
             "Club users must be created through a club-scoped membership endpoint.",
         )
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
         self.assertFalse(User.objects.filter(username="created-user").exists())
 
     def test_platform_admin_can_create_platform_admin_user(self):
@@ -411,9 +417,11 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("role", response.data)
-        self.assertIn("club", response.data)
-        self.assertIn("court", response.data)
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
+        self.assertIn("role", response.data["field_errors"])
+        self.assertIn("club", response.data["field_errors"])
+        self.assertIn("court", response.data["field_errors"])
         self.assertFalse(User.objects.filter(username="bad-scope-user").exists())
 
     def test_create_payload_cannot_set_staff_or_superuser_flags(self):

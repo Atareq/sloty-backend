@@ -139,6 +139,16 @@ class BookingAPITestCase(APITestCase):
     def list_ids(self, response):
         return {item["id"] for item in response.data["results"]}
 
+    def assert_field_error(self, response, field):
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
+        self.assertIn(field, response.data["field_errors"])
+
+    def assert_api_error(self, response, code):
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], code)
+        self.assertIn("message", response.data)
+
 
 class BookingCreationTests(BookingAPITestCase):
     def setUp(self):
@@ -207,6 +217,7 @@ class BookingCreationTests(BookingAPITestCase):
         response = self.post_booking(self.club, self.other_court)
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "court")
 
     def test_start_time_must_be_before_end_time(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -219,6 +230,7 @@ class BookingCreationTests(BookingAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "end_time")
 
     def test_duration_must_match_slot_duration_multiple(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -231,6 +243,7 @@ class BookingCreationTests(BookingAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "end_time")
 
     def test_booking_outside_working_hours_is_allowed(self):
         CourtWorkingHour.objects.create(
@@ -463,6 +476,7 @@ class BookingSourceAndActiveTests(BookingAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "source")
 
     def test_platform_admin_can_create_admin_correction_booking(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -492,6 +506,7 @@ class BookingSourceAndActiveTests(BookingAPITestCase):
         response = self.post_booking(self.club, self.court)
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "court")
 
     def test_cannot_create_booking_when_club_is_inactive(self):
         self.club.is_active = False
@@ -529,7 +544,9 @@ class BookingOverlapTests(BookingAPITestCase):
             end_time=self.time_at(21, 30).isoformat(),
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_SLOT_UNAVAILABLE")
+        self.assertNotIn("booking", response.data)
 
     def assert_overlap_is_allowed_for_status(self, status_value):
         self.create_existing_booking(status_value)
@@ -901,10 +918,14 @@ class BookingLifecycleActionTests(BookingAPITestCase):
                     self.platform_admin,
                 )
 
-                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+                self.assert_api_error(
+                    response,
+                    "INVALID_BOOKING_STATUS_TRANSITION",
+                )
                 booking.refresh_from_db()
                 self.assertEqual(booking.status, Booking.Status.HOLD)
-                self.assertIn("status", response.data)
+                self.assertNotIn("booking", response.data)
                 self.assertNotEqual(booking.status, target_status)
 
     def test_terminal_statuses_cannot_transition(self):
@@ -931,7 +952,14 @@ class BookingLifecycleActionTests(BookingAPITestCase):
                     self.platform_admin,
                 )
 
-                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+                expected_code = (
+                    "BOOKING_ALREADY_CANCELLED"
+                    if terminal_status == Booking.Status.CANCELLED
+                    else "INVALID_BOOKING_STATUS_TRANSITION"
+                )
+                self.assert_api_error(response, expected_code)
+                self.assertNotIn("booking", response.data)
                 booking.refresh_from_db()
                 self.assertEqual(booking.status, terminal_status)
 
@@ -955,7 +983,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         response = self.post_lifecycle(self.club, booking, "cancel", self.staff)
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("reason", response.data)
+        self.assert_field_error(response, "reason")
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.HOLD)
 
@@ -969,7 +997,8 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             self.platform_admin,
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "INVALID_BOOKING_STATUS_TRANSITION")
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.HOLD)
 
@@ -983,7 +1012,8 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             self.platform_admin,
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "INVALID_BOOKING_STATUS_TRANSITION")
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CONFIRMED)
 
@@ -1015,7 +1045,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("confirm_collect_remaining_cash", response.data)
+        self.assert_field_error(response, "confirm_collect_remaining_cash")
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CONFIRMED)
         self.assertEqual(booking.transactions.count(), 1)
@@ -1040,7 +1070,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("confirm_collect_remaining_cash", response.data)
+        self.assert_field_error(response, "confirm_collect_remaining_cash")
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CONFIRMED)
 
@@ -1152,8 +1182,9 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             },
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("start_time", response.data)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_SLOT_UNAVAILABLE")
+        self.assertNotIn("booking", response.data)
 
     def test_reschedule_excludes_current_booking_from_overlap_check(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
@@ -1268,7 +1299,11 @@ class BookingLifecycleActionTests(BookingAPITestCase):
                     },
                 )
 
-                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+                self.assert_api_error(
+                    response,
+                    "INVALID_BOOKING_STATUS_TRANSITION",
+                )
 
     def test_expire_sets_timestamp_and_audit_log(self):
         booking = self.create_booking(self.court, status=Booking.Status.HOLD)

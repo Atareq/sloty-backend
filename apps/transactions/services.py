@@ -3,16 +3,27 @@ from decimal import Decimal
 from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.utils import timezone
-from rest_framework import serializers
+from django.utils.translation import gettext_lazy as _
+from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
 from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log
 from apps.bookings.models import Booking
+from apps.common.exceptions import SlotyAPIException
 from apps.transactions.models import Transaction
 
 DUPLICATE_PAYMENT_REFERENCE_MESSAGE = (
     "This payment reference already exists for this club."
+)
+PAYMENT_ALREADY_CANCELLED_MESSAGE = _("This payment is already cancelled.")
+PAYMENT_SETTLED_CANNOT_BE_CANCELLED_MESSAGE = _("Settled payments cannot be cancelled.")
+PAYMENT_TERMINAL_BOOKING_CANNOT_BE_CANCELLED_MESSAGE = _(
+    "Payments on terminal bookings cannot be cancelled."
+)
+TRANSACTION_BOOKING_NOT_IN_CLUB_MESSAGE = _("Booking must belong to the selected club.")
+TRANSACTION_BOOKING_LOCKED_MESSAGE = _(
+    "Transactions can only be added to HOLD or CONFIRMED bookings."
 )
 
 
@@ -60,14 +71,18 @@ def validate_booking_transaction_data(
     payment_reference,
 ):
     if booking.club_id != access.club.id:
-        raise serializers.ValidationError(
-            {"booking": "Booking must belong to the selected club."}
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="TRANSACTION_BOOKING_NOT_IN_CLUB",
+            message=TRANSACTION_BOOKING_NOT_IN_CLUB_MESSAGE,
         )
     if not access.can_create_transaction_for_booking(booking):
         raise PermissionDenied("You cannot create transactions for this booking.")
     if booking.status not in {Booking.Status.HOLD, Booking.Status.CONFIRMED}:
-        raise serializers.ValidationError(
-            {"booking": "Transactions can only be added to HOLD or CONFIRMED bookings."}
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="TRANSACTION_BOOKING_LOCKED",
+            message=TRANSACTION_BOOKING_LOCKED_MESSAGE,
         )
     if amount <= 0:
         raise serializers.ValidationError({"amount": "Amount must be greater than 0."})
@@ -195,19 +210,25 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
         if not access.can_cancel_transaction(locked_transaction):
             raise PermissionDenied("You cannot cancel this transaction.")
         if locked_transaction.is_cancelled:
-            raise serializers.ValidationError(
-                {"is_cancelled": "This transaction is already cancelled."}
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="PAYMENT_ALREADY_CANCELLED",
+                message=PAYMENT_ALREADY_CANCELLED_MESSAGE,
             )
         if Transaction.objects.filter(
             pk=locked_transaction.pk,
             settlement_line__isnull=False,
         ).exists():
-            raise serializers.ValidationError(
-                {"transaction": "Settled transactions cannot be cancelled."}
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="PAYMENT_SETTLED_CANNOT_BE_CANCELLED",
+                message=PAYMENT_SETTLED_CANNOT_BE_CANCELLED_MESSAGE,
             )
         if locked_booking.status in Booking.LOCKED_STATUSES:
-            raise serializers.ValidationError(
-                {"booking": "Transactions on terminal bookings cannot be cancelled."}
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="PAYMENT_BOOKING_LOCKED",
+                message=PAYMENT_TERMINAL_BOOKING_CANNOT_BE_CANCELLED_MESSAGE,
             )
 
         old_booking_status = locked_booking.status

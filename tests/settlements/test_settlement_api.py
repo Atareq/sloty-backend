@@ -158,6 +158,16 @@ class SettlementAPITestCase(APITestCase):
     def list_ids(self, response):
         return {item["id"] for item in response.data["results"]}
 
+    def assert_field_error(self, response, field):
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
+        self.assertIn(field, response.data["field_errors"])
+
+    def assert_api_error(self, response, code):
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], code)
+        self.assertIn("message", response.data)
+
 
 class SettlementModelTests(SettlementAPITestCase):
     def setUp(self):
@@ -709,7 +719,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("collected_by", response.data)
+        self.assert_field_error(response, "collected_by")
 
     def test_preview_rejects_inactive_membership_user(self):
         response = self.client.get(
@@ -718,7 +728,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("collected_by", response.data)
+        self.assert_field_error(response, "collected_by")
 
     def test_staff_can_preview_himself_without_collected_by(self):
         before_settlements = Settlement.objects.count()
@@ -835,7 +845,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("collected_by", response.data)
+        self.assert_field_error(response, "collected_by")
 
     def test_create_does_not_require_period_start_or_period_end(self):
         response = self.client.post(
@@ -870,8 +880,9 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("transactions", response.data)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "NO_UNSETTLED_TRANSACTIONS")
+        self.assertNotIn("transactions", response.data)
 
     def test_owner_can_settle_another_user(self):
         self.client.force_authenticate(user=self.owner)
@@ -1060,11 +1071,13 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assert_api_error(response, "SELF_SETTLEMENT_APPROVAL_FORBIDDEN")
         self.assertEqual(
-            response.data["detail"],
+            response.data["message"],
             "You cannot approve your own settlement.",
         )
+        self.assertNotIn("settlement", response.data)
 
     def test_manager_self_create_error_supports_arabic(self):
         self.client.force_authenticate(user=self.manager)
@@ -1076,9 +1089,10 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             HTTP_ACCEPT_LANGUAGE="ar",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assert_api_error(response, "SELF_SETTLEMENT_APPROVAL_FORBIDDEN")
         self.assertEqual(
-            response.data["detail"],
+            response.data["message"],
             "لا يمكنك اعتماد التسوية الخاصة بك.",
         )
 
@@ -1166,7 +1180,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("collected_by", response.data)
+        self.assert_field_error(response, "collected_by")
 
     def test_manager_cannot_settle_user_from_another_club(self):
         self.client.force_authenticate(user=self.manager)
@@ -1178,7 +1192,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("collected_by", response.data)
+        self.assert_field_error(response, "collected_by")
 
     def test_staff_cannot_settle(self):
         self.client.force_authenticate(user=self.staff)
@@ -1219,8 +1233,9 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         )
 
         self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(second_response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("transactions", second_response.data)
+        self.assertEqual(second_response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(second_response, "NO_UNSETTLED_TRANSACTIONS")
+        self.assertNotIn("transactions", second_response.data)
 
 
 class SettlementMarkSettledTests(SettlementAPITestCase):
@@ -1266,12 +1281,13 @@ class SettlementMarkSettledTests(SettlementAPITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("status", response.data)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "SETTLEMENT_ALREADY_SETTLED")
         self.assertEqual(
-            response.data["status"],
+            response.data["message"],
             "This settlement is already settled.",
         )
+        self.assertNotIn("settlement", response.data)
 
     def test_inaccessible_settlement_cannot_be_marked_settled(self):
         response = self.client.post(

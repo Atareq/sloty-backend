@@ -135,7 +135,14 @@ class SettlementCreateSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if attrs.get("dry_run") is False and attrs.get("collected_by") is None:
             raise serializers.ValidationError(
-                {"collected_by": [_("This field is required when dry_run is false.")]}
+                {
+                    "collected_by": [
+                        serializers.ErrorDetail(
+                            _("This field is required when creating a settlement."),
+                            code="required",
+                        )
+                    ]
+                }
             )
         return attrs
 

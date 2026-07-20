@@ -137,6 +137,16 @@ class TransactionAPITestCase(APITestCase):
     def list_ids(self, response):
         return {item["id"] for item in response.data["results"]}
 
+    def assert_field_error(self, response, field):
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
+        self.assertIn(field, response.data["field_errors"])
+
+    def assert_api_error(self, response, code):
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], code)
+        self.assertIn("message", response.data)
+
     def make_access(self, user, club):
         request = type("Request", (), {"user": user})()
         return ClubAccessContext(request=request, club=club)
@@ -386,8 +396,9 @@ class TransactionCreateTests(TransactionAPITestCase):
 
         response = self.post_transaction(self.club, self.other_booking)
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("booking", response.data)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "TRANSACTION_BOOKING_NOT_IN_CLUB")
+        self.assertNotIn("booking", response.data)
 
     def test_cannot_create_transaction_for_inaccessible_booking(self):
         self.client.force_authenticate(user=self.staff)
@@ -416,7 +427,7 @@ class TransactionCreateTests(TransactionAPITestCase):
         response = self.post_transaction(self.club, self.booking, amount="50.00")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("amount", response.data)
+        self.assert_field_error(response, "amount")
 
     def test_can_create_partial_payment(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -447,8 +458,9 @@ class TransactionBookingConfirmationTests(TransactionAPITestCase):
 
         response = self.post_transaction(self.club, booking)
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("booking", response.data)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "TRANSACTION_BOOKING_LOCKED")
+        self.assertNotIn("booking", response.data)
 
     def test_first_valid_transaction_for_hold_booking_confirms_booking(self):
         booking = self.create_booking(self.court, status=Booking.Status.HOLD)
@@ -509,7 +521,7 @@ class TransactionPaymentReferenceTests(TransactionAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("payment_reference", response.data)
+        self.assert_field_error(response, "payment_reference")
 
     def test_bank_transfer_requires_payment_reference_when_court_requires_it(self):
         response = self.post_transaction(
@@ -520,7 +532,7 @@ class TransactionPaymentReferenceTests(TransactionAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("payment_reference", response.data)
+        self.assert_field_error(response, "payment_reference")
 
     def test_cash_does_not_require_payment_reference(self):
         response = self.post_transaction(
@@ -543,7 +555,7 @@ class TransactionPaymentReferenceTests(TransactionAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(
-            response.data["payment_reference"][0],
+            response.data["field_errors"]["payment_reference"][0]["message"],
             DUPLICATE_PAYMENT_REFERENCE_MESSAGE,
         )
 

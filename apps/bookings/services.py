@@ -3,12 +3,14 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.utils import timezone
-from rest_framework import serializers
+from django.utils.translation import gettext_lazy as _
+from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
 from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log
 from apps.bookings.models import Booking
+from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
 from apps.transactions.models import Transaction
 from apps.transactions.services import get_booking_remaining_amount
@@ -32,6 +34,14 @@ BOOKING_AUDIT_ACTIONS = {
 }
 AUTO_COMPLETION_TRANSACTION_NOTE = (
     "Auto cash transaction created on booking completion."
+)
+BOOKING_SLOT_UNAVAILABLE_MESSAGE = _(
+    "The selected booking slot is no longer available."
+)
+BOOKING_NOT_IN_CLUB_MESSAGE = _("Booking must belong to the selected club.")
+BOOKING_ALREADY_CANCELLED_MESSAGE = _("This booking is already cancelled.")
+INVALID_BOOKING_STATUS_TRANSITION_MESSAGE = _(
+    "This booking status transition is not allowed."
 )
 
 
@@ -94,8 +104,10 @@ def validate_no_booking_overlap(court, start_time, end_time, *, exclude_booking=
         end_time,
         exclude_booking=exclude_booking,
     ).exists():
-        raise serializers.ValidationError(
-            {"start_time": "This booking overlaps an active booking on this court."}
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="BOOKING_SLOT_UNAVAILABLE",
+            message=BOOKING_SLOT_UNAVAILABLE_MESSAGE,
         )
 
 
@@ -134,8 +146,10 @@ def create_booking(*, created_by, court, start_time, end_time, **booking_data):
 
 def validate_booking_for_lifecycle_action(*, access, booking):
     if booking.club_id != access.club.id:
-        raise serializers.ValidationError(
-            {"booking": "Booking must belong to the selected club."}
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="BOOKING_NOT_IN_CLUB",
+            message=BOOKING_NOT_IN_CLUB_MESSAGE,
         )
     if not access.can_change_booking_status(booking):
         raise PermissionDenied("You cannot change this booking status.")
@@ -143,8 +157,15 @@ def validate_booking_for_lifecycle_action(*, access, booking):
 
 def validate_allowed_status(*, booking, allowed_statuses, action_label):
     if booking.status not in allowed_statuses:
-        raise serializers.ValidationError(
-            {"status": f"Cannot {action_label} booking from {booking.status}."}
+        code = "INVALID_BOOKING_STATUS_TRANSITION"
+        message = INVALID_BOOKING_STATUS_TRANSITION_MESSAGE
+        if action_label == "cancel" and booking.status == Booking.Status.CANCELLED:
+            code = "BOOKING_ALREADY_CANCELLED"
+            message = BOOKING_ALREADY_CANCELLED_MESSAGE
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code=code,
+            message=message,
         )
 
 

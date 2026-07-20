@@ -501,6 +501,11 @@ Rules for the flow:
   create, update, or delete actions for audit logs.
 - Audit logs must be created explicitly from service-layer business actions,
   not Django signals.
+- Audit action machine values such as `BOOKING_CREATED` and
+  `TRANSACTION_CANCELLED` are stable database/API values and must not be
+  translated or renamed. API serializers expose localized `action_label` from
+  `get_action_display()` for UI display while keeping `action` for filtering
+  and frontend logic.
 - Audited Sprint 7 actions are booking create/update/lifecycle transitions,
   transaction creation, settlement creation, and mark-settled.
 - Sprint 9 adds `BOOKING_RESCHEDULED` and requires audit logs for cancellation,
@@ -603,6 +608,13 @@ Rules for the flow:
   response shapes differ.
 - Keep response shapes stable once exposed.
 - Return DRF `ValidationError` with clear field-keyed messages.
+- Do not use arbitrary resource names as `ValidationError` keys just to carry
+  a message. Field-level `ValidationError` keys must be real request field
+  names. Business-state failures must raise `SlotyAPIException` or a
+  domain-specific subclass and return a top-level localized `message` with a
+  stable `code`; never return handled error shapes like
+  `{"transactions": "..."}`, `{"transaction": "..."}`, or
+  `{"booking": "..."}`.
 - Use `drf-spectacular` `extend_schema` annotations when automatic schema output
   is weak or ambiguous.
 - Do not expose internal-only fields.

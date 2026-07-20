@@ -65,6 +65,18 @@ class ClubAPITestCase(APITestCase):
     def list_ids(self, response):
         return {item["id"] for item in response.data["results"]}
 
+    def assert_field_error(self, response, field):
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
+        self.assertIn(field, response.data["field_errors"])
+
+    def assert_field_error_message(self, response, field, message):
+        self.assert_field_error(response, field)
+        self.assertEqual(
+            response.data["field_errors"][field][0]["message"],
+            message,
+        )
+
     def membership_list_url(self, club):
         return reverse("club-membership-list", kwargs={"club_slug": club.slug})
 
@@ -127,7 +139,7 @@ class ClubAPITests(ClubAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("governorate", response.data)
+        self.assert_field_error(response, "governorate")
 
     def test_create_club_with_invalid_city_fails(self):
         self.authenticate_platform_admin()
@@ -143,7 +155,7 @@ class ClubAPITests(ClubAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("city", response.data)
+        self.assert_field_error(response, "city")
 
     def test_create_club_with_city_from_another_governorate_fails(self):
         self.authenticate_platform_admin()
@@ -159,8 +171,9 @@ class ClubAPITests(ClubAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(
-            response.data["city"][0],
+        self.assert_field_error_message(
+            response,
+            "city",
             "City must belong to the selected governorate.",
         )
 
@@ -242,8 +255,9 @@ class ClubAPITests(ClubAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(
-            response.data["city"][0],
+        self.assert_field_error_message(
+            response,
+            "city",
             "City must belong to the selected governorate.",
         )
 
@@ -258,8 +272,9 @@ class ClubAPITests(ClubAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(
-            response.data["city"][0],
+        self.assert_field_error_message(
+            response,
+            "city",
             "City must belong to the selected governorate.",
         )
 
@@ -274,8 +289,9 @@ class ClubAPITests(ClubAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(
-            response.data["city"][0],
+        self.assert_field_error_message(
+            response,
+            "city",
             "City must belong to the selected governorate.",
         )
 
@@ -637,7 +653,7 @@ class ClubMembershipAPITests(ClubAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("court", response.data)
+        self.assert_field_error(response, "court")
         self.assertFalse(User.objects.filter(username="staff-without-court").exists())
 
     def test_staff_court_must_belong_to_url_club(self):
@@ -690,7 +706,7 @@ class ClubMembershipAPITests(ClubAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("user", response.data)
+        self.assert_field_error(response, "user")
 
     def test_existing_user_can_be_attached_with_user_id(self):
         self.authenticate_platform_admin()
@@ -721,7 +737,7 @@ class ClubMembershipAPITests(ClubAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("user_id", response.data)
+        self.assert_field_error(response, "user_id")
 
     def test_membership_creation_requires_exactly_one_user_source(self):
         self.authenticate_platform_admin()

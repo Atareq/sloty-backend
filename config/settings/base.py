@@ -75,6 +75,7 @@ REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_PAGINATION_CLASS": ("rest_framework.pagination.PageNumberPagination"),
+    "EXCEPTION_HANDLER": "apps.common.exceptions.sloty_exception_handler",
     "PAGE_SIZE": 20,
 }
 

@@ -28,6 +28,11 @@ from apps.transactions.models import Transaction
 class DashboardAPITestCase(APITestCase):
     password = "test-pass-123"
 
+    def assert_field_error(self, response, field):
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
+        self.assertIn(field, response.data["field_errors"])
+
     def create_user(self, username: str, **extra_fields) -> User:
         return User.objects.create_user(
             username=username,
@@ -365,7 +370,7 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("court", response.data)
+        self.assert_field_error(response, "court")
 
     def test_date_required(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -373,7 +378,7 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
         response = self.client.get(self.availability_url(self.club, self.court))
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("date", response.data)
+        self.assert_field_error(response, "date")
 
     def test_working_hours_generate_slots_and_block_only_active_bookings(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -641,7 +646,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         )
 
         self.assertEqual(reversed_response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("date_to", reversed_response.data)
+        self.assert_field_error(reversed_response, "date_to")
         self.assertEqual(mixed_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(partial_response.status_code, status.HTTP_400_BAD_REQUEST)
 

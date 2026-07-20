@@ -296,6 +296,51 @@ class AuditAccessAPITests(AuditAPITestCase):
         self.assertIn(self.audit_log.id, self.list_ids(response))
         self.assertNotIn(self.other_log.id, self.list_ids(response))
 
+    def test_audit_responses_include_localized_action_label(self):
+        transaction_log = self.create_audit_log(
+            self.club,
+            court=self.court,
+            actor=self.owner,
+            action=AuditLog.Action.TRANSACTION_CANCELLED,
+            entity_type="Transaction",
+            entity_id=101,
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+        list_response = self.client.get(
+            self.audit_list_url(self.club),
+            HTTP_ACCEPT_LANGUAGE="en",
+        )
+        detail_en_response = self.client.get(
+            self.audit_detail_url(self.club, transaction_log),
+            HTTP_ACCEPT_LANGUAGE="en",
+        )
+        detail_ar_response = self.client.get(
+            self.audit_detail_url(self.club, transaction_log),
+            HTTP_ACCEPT_LANGUAGE="ar",
+        )
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertIn("action_label", list_response.data["results"][0])
+        self.assertEqual(detail_en_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_ar_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            detail_en_response.data["action"],
+            AuditLog.Action.TRANSACTION_CANCELLED,
+        )
+        self.assertEqual(
+            detail_ar_response.data["action"],
+            AuditLog.Action.TRANSACTION_CANCELLED,
+        )
+        self.assertEqual(
+            detail_en_response.data["action_label"],
+            "Transaction cancelled",
+        )
+        self.assertEqual(
+            detail_ar_response.data["action_label"],
+            "تم إلغاء عملية الدفع",
+        )
+
     def test_read_only_methods(self):
         self.client.force_authenticate(user=self.platform_admin)
         list_url = self.audit_list_url(self.club)
@@ -708,7 +753,7 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
 
         create_response = self.client.post(
             self.settlement_list_url(self.club),
-            {"collected_by": self.staff.id},
+            {"collected_by": self.staff.id, "dry_run": False},
             format="json",
         )
 
@@ -722,8 +767,19 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
         self.assertEqual(create_log.after_data["collected_by_id"], self.staff.id)
         self.assertEqual(create_log.after_data["transaction_ids"], [transaction_obj.id])
 
+        pending_settlement = Settlement.objects.create(
+            club=self.club,
+            court=self.court,
+            collected_by=self.staff,
+            period_start=self.time_at(22),
+            period_end=self.time_at(23),
+            status=Settlement.Status.PENDING,
+            total_amount=Decimal("80.00"),
+            transaction_count=1,
+            created_by=self.platform_admin,
+        )
         settle_response = self.client.post(
-            self.settlement_mark_settled_url(self.club, settlement),
+            self.settlement_mark_settled_url(self.club, pending_settlement),
             {},
             format="json",
         )
@@ -732,7 +788,7 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
         settle_log = AuditLog.objects.get(
             action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
             entity_type="Settlement",
-            entity_id=settlement.id,
+            entity_id=pending_settlement.id,
         )
         self.assertEqual(settle_log.after_data["collected_by_id"], self.staff.id)
 
