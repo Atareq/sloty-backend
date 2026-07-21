@@ -166,6 +166,14 @@ Current implemented app:
   `source`, `date`, `date_from`, and `date_to`.
 - Booking outside working hours is allowed in Sprint 3, and no
   `outside_working_hours` flag is stored.
+- `GET /api/v1/clubs/{club_slug}/bookings/slots/` returns generated schedule
+  slots for a selected court and date/date range. `FREE` is a response-level
+  availability state only; do not add it to `Booking.Status`.
+- Slot availability and overlap checks treat `HOLD`, `CONFIRMED`, `COMPLETED`,
+  and `NO_SHOW` bookings as blocking. `CANCELLED` and `EXPIRED` bookings release
+  their slots.
+- The standard unavailable-slot business error code is
+  `BOOKING_SLOT_UNAVAILABLE`.
 - Sprint 9 booking lifecycle actions are manual endpoints on the existing
   `BookingViewSet`: cancel, complete, no-show, reschedule, and expire.
   Automatic hold expiry is exposed through the `expire_hold_bookings`
@@ -371,9 +379,9 @@ Rules for the flow:
   recalculated price is higher, update `total_price`; if it is lower or equal,
   keep the existing `total_price`.
 - `complete` is allowed only from `CONFIRMED`. If a dynamic remaining amount
-  exists, the request must set `confirm_collect_remaining_cash=true`; the
-  service then creates a CASH transaction for the remaining amount before
-  marking the booking `COMPLETED`.
+  exists, completion is rejected with
+  `BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT` and 409 Conflict. The backend must
+  not auto-create a remaining CASH transaction during completion.
 - Manual `expire` is allowed only from `HOLD`. Automatic due-hold expiry uses
   `python manage.py expire_hold_bookings`, sets `EXPIRED`, records
   `expired_at`, and audits with actor `None`.
@@ -383,8 +391,68 @@ Rules for the flow:
   amount fields.
 - Do not place transaction creation logic, settlement, rescheduling,
   dashboard, marketplace, or notification behavior in `bookings`, except the
-  Sprint 9 remaining-cash completion transaction and hold-expiry command
-  explicitly owned by booking lifecycle services.
+  hold-expiry command explicitly owned by booking lifecycle services.
+
+## Booking Slot Availability and Completion Rules
+
+### Slot availability response
+
+Slot availability endpoints may return `FREE` as a response-level availability
+state.
+
+`FREE` must not be added to `Booking.Status`.
+
+A generated slot is `FREE` when no blocking booking overlaps it.
+
+Blocking booking statuses include:
+
+```text
+HOLD
+CONFIRMED
+COMPLETED
+NO_SHOW
+```
+
+Non-blocking statuses include:
+
+```text
+CANCELLED
+EXPIRED
+```
+
+Completed bookings must continue to block their slots.
+
+### No double booking
+
+The backend must prevent creating or rescheduling a booking into a slot that
+overlaps a blocking booking.
+
+Do not rely only on the frontend to disable occupied slots.
+
+The standard error code for occupied/unavailable slots is:
+
+```text
+BOOKING_SLOT_UNAVAILABLE
+```
+
+### Completion requires full payment
+
+A booking cannot be marked as `COMPLETED` until its remaining amount is fully
+paid.
+
+If `remaining_amount > 0`, raise:
+
+```text
+BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT
+```
+
+This is a business-state conflict and should return 409 Conflict.
+
+### FREE is display state only
+
+`FREE` is used to help the frontend render the schedule clearly.
+
+It is not a persisted booking status and must not be stored in the database.
 
 `apps/transactions/`
 

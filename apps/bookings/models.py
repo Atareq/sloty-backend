@@ -4,6 +4,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models
+from django.utils.translation import gettext_lazy as _
 from phonenumber_field.modelfields import PhoneNumberField
 
 from apps.clubs.models import Club
@@ -12,16 +13,16 @@ from apps.courts.models import Court
 
 class Booking(models.Model):
     class Status(models.TextChoices):
-        HOLD = "HOLD", "Hold"
-        CONFIRMED = "CONFIRMED", "Confirmed"
-        COMPLETED = "COMPLETED", "Completed"
-        CANCELLED = "CANCELLED", "Cancelled"
-        NO_SHOW = "NO_SHOW", "No-show"
-        EXPIRED = "EXPIRED", "Expired"
+        HOLD = "HOLD", _("Hold")
+        CONFIRMED = "CONFIRMED", _("Confirmed")
+        COMPLETED = "COMPLETED", _("Completed")
+        CANCELLED = "CANCELLED", _("Cancelled")
+        NO_SHOW = "NO_SHOW", _("No-show")
+        EXPIRED = "EXPIRED", _("Expired")
 
     class Source(models.TextChoices):
-        MANUAL = "MANUAL", "Manual"
-        ADMIN_CORRECTION = "ADMIN_CORRECTION", "Admin correction"
+        MANUAL = "MANUAL", _("Manual")
+        ADMIN_CORRECTION = "ADMIN_CORRECTION", _("Admin correction")
 
     BLOCKING_STATUSES = (
         Status.HOLD,

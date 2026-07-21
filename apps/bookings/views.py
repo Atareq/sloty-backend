@@ -26,12 +26,15 @@ from apps.bookings.serializers import (
     BookingListSerializer,
     BookingNoShowSerializer,
     BookingRescheduleSerializer,
+    BookingSlotQuerySerializer,
+    BookingSlotsResponseSerializer,
     BookingUpdateSerializer,
 )
 from apps.bookings.services import (
     cancel_booking,
     complete_booking,
     expire_booking,
+    generate_booking_slots,
     no_show_booking,
     reschedule_booking,
 )
@@ -96,6 +99,8 @@ class BookingViewSet(
             return BookingListSerializer
         if self.action == "create":
             return BookingCreateSerializer
+        if self.action == "slots":
+            return BookingSlotQuerySerializer
         if self.action in {"partial_update", "update"}:
             return BookingUpdateSerializer
         if self.action == "cancel":
@@ -131,6 +136,19 @@ class BookingViewSet(
     def get_lifecycle_context(self):
         access = self.get_access_context()
         return access, self.get_lifecycle_booking(access)
+
+    @extend_schema(
+        tags=["Bookings"],
+        parameters=[BookingSlotQuerySerializer],
+        responses=BookingSlotsResponseSerializer,
+    )
+    @action(detail=False, methods=["get"])
+    def slots(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=self.request.GET)
+        serializer.is_valid(raise_exception=True)
+        access = self.get_access_context()
+        data = generate_booking_slots(access=access, **serializer.validated_data)
+        return Response(data)
 
     @extend_schema(
         tags=["Bookings"],

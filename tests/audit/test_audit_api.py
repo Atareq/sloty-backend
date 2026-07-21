@@ -623,6 +623,8 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
                 end_time=self.time_at(15 + index),
                 status=initial_status,
             )
+            if action_name == "complete":
+                self.create_transaction(booking, amount=booking.total_price)
 
             response = self.client.post(
                 self.booking_action_url(self.club, booking, action_name),

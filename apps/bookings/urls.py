@@ -8,6 +8,7 @@ booking_list = BookingViewSet.as_view(
         "post": "create",
     }
 )
+booking_slots = BookingViewSet.as_view({"get": "slots"})
 booking_detail = BookingViewSet.as_view(
     {
         "get": "retrieve",
@@ -22,6 +23,11 @@ booking_expire = BookingViewSet.as_view({"post": "expire"})
 
 urlpatterns = [
     path("clubs/<slug:club_slug>/bookings/", booking_list, name="club-booking-list"),
+    path(
+        "clubs/<slug:club_slug>/bookings/slots/",
+        booking_slots,
+        name="club-booking-slots",
+    ),
     path(
         "clubs/<slug:club_slug>/bookings/<int:pk>/",
         booking_detail,

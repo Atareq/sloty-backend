@@ -1,13 +1,20 @@
 from decimal import Decimal
 
 from django.db import transaction
-from rest_framework import serializers
+from django.utils.translation import gettext_lazy as _
+from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
 from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log
 from apps.bookings.models import Booking
-from apps.bookings.services import create_booking, validate_booking_duration
+from apps.bookings.services import (
+    FREE_SLOT_STATUS,
+    MAX_SLOT_PERIOD_DAYS,
+    create_booking,
+    validate_booking_duration,
+)
+from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
 from apps.transactions.services import get_booking_paid_amount
 
@@ -203,6 +210,84 @@ class BookingCompleteSerializer(serializers.Serializer):
 
 class BookingExpireSerializer(serializers.Serializer):
     pass
+
+
+class BookingSlotQuerySerializer(serializers.Serializer):
+    court = serializers.PrimaryKeyRelatedField(queryset=Court.objects.all())
+    date = serializers.DateField(required=False)
+    date_from = serializers.DateField(required=False)
+    date_to = serializers.DateField(required=False)
+
+    def validate(self, attrs):
+        access = self.context["club_access"]
+        court = attrs["court"]
+        date = attrs.get("date")
+        date_from = attrs.get("date_from")
+        date_to = attrs.get("date_to")
+
+        if date is not None:
+            if date_from is not None or date_to is not None:
+                raise serializers.ValidationError(
+                    {"date": _("Use either date or date_from/date_to.")}
+                )
+            date_from = date
+            date_to = date
+            attrs.pop("date", None)
+        elif date_from is None or date_to is None:
+            raise serializers.ValidationError(
+                {"date": _("Provide date or both date_from and date_to.")}
+            )
+
+        if date_from > date_to:
+            raise serializers.ValidationError({"date_to": _("Invalid slot period.")})
+        if (date_to - date_from).days + 1 > MAX_SLOT_PERIOD_DAYS:
+            raise SlotyAPIException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="SLOT_PERIOD_TOO_LARGE",
+                message=_("The requested slot period is too large."),
+            )
+        if court.club_id != access.club.id:
+            raise serializers.ValidationError(
+                {"court": _("Court must belong to the selected club.")}
+            )
+        if not access.can_view_court_availability(court):
+            raise PermissionDenied("You cannot view availability for this court.")
+
+        attrs["date_from"] = date_from
+        attrs["date_to"] = date_to
+        return attrs
+
+
+class BookingSlotBookingSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    status = serializers.ChoiceField(choices=Booking.Status.choices)
+    status_label = serializers.CharField()
+    customer_name = serializers.CharField()
+    total_booking_value = serializers.CharField()
+    total_paid_amount = serializers.CharField()
+    remaining_amount = serializers.CharField()
+
+
+class BookingSlotSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    start_time = serializers.DateTimeField()
+    end_time = serializers.DateTimeField()
+    slot_status = serializers.ChoiceField(
+        choices=[(FREE_SLOT_STATUS, FREE_SLOT_STATUS)] + list(Booking.Status.choices)
+    )
+    is_available = serializers.BooleanField()
+    booking = BookingSlotBookingSerializer(allow_null=True)
+    label = serializers.CharField()
+
+
+class BookingSlotsResponseSerializer(serializers.Serializer):
+    court = serializers.IntegerField()
+    court_name = serializers.CharField()
+    date_from = serializers.DateField()
+    date_to = serializers.DateField()
+    slot_duration_minutes = serializers.IntegerField()
+    message = serializers.CharField(required=False)
+    slots = BookingSlotSerializer(many=True)
 
 
 class BookingUpdateSerializer(serializers.ModelSerializer):

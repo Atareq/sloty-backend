@@ -151,6 +151,7 @@ route.
 ## Sprint 3 Booking Endpoints
 
 - `/api/v1/clubs/{club_slug}/bookings/`
+- `GET /api/v1/clubs/{club_slug}/bookings/slots/`
 
 Useful booking list filters:
 
@@ -164,6 +165,11 @@ Useful booking list filters:
 Booking overlap validation treats `HOLD`, `CONFIRMED`, `COMPLETED`, and
 `NO_SHOW` bookings as blocking historical or active slots. Only `CANCELLED` and
 `EXPIRED` bookings release their time slot for a new booking.
+
+The slots endpoint generates availability rows from a selected court's working
+hours and slot duration. It accepts `court` plus either `date` or
+`date_from`/`date_to` query parameters. `FREE` may appear as a response-level
+slot state for UI display, but it is not a persisted booking status.
 
 ## Transaction Endpoints
 
@@ -200,7 +206,7 @@ transactions and transactions attached to terminal bookings cannot be cancelled.
 
 Cancelled transactions remain visible in list/detail responses and can be selected
 with `?is_cancelled=true` or `?is_cancelled=false`. They do not count toward booking
-paid/remaining amounts, completion collection, settlement preview/creation,
+paid/remaining amounts, completion payment checks, settlement preview/creation,
 calendar payment summaries, or dashboard revenue. If cancelling removes the last
 valid payment from a `CONFIRMED` booking, the booking returns to `HOLD`.
 
@@ -251,15 +257,10 @@ must not overlap another blocking booking. Transactions stay attached to the
 same booking. If the recalculated price is higher, `total_price` increases; if
 it is lower or equal, the existing `total_price` remains.
 
-```json
-{"confirm_collect_remaining_cash": true}
-```
-
-`complete` is allowed only for `CONFIRMED` bookings. If the booking has a
-remaining amount, the request must explicitly confirm cash collection with
-`confirm_collect_remaining_cash=true`; the backend then creates a CASH
-transaction for the remaining amount before marking the booking completed. Fully
-paid bookings may be completed with an empty body.
+`complete` is allowed only for `CONFIRMED` bookings. The booking must be fully
+paid before completion. If a remaining amount exists, the backend returns 409
+with `BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT`; record the missing payment as a
+normal transaction first, then complete the booking.
 
 `expire` accepts an empty body and is allowed only for `HOLD` bookings.
 

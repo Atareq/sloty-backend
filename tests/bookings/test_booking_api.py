@@ -129,6 +129,9 @@ class BookingAPITestCase(APITestCase):
             kwargs={"club_slug": club.slug, "pk": booking.pk},
         )
 
+    def booking_slots_url(self, club):
+        return reverse("club-booking-slots", kwargs={"club_slug": club.slug})
+
     def post_booking(self, club: Club, court: Court, **extra_fields):
         return self.client.post(
             self.booking_list_url(club),
@@ -148,6 +151,23 @@ class BookingAPITestCase(APITestCase):
         self.assertEqual(response.data["success"], False)
         self.assertEqual(response.data["code"], code)
         self.assertIn("message", response.data)
+
+    def create_working_hours(
+        self,
+        court: Court,
+        *,
+        weekday=2,
+        opens_at=time(9, 0),
+        closes_at=time(12, 0),
+        is_closed=False,
+    ) -> CourtWorkingHour:
+        return CourtWorkingHour.objects.create(
+            court=court,
+            weekday=weekday,
+            opens_at=opens_at if not is_closed else None,
+            closes_at=closes_at if not is_closed else None,
+            is_closed=is_closed,
+        )
 
 
 class BookingCreationTests(BookingAPITestCase):
@@ -262,6 +282,164 @@ class BookingCreationTests(BookingAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+
+class BookingSlotAvailabilityTests(BookingAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin()
+        self.club = self.create_club("Slots Club", slug="slots-club")
+        self.court = self.create_court(self.club, "Slots Court")
+        self.create_working_hours(self.court)
+        self.client.force_authenticate(user=self.platform_admin)
+
+    def get_slots(self, **params):
+        data = {"court": self.court.id, "date": "2026-05-20"}
+        data.update(params)
+        return self.client.get(self.booking_slots_url(self.club), data)
+
+    def slot_by_hour(self, response, hour):
+        start_time_prefix = self.time_at(hour).strftime("%Y-%m-%dT%H:%M:%S")
+        expected_datetime = self.time_at(hour)
+        return next(
+            slot
+            for slot in response.data["slots"]
+            if (
+                slot["start_time"] == expected_datetime
+                or (
+                    isinstance(slot["start_time"], str)
+                    and slot["start_time"].startswith(start_time_prefix)
+                )
+            )
+        )
+
+    def test_slots_endpoint_returns_free_slots_when_no_booking_exists(self):
+        response = self.get_slots()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["court"], self.court.id)
+        self.assertEqual(response.data["slot_duration_minutes"], 60)
+        self.assertEqual(len(response.data["slots"]), 3)
+        first_slot = response.data["slots"][0]
+        self.assertEqual(first_slot["slot_status"], "FREE")
+        self.assertEqual(first_slot["is_available"], True)
+        self.assertIsNone(first_slot["booking"])
+        self.assertEqual(first_slot["label"], "Available")
+
+    def test_slots_endpoint_marks_blocking_booking_statuses(self):
+        hold = self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            status=Booking.Status.HOLD,
+        )
+        confirmed = self.create_booking(
+            self.court,
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+            status=Booking.Status.CONFIRMED,
+        )
+        completed = self.create_booking(
+            self.court,
+            start_time=self.time_at(11),
+            end_time=self.time_at(12),
+            status=Booking.Status.COMPLETED,
+        )
+        self.create_transaction(completed, amount=completed.total_price)
+
+        response = self.get_slots()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.slot_by_hour(response, 9)["slot_status"], "HOLD")
+        self.assertEqual(self.slot_by_hour(response, 9)["booking"]["id"], hold.id)
+        self.assertEqual(self.slot_by_hour(response, 10)["slot_status"], "CONFIRMED")
+        self.assertEqual(self.slot_by_hour(response, 10)["booking"]["id"], confirmed.id)
+        completed_slot = self.slot_by_hour(response, 11)
+        self.assertEqual(completed_slot["slot_status"], "COMPLETED")
+        self.assertEqual(completed_slot["is_available"], False)
+        self.assertEqual(completed_slot["booking"]["id"], completed.id)
+        self.assertEqual(completed_slot["booking"]["remaining_amount"], "0.00")
+
+    def test_cancelled_and_expired_bookings_do_not_block_slots(self):
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            status=Booking.Status.CANCELLED,
+        )
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+            status=Booking.Status.EXPIRED,
+        )
+
+        response = self.get_slots()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.slot_by_hour(response, 9)["slot_status"], "FREE")
+        self.assertEqual(self.slot_by_hour(response, 10)["slot_status"], "FREE")
+
+    def test_free_is_not_a_booking_status_choice(self):
+        status_values = {choice[0] for choice in Booking.Status.choices}
+
+        self.assertNotIn("FREE", status_values)
+
+    def test_closed_day_returns_empty_slots_with_localized_message(self):
+        CourtWorkingHour.objects.filter(court=self.court).delete()
+        self.create_working_hours(
+            self.court,
+            weekday=CourtWorkingHour.Weekday.WEDNESDAY,
+            is_closed=True,
+        )
+        self.client.credentials(HTTP_ACCEPT_LANGUAGE="ar")
+
+        response = self.get_slots()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["slots"], [])
+        self.assertEqual(response.data["message"], "الملعب مغلق في هذا اليوم.")
+
+    def test_slot_labels_are_localized_to_arabic(self):
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            status=Booking.Status.HOLD,
+        )
+        self.client.credentials(HTTP_ACCEPT_LANGUAGE="ar")
+
+        response = self.get_slots()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.slot_by_hour(response, 9)["label"], "حجز مؤقت")
+        self.assertEqual(self.slot_by_hour(response, 10)["label"], "متاح")
+
+    def test_date_range_too_large_returns_slot_period_error(self):
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {
+                "court": self.court.id,
+                "date_from": "2026-05-01",
+                "date_to": "2026-06-15",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_api_error(response, "SLOT_PERIOD_TOO_LARGE")
+
+    def test_slots_query_count_does_not_grow_with_generated_slots(self):
+        CourtWorkingHour.objects.filter(court=self.court).delete()
+        self.create_working_hours(
+            self.court,
+            opens_at=time(0, 0),
+            closes_at=time(23, 0),
+        )
+
+        with self.assertNumQueries(4):
+            response = self.get_slots()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["slots"]), 23)
 
 
 class BookingScopeTests(BookingAPITestCase):
@@ -809,6 +987,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
 
     def test_manager_can_complete_confirmed(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+        self.create_transaction(booking, amount=booking.total_price)
 
         response = self.post_lifecycle(
             self.club,
@@ -878,6 +1057,8 @@ class BookingLifecycleActionTests(BookingAPITestCase):
                     end_time=self.time_at(phone_suffix + 1),
                     customer_phone=f"+2010000003{phone_suffix:02d}",
                 )
+                if action_name == "complete":
+                    self.create_transaction(booking, amount=booking.total_price)
 
                 payload = (
                     {"confirm_collect_remaining_cash": True}
@@ -1033,7 +1214,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         self.assertEqual(booking.status, Booking.Status.COMPLETED)
         self.assertEqual(booking.transactions.count(), 1)
 
-    def test_complete_with_remaining_amount_requires_confirmation(self):
+    def test_complete_with_remaining_amount_returns_domain_conflict(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
         self.create_transaction(booking, amount=Decimal("100.00"))
 
@@ -1044,11 +1225,43 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             self.platform_admin,
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assert_field_error(response, "confirm_collect_remaining_cash")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT")
+        self.assertEqual(
+            response.data["message"],
+            "This booking cannot be completed until the remaining amount is paid.",
+        )
+        self.assertEqual(
+            response.data["details"],
+            {
+                "booking_id": booking.id,
+                "remaining_amount": "200.00",
+            },
+        )
+        self.assertNotIn("booking", response.data)
+        self.assertNotIn("detail", response.data)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CONFIRMED)
         self.assertEqual(booking.transactions.count(), 1)
+
+    def test_complete_with_remaining_amount_returns_localized_arabic_error(self):
+        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+        self.create_transaction(booking, amount=Decimal("100.00"))
+        self.client.credentials(HTTP_ACCEPT_LANGUAGE="ar")
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "complete",
+            self.platform_admin,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT")
+        self.assertEqual(
+            response.data["message"],
+            "لا يمكن إكمال الحجز قبل سداد المبلغ المتبقي.",
+        )
 
     def test_completion_remaining_amount_ignores_cancelled_transactions(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
@@ -1069,12 +1282,12 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             self.platform_admin,
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assert_field_error(response, "confirm_collect_remaining_cash")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT")
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CONFIRMED)
 
-    def test_complete_with_confirmation_creates_remaining_cash_transaction(self):
+    def test_complete_with_confirmation_still_rejects_remaining_amount(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
         self.create_transaction(booking, amount=Decimal("100.00"))
 
@@ -1086,23 +1299,11 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             {"confirm_collect_remaining_cash": True},
         )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT")
         booking.refresh_from_db()
-        self.assertEqual(booking.status, Booking.Status.COMPLETED)
-        auto_transaction = booking.transactions.order_by("id").last()
-        self.assertEqual(auto_transaction.amount, Decimal("200.00"))
-        self.assertEqual(
-            auto_transaction.payment_method, Transaction.PaymentMethod.CASH
-        )
-        self.assertEqual(auto_transaction.payment_reference, "")
-        self.assertEqual(auto_transaction.created_by, self.platform_admin)
-        self.assertTrue(
-            AuditLog.objects.filter(
-                action=AuditLog.Action.TRANSACTION_CREATED,
-                entity_type="Transaction",
-                entity_id=auto_transaction.id,
-            ).exists()
-        )
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+        self.assertEqual(booking.transactions.count(), 1)
 
     def test_reschedule_hold_booking_to_free_slot(self):
         booking = self.create_booking(self.court, status=Booking.Status.HOLD)

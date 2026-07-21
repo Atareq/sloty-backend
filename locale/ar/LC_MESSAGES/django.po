@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: sloty\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-19 14:34+0000\n"
+"POT-Creation-Date: 2026-07-21 12:32+0000\n"
 "PO-Revision-Date: 2026-07-19 00:00+0000\n"
 "Last-Translator: \n"
 "Language-Team: Arabic\n"
@@ -57,21 +57,86 @@ msgstr "تم إنشاء التسوية"
 msgid "Settlement marked settled"
 msgstr "تم اعتماد التسوية"
 
-#: apps/bookings/services.py:39
-msgid "The selected booking slot is no longer available."
-msgstr "وقت الحجز المحدد لم يعد متاحاً."
+#: apps/bookings/models.py:16
+msgid "Hold"
+msgstr "حجز مؤقت"
 
-#: apps/bookings/services.py:41 apps/transactions/services.py:27
+#: apps/bookings/models.py:17
+msgid "Confirmed"
+msgstr "مؤكد"
+
+#: apps/bookings/models.py:18
+msgid "Completed"
+msgstr "مكتمل"
+
+#: apps/bookings/models.py:19
+msgid "Cancelled"
+msgstr "ملغي"
+
+#: apps/bookings/models.py:20
+msgid "No-show"
+msgstr "لم يحضر"
+
+#: apps/bookings/models.py:21
+msgid "Expired"
+msgstr "منتهي"
+
+#: apps/bookings/models.py:24
+msgid "Manual"
+msgstr "يدوي"
+
+#: apps/bookings/models.py:25
+msgid "Admin correction"
+msgstr "تصحيح إداري"
+
+#: apps/bookings/serializers.py:231
+msgid "Use either date or date_from/date_to."
+msgstr "استخدم التاريخ أو date_from/date_to."
+
+#: apps/bookings/serializers.py:238
+msgid "Provide date or both date_from and date_to."
+msgstr "أرسل التاريخ أو أرسل date_from و date_to معًا."
+
+#: apps/bookings/serializers.py:242
+msgid "Invalid slot period."
+msgstr "فترة المواعيد غير صحيحة."
+
+#: apps/bookings/serializers.py:247
+msgid "The requested slot period is too large."
+msgstr "الفترة المطلوبة لعرض المواعيد كبيرة جدًا."
+
+#: apps/bookings/serializers.py:251 apps/settlements/serializers.py:148
+#: apps/settlements/serializers.py:193
+msgid "Court must belong to the selected club."
+msgstr "يجب أن ينتمي الملعب إلى النادي المحدد."
+
+#: apps/bookings/services.py:38
+msgid "The selected booking slot is not available."
+msgstr "الفترة المختارة غير متاحة."
+
+#: apps/bookings/services.py:40
+msgid "This booking cannot be completed until the remaining amount is paid."
+msgstr "لا يمكن إكمال الحجز قبل سداد المبلغ المتبقي."
+
+#: apps/bookings/services.py:42
+msgid "The court is closed on this day."
+msgstr "الملعب مغلق في هذا اليوم."
+
+#: apps/bookings/services.py:43 apps/transactions/services.py:24
 msgid "Booking must belong to the selected club."
 msgstr "يجب أن ينتمي الحجز إلى النادي المحدد."
 
-#: apps/bookings/services.py:42
+#: apps/bookings/services.py:44
 msgid "This booking is already cancelled."
 msgstr "تم إلغاء هذا الحجز بالفعل."
 
-#: apps/bookings/services.py:44
+#: apps/bookings/services.py:46
 msgid "This booking status transition is not allowed."
 msgstr "تغيير حالة هذا الحجز غير مسموح."
+
+#: apps/bookings/services.py:125
+msgid "Available"
+msgstr "متاح"
 
 #: apps/common/exceptions.py:9
 msgid "An API error occurred."
@@ -80,10 +145,6 @@ msgstr "حدث خطأ في واجهة البرمجة."
 #: apps/common/exceptions.py:35
 msgid "Validation error."
 msgstr "خطأ في التحقق من البيانات."
-
-#: apps/settlements/serializers.py:141
-msgid "This field is required when creating a settlement."
-msgstr "هذا الحقل مطلوب عند إنشاء التسوية."
 
 #: apps/settlements/services.py:15
 msgid "There are no unsettled transactions for this user."
@@ -105,21 +166,28 @@ msgstr "تمت تسوية هذه التسوية بالفعل."
 msgid "Only pending settlements can be marked as settled."
 msgstr "يمكن اعتماد التسويات المعلقة فقط."
 
+#: apps/transactions/filters.py:72
+msgid "Invalid settlement status value."
+msgstr "قيمة حالة التسوية غير صحيحة."
+
 #: apps/transactions/services.py:19
 msgid "This payment is already cancelled."
 msgstr "تم إلغاء عملية الدفع هذه بالفعل."
 
-#: apps/transactions/services.py:21
+#: apps/transactions/services.py:20
 msgid "Settled payments cannot be cancelled."
 msgstr "لا يمكن إلغاء عمليات الدفع التي تمت تسويتها."
 
-#: apps/transactions/services.py:24
+#: apps/transactions/services.py:22
 msgid "Payments on terminal bookings cannot be cancelled."
 msgstr "لا يمكن إلغاء عمليات الدفع الخاصة بالحجوزات النهائية."
 
-#: apps/transactions/services.py:30
+#: apps/transactions/services.py:26
 msgid "Transactions can only be added to HOLD or CONFIRMED bookings."
 msgstr "يمكن إضافة عمليات الدفع إلى حجوزات الانتظار أو المؤكدة فقط."
+
+#~ msgid "This field is required when creating a settlement."
+#~ msgstr "هذا الحقل مطلوب عند إنشاء التسوية."
 
 #~ msgid "You cannot settle your own transactions."
 #~ msgstr "لا يمكنك تسوية معاملاتك بنفسك."

@@ -1,7 +1,9 @@
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import DecimalField, Q, Sum, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers, status
@@ -11,10 +13,11 @@ from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log
 from apps.bookings.models import Booking
 from apps.common.exceptions import SlotyAPIException
-from apps.courts.models import Court
-from apps.transactions.models import Transaction
+from apps.courts.models import Court, CourtWorkingHour
 from apps.transactions.services import get_booking_remaining_amount
 
+FREE_SLOT_STATUS = "FREE"
+MAX_SLOT_PERIOD_DAYS = 31
 BOOKING_STATUS_TRANSITIONS = {
     Booking.Status.HOLD: {
         Booking.Status.CANCELLED,
@@ -32,12 +35,11 @@ BOOKING_AUDIT_ACTIONS = {
     Booking.Status.NO_SHOW: "BOOKING_NO_SHOW",
     Booking.Status.EXPIRED: "BOOKING_EXPIRED",
 }
-AUTO_COMPLETION_TRANSACTION_NOTE = (
-    "Auto cash transaction created on booking completion."
+BOOKING_SLOT_UNAVAILABLE_MESSAGE = _("The selected booking slot is not available.")
+BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT_MESSAGE = _(
+    "This booking cannot be completed until the remaining amount is paid."
 )
-BOOKING_SLOT_UNAVAILABLE_MESSAGE = _(
-    "The selected booking slot is no longer available."
-)
+COURT_CLOSED_ON_THIS_DAY_MESSAGE = _("The court is closed on this day.")
 BOOKING_NOT_IN_CLUB_MESSAGE = _("Booking must belong to the selected club.")
 BOOKING_ALREADY_CANCELLED_MESSAGE = _("This booking is already cancelled.")
 INVALID_BOOKING_STATUS_TRANSITION_MESSAGE = _(
@@ -109,6 +111,133 @@ def validate_no_booking_overlap(court, start_time, end_time, *, exclude_booking=
             code="BOOKING_SLOT_UNAVAILABLE",
             message=BOOKING_SLOT_UNAVAILABLE_MESSAGE,
         )
+
+
+def local_datetime_for_date(value, value_time):
+    naive_value = datetime.combine(value, value_time)
+    if timezone.is_naive(naive_value):
+        return timezone.make_aware(naive_value, timezone.get_current_timezone())
+    return naive_value
+
+
+def format_slot_label(slot_status):
+    if slot_status == FREE_SLOT_STATUS:
+        return str(_("Available"))
+    return str(Booking.Status(slot_status).label)
+
+
+def booking_slot_payload(booking):
+    paid_amount = getattr(booking, "paid_amount", Decimal("0.00")) or Decimal("0.00")
+    remaining_amount = max(booking.total_price - paid_amount, Decimal("0.00"))
+    return {
+        "id": booking.id,
+        "status": booking.status,
+        "status_label": str(booking.get_status_display()),
+        "customer_name": booking.customer_name,
+        "total_booking_value": f"{booking.total_price:.2f}",
+        "total_paid_amount": f"{paid_amount:.2f}",
+        "remaining_amount": f"{remaining_amount:.2f}",
+    }
+
+
+def booking_overlaps_slot(booking, slot_start, slot_end):
+    return booking.start_time < slot_end and booking.end_time > slot_start
+
+
+def generate_booking_slots(*, access, court, date_from, date_to):
+    if court.club_id != access.club.id:
+        raise serializers.ValidationError(
+            {"court": "Court must belong to the selected club."}
+        )
+    if not access.can_view_court_availability(court):
+        raise PermissionDenied("You cannot view availability for this court.")
+    if not court.is_active:
+        raise serializers.ValidationError({"court": "Court is inactive."})
+
+    range_start = local_datetime_for_date(date_from, time.min)
+    range_end = local_datetime_for_date(date_to + timedelta(days=1), time.min)
+    working_hours_by_weekday = {
+        row.weekday: row for row in CourtWorkingHour.objects.filter(court=court)
+    }
+    blocking_bookings = list(
+        Booking.objects.filter(
+            club=access.club,
+            court=court,
+            status__in=Booking.BLOCKING_STATUSES,
+            start_time__lt=range_end,
+            end_time__gt=range_start,
+        )
+        .annotate(
+            paid_amount=Coalesce(
+                Sum(
+                    "transactions__amount",
+                    filter=Q(transactions__is_cancelled=False),
+                ),
+                Value(Decimal("0.00")),
+                output_field=DecimalField(max_digits=10, decimal_places=2),
+            )
+        )
+        .order_by("start_time", "id")
+    )
+
+    slots = []
+    current_date = date_from
+    has_closed_day = False
+    while current_date <= date_to:
+        working_hour = working_hours_by_weekday.get(current_date.weekday())
+        if (
+            working_hour is None
+            or working_hour.is_closed
+            or working_hour.opens_at is None
+            or working_hour.closes_at is None
+        ):
+            has_closed_day = True
+            current_date += timedelta(days=1)
+            continue
+
+        day_open = local_datetime_for_date(current_date, working_hour.opens_at)
+        day_close = local_datetime_for_date(current_date, working_hour.closes_at)
+        slot_delta = timedelta(minutes=court.slot_duration_minutes)
+        slot_start = day_open
+        while slot_start + slot_delta <= day_close:
+            slot_end = slot_start + slot_delta
+            booking = next(
+                (
+                    candidate
+                    for candidate in blocking_bookings
+                    if booking_overlaps_slot(candidate, slot_start, slot_end)
+                ),
+                None,
+            )
+            slot_status = booking.status if booking is not None else FREE_SLOT_STATUS
+            slots.append(
+                {
+                    "date": current_date.isoformat(),
+                    "start_time": slot_start,
+                    "end_time": slot_end,
+                    "slot_status": slot_status,
+                    "is_available": booking is None,
+                    "booking": (
+                        booking_slot_payload(booking) if booking is not None else None
+                    ),
+                    "label": format_slot_label(slot_status),
+                }
+            )
+            slot_start = slot_end
+
+        current_date += timedelta(days=1)
+
+    response = {
+        "court": court.id,
+        "court_name": court.name,
+        "date_from": date_from.isoformat(),
+        "date_to": date_to.isoformat(),
+        "slot_duration_minutes": court.slot_duration_minutes,
+        "slots": slots,
+    }
+    if not slots and has_closed_day:
+        response["message"] = str(COURT_CLOSED_ON_THIS_DAY_MESSAGE)
+    return response
 
 
 def create_booking(*, created_by, court, start_time, end_time, **booking_data):
@@ -366,24 +495,19 @@ def get_remaining_amount(booking) -> Decimal:
     return get_booking_remaining_amount(booking)
 
 
-def record_transaction_created_audit(*, transaction_obj, actor):
-    return record_audit_log(
-        club=transaction_obj.club,
-        court=transaction_obj.court,
-        actor=actor,
-        action=AuditLog.Action.TRANSACTION_CREATED,
-        entity_type="Transaction",
-        entity_id=transaction_obj.id,
-        after_data={
-            "transaction_id": transaction_obj.id,
-            "booking_id": transaction_obj.booking_id,
-            "court_id": transaction_obj.court_id,
-            "amount": str(transaction_obj.amount),
-            "payment_method": transaction_obj.payment_method,
-            "payment_reference": transaction_obj.payment_reference,
-        },
-        metadata={"source": "booking_completion_auto_cash"},
-    )
+def ensure_booking_can_be_completed(booking):
+    remaining_amount = get_remaining_amount(booking)
+    if remaining_amount > 0:
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT",
+            message=BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT_MESSAGE,
+            details={
+                "booking_id": booking.id,
+                "remaining_amount": f"{remaining_amount:.2f}",
+            },
+        )
+    return remaining_amount
 
 
 def complete_booking(
@@ -406,44 +530,12 @@ def complete_booking(
             action_label="complete",
         )
 
-        remaining_amount = get_remaining_amount(locked_booking)
-        if remaining_amount > 0 and not confirm_collect_remaining_cash:
-            raise serializers.ValidationError(
-                {
-                    "confirm_collect_remaining_cash": (
-                        "Remaining amount must be confirmed as collected before "
-                        "completing this booking."
-                    )
-                }
-            )
-
-        created_transaction = None
-        if remaining_amount > 0:
-            created_transaction = Transaction.objects.create(
-                booking=locked_booking,
-                club=locked_booking.club,
-                court=locked_booking.court,
-                amount=remaining_amount,
-                payment_method=Transaction.PaymentMethod.CASH,
-                payment_reference="",
-                notes=AUTO_COMPLETION_TRANSACTION_NOTE,
-                created_by=actor,
-            )
-            record_transaction_created_audit(
-                transaction_obj=created_transaction,
-                actor=actor,
-            )
+        ensure_booking_can_be_completed(locked_booking)
 
         before_data = booking_audit_snapshot(locked_booking)
         locked_booking.status = Booking.Status.COMPLETED
         locked_booking.completed_at = timezone.now()
         locked_booking.save(update_fields=["status", "completed_at", "modified"])
-        metadata = {}
-        if created_transaction is not None:
-            metadata = {
-                "auto_cash_transaction_id": created_transaction.id,
-                "remaining_amount_collected": str(remaining_amount),
-            }
         create_lifecycle_audit_log(
             booking=locked_booking,
             actor=actor,
@@ -451,7 +543,6 @@ def complete_booking(
             before_data=before_data,
             after_data=booking_audit_snapshot(locked_booking)
             | {"completed_at": locked_booking.completed_at.isoformat()},
-            metadata=metadata,
         )
         return locked_booking
 
