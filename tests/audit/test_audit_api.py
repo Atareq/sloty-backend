@@ -753,7 +753,7 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
 
         create_response = self.client.post(
             self.settlement_list_url(self.club),
-            {"collected_by": self.staff.id, "dry_run": False},
+            {"collected_by": self.staff.id},
             format="json",
         )
 

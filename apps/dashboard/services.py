@@ -1,7 +1,17 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from django.db.models import Count, DecimalField, Q, Sum, Value
+from django.db.models import (
+    Count,
+    DateTimeField,
+    DecimalField,
+    DurationField,
+    ExpressionWrapper,
+    F,
+    Q,
+    Sum,
+    Value,
+)
 from django.db.models.functions import Coalesce, TruncDate, TruncMonth, TruncWeek
 from django.utils import timezone
 from rest_framework import serializers
@@ -210,11 +220,10 @@ SUMMARY_FINANCIAL_FIELDS = (
     "transaction_count",
     "transaction_total",
     "unsettled_transaction_count",
-    "unsettled_transaction_amount",
+    "unsettled_transaction_total_amount",
     "settled_transaction_count",
     "settled_transaction_amount",
-    "pending_settlement_count",
-    "pending_settlement_amount",
+    "staff_with_unsettled_transactions_count",
     "settled_settlement_count",
     "settled_settlement_amount",
 )
@@ -226,7 +235,7 @@ COURT_FINANCIAL_FIELDS = (
     "transaction_count",
     "transaction_total",
     "unsettled_transaction_count",
-    "unsettled_transaction_amount",
+    "unsettled_transaction_total_amount",
     "settled_transaction_count",
     "settled_transaction_amount",
 )
@@ -262,46 +271,52 @@ def null_financial_fields(data, fields):
     return data
 
 
-def summary_courts_queryset(*, access, court=None):
-    courts = access.scoped_dashboard_summary_courts_queryset().order_by("id")
-    if court is not None:
-        if not access.can_access_court(court):
-            raise PermissionDenied("You cannot access this court.")
-        courts = courts.filter(id=court.id)
-    return courts
+def get_user_display_name(user):
+    if user is None:
+        return ""
+    full_name = user.get_full_name().strip()
+    return full_name or user.username
 
 
-def booking_count_rows(bookings):
-    return bookings.values("court_id", "status").annotate(total=Count("id"))
+def local_date(value):
+    return timezone.localtime(value).date()
 
 
-def booking_value_rows(bookings):
-    return bookings.values("court_id").annotate(total=money_sum("total_price"))
-
-
-def booking_paid_rows(bookings):
-    return (
-        Transaction.objects.filter(
-            booking__in=bookings.values("id"),
-            is_cancelled=False,
+def with_hold_expiry(queryset):
+    hold_expiry_duration = ExpressionWrapper(
+        F("court__internal_hold_expiry_hours") * Value(timedelta(hours=1)),
+        output_field=DurationField(),
+    )
+    return queryset.annotate(
+        hold_expires_at=ExpressionWrapper(
+            F("created") + hold_expiry_duration,
+            output_field=DateTimeField(),
         )
-        .values("booking__court_id")
-        .annotate(total=money_sum("amount"))
     )
 
 
-def transaction_summary_rows(transactions):
-    return transactions.values("court_id").annotate(
+def apply_transaction_filters(
+    queryset,
+    *,
+    collected_by=None,
+    payment_method=None,
+    settlement_status=None,
+):
+    if collected_by is not None:
+        queryset = queryset.filter(created_by=collected_by)
+    if payment_method:
+        queryset = queryset.filter(payment_method=payment_method)
+    if settlement_status == "unsettled":
+        queryset = queryset.filter(settlement_line__isnull=True)
+    elif settlement_status == "settled":
+        queryset = queryset.filter(settlement_line__isnull=False)
+    return queryset
+
+
+def aggregate_transaction_metrics(transactions):
+    return transactions.aggregate(
         transaction_total=money_sum("amount"),
         transaction_count=Count("id"),
-        unsettled_transaction_amount=money_sum(
-            "amount",
-            filter=Q(settlement_line__isnull=True),
-        ),
-        unsettled_transaction_count=Count(
-            "id",
-            filter=Q(settlement_line__isnull=True),
-        ),
         settled_transaction_amount=money_sum(
             "amount",
             filter=Q(settlement_line__isnull=False),
@@ -313,31 +328,197 @@ def transaction_summary_rows(transactions):
     )
 
 
-def settlement_querysets(*, access, courts, court, date_from, date_to):
+def get_unsettled_transactions_queryset(
+    *, access, court=None, collected_by=None, payment_method=None
+):
+    if court is not None and not access.can_access_court(court):
+        raise PermissionDenied("You cannot access this court.")
+    queryset = access.scoped_transactions_queryset().filter(
+        club=access.club,
+        amount__gt=0,
+        settlement_line__isnull=True,
+        is_cancelled=False,
+    )
+    if court is not None:
+        queryset = queryset.filter(court=court)
+    if collected_by is not None:
+        queryset = queryset.filter(created_by=collected_by)
+    if payment_method:
+        queryset = queryset.filter(payment_method=payment_method)
+    return queryset
+
+
+def get_unsettled_transaction_metrics(
+    *,
+    access,
+    court=None,
+    collected_by=None,
+    payment_method=None,
+):
+    queryset = get_unsettled_transactions_queryset(
+        access=access,
+        court=court,
+        collected_by=collected_by,
+        payment_method=payment_method,
+    )
+    return queryset.aggregate(
+        unsettled_transaction_count=Count("id"),
+        unsettled_transaction_total_amount=money_sum("amount"),
+        staff_with_unsettled_transactions_count=Count("created_by", distinct=True),
+    )
+
+
+def get_payment_method_totals(transactions):
+    return {
+        row["payment_method"]: {
+            "amount": money(row["amount"]),
+            "count": row["count"],
+        }
+        for row in transactions.values("payment_method")
+        .annotate(amount=money_sum("amount"), count=Count("id"))
+        .order_by("payment_method")
+    }
+
+
+def get_staff_unsettled_money(unsettled_transactions):
+    payment_rows = (
+        unsettled_transactions.values(
+            "created_by_id",
+            "created_by__first_name",
+            "created_by__last_name",
+            "created_by__username",
+            "court_id",
+            "court__name",
+            "payment_method",
+        )
+        .annotate(amount=money_sum("amount"))
+        .order_by("created_by_id", "court_id", "payment_method")
+    )
+    results = {}
+    for row in payment_rows:
+        key = (row["created_by_id"], row["court_id"])
+        item = results.setdefault(
+            key,
+            {
+                "collected_by": row["created_by_id"],
+                "collected_by_name": (
+                    f"{row['created_by__first_name']} {row['created_by__last_name']}"
+                ).strip()
+                or row["created_by__username"]
+                or "",
+                "court": row["court_id"],
+                "court_name": row["court__name"],
+                "total_unsettled_amount": ZERO,
+                "unsettled_transaction_count": 0,
+                "totals_by_payment_method": {},
+            },
+        )
+        item["totals_by_payment_method"][row["payment_method"]] = money(row["amount"])
+        item["total_unsettled_amount"] += money(row["amount"])
+
+    count_rows = unsettled_transactions.values("created_by_id", "court_id").annotate(
+        count=Count("id")
+    )
+    for row in count_rows:
+        item = results.get((row["created_by_id"], row["court_id"]))
+        if item is not None:
+            item["unsettled_transaction_count"] = row["count"]
+    return sorted(
+        results.values(),
+        key=lambda item: (-item["total_unsettled_amount"], item["collected_by"] or 0),
+    )
+
+
+def get_needs_action_breakdown(bookings):
+    now = timezone.now()
+    warning_end = now + timedelta(minutes=30)
+    annotated = with_hold_expiry(
+        bookings.annotate(
+            paid_amount=money_sum(
+                "transactions__amount",
+                filter=Q(transactions__is_cancelled=False),
+            ),
+        )
+    )
+    needs_action_query = (
+        Q(status=Booking.Status.HOLD)
+        | Q(status=Booking.Status.CONFIRMED, end_time__lt=now)
+        | Q(
+            status=Booking.Status.CONFIRMED,
+            end_time__lt=now,
+            paid_amount__lt=F("total_price"),
+        )
+        | Q(
+            status=Booking.Status.HOLD,
+            hold_expires_at__gt=now,
+            hold_expires_at__lte=warning_end,
+        )
+    )
+    return {
+        "needs_action_count": annotated.filter(needs_action_query).aggregate(
+            count=Count("id", distinct=True)
+        )["count"],
+        "hold_waiting_payment_count": annotated.filter(
+            status=Booking.Status.HOLD,
+        ).count(),
+        "overdue_confirmed_count": annotated.filter(
+            status=Booking.Status.CONFIRMED,
+            end_time__lt=now,
+        ).count(),
+        "remaining_after_slot_end_count": annotated.filter(
+            status=Booking.Status.CONFIRMED,
+            end_time__lt=now,
+            paid_amount__lt=F("total_price"),
+        ).count(),
+        "expiring_hold_count": annotated.filter(
+            status=Booking.Status.HOLD,
+            hold_expires_at__gt=now,
+            hold_expires_at__lte=warning_end,
+        ).count(),
+    }
+
+
+def settled_settlements_queryset(
+    *,
+    access,
+    date_from,
+    date_to,
+    court=None,
+    courts=None,
+):
     settlements = Settlement.objects.filter(club=access.club)
     if court is not None:
         settlements = settlements.filter(court=court)
-    else:
+    elif courts is not None:
         settlements = settlements.filter(Q(court__in=courts) | Q(court__isnull=True))
 
-    pending_settlements = settlements.filter(
-        status=Settlement.Status.PENDING,
-        created__gte=date_from,
-        created__lt=date_to,
-    )
-    settled_settlements = settlements.filter(status=Settlement.Status.SETTLED).filter(
+    return settlements.filter(status=Settlement.Status.SETTLED).filter(
         Q(settled_at__gte=date_from, settled_at__lt=date_to)
         | Q(settled_at__isnull=True, created__gte=date_from, created__lt=date_to)
     )
-    return pending_settlements, settled_settlements
 
 
-def get_dashboard_summary(*, access, date_from, date_to, court=None):
+def get_dashboard_summary(
+    *,
+    access,
+    date_from,
+    date_to,
+    court=None,
+    collected_by=None,
+    payment_method=None,
+    settlement_status=None,
+):
     validate_dashboard_summary_access(access)
 
     financial_visible = access.can_view_financial_summary()
-    courts = list(summary_courts_queryset(access=access, court=court))
+    courts_queryset = access.scoped_dashboard_summary_courts_queryset().order_by("id")
+    if court is not None:
+        if not access.can_access_court(court):
+            raise PermissionDenied("You cannot access this court.")
+        courts_queryset = courts_queryset.filter(id=court.id)
+    courts = list(courts_queryset)
     court_ids = [court_obj.id for court_obj in courts]
+
     bookings = Booking.objects.filter(
         court__in=courts,
         start_time__gte=date_from,
@@ -349,10 +530,16 @@ def get_dashboard_summary(*, access, date_from, date_to, court=None):
         created__lt=date_to,
         is_cancelled=False,
     )
+    transactions = apply_transaction_filters(
+        transactions,
+        collected_by=collected_by,
+        payment_method=payment_method,
+        settlement_status=settlement_status,
+    )
 
     counts_by_court = {court_obj.id: base_booking_counts() for court_obj in courts}
     total_counts = base_booking_counts()
-    for row in booking_count_rows(bookings):
+    for row in bookings.values("court_id", "status").annotate(total=Count("id")):
         field = BOOKING_STATUS_SUMMARY_FIELDS[row["status"]]
         court_counts = counts_by_court[row["court_id"]]
         court_counts[field] = row["total"]
@@ -361,14 +548,42 @@ def get_dashboard_summary(*, access, date_from, date_to, court=None):
         total_counts["total_bookings"] += row["total"]
 
     booking_values = {
-        row["court_id"]: money(row["total"]) for row in booking_value_rows(bookings)
+        row["court_id"]: money(row["total"])
+        for row in bookings.values("court_id").annotate(total=money_sum("total_price"))
     }
     booking_paid = {
         row["booking__court_id"]: money(row["total"])
-        for row in booking_paid_rows(bookings)
+        for row in (
+            Transaction.objects.filter(
+                booking__in=bookings.values("id"),
+                is_cancelled=False,
+            )
+            .values("booking__court_id")
+            .annotate(total=money_sum("amount"))
+        )
     }
     transaction_summaries = {
-        row["court_id"]: row for row in transaction_summary_rows(transactions)
+        row["court_id"]: row
+        for row in transactions.values("court_id").annotate(
+            transaction_total=money_sum("amount"),
+            transaction_count=Count("id"),
+            unsettled_transaction_total_amount=money_sum(
+                "amount",
+                filter=Q(settlement_line__isnull=True),
+            ),
+            unsettled_transaction_count=Count(
+                "id",
+                filter=Q(settlement_line__isnull=True),
+            ),
+            settled_transaction_amount=money_sum(
+                "amount",
+                filter=Q(settlement_line__isnull=False),
+            ),
+            settled_transaction_count=Count(
+                "id",
+                filter=Q(settlement_line__isnull=False),
+            ),
+        )
     }
 
     court_results = []
@@ -390,8 +605,8 @@ def get_dashboard_summary(*, access, date_from, date_to, court=None):
                 "unsettled_transaction_count",
                 0,
             ),
-            "unsettled_transaction_amount": transaction_summary.get(
-                "unsettled_transaction_amount",
+            "unsettled_transaction_total_amount": transaction_summary.get(
+                "unsettled_transaction_total_amount",
                 ZERO,
             ),
             "settled_transaction_count": transaction_summary.get(
@@ -409,36 +624,25 @@ def get_dashboard_summary(*, access, date_from, date_to, court=None):
 
     booking_value = sum(booking_values.values(), ZERO)
     paid_amount = sum(booking_paid.values(), ZERO)
-    transaction_summary = transactions.aggregate(
-        transaction_total=money_sum("amount"),
-        transaction_count=Count("id"),
-        unsettled_transaction_amount=money_sum(
-            "amount",
-            filter=Q(settlement_line__isnull=True),
-        ),
-        unsettled_transaction_count=Count(
-            "id",
-            filter=Q(settlement_line__isnull=True),
-        ),
-        settled_transaction_amount=money_sum(
-            "amount",
-            filter=Q(settlement_line__isnull=False),
-        ),
-        settled_transaction_count=Count(
-            "id",
-            filter=Q(settlement_line__isnull=False),
-        ),
-    )
-    pending_settlements, settled_settlements = settlement_querysets(
+    transaction_summary = aggregate_transaction_metrics(transactions)
+    unsettled_transaction_metrics = get_unsettled_transaction_metrics(
         access=access,
-        courts=courts,
         court=court,
+        collected_by=collected_by,
+        payment_method=payment_method,
+    )
+    unsettled_transactions = get_unsettled_transactions_queryset(
+        access=access,
+        court=court,
+        collected_by=collected_by,
+        payment_method=payment_method,
+    )
+    settled_settlements = settled_settlements_queryset(
+        access=access,
         date_from=date_from,
         date_to=date_to,
-    )
-    pending_summary = pending_settlements.aggregate(
-        amount=money_sum("total_amount"),
-        count=Count("id"),
+        court=court,
+        courts=courts,
     )
     settled_summary = settled_settlements.aggregate(
         amount=money_sum("total_amount"),
@@ -453,19 +657,22 @@ def get_dashboard_summary(*, access, date_from, date_to, court=None):
         "total_remaining_amount": booking_value - paid_amount,
         "transaction_count": transaction_summary["transaction_count"],
         "transaction_total": transaction_summary["transaction_total"],
-        "unsettled_transaction_count": transaction_summary[
+        "unsettled_transaction_count": unsettled_transaction_metrics[
             "unsettled_transaction_count"
         ],
-        "unsettled_transaction_amount": transaction_summary[
-            "unsettled_transaction_amount"
+        "unsettled_transaction_total_amount": unsettled_transaction_metrics[
+            "unsettled_transaction_total_amount"
+        ],
+        "staff_with_unsettled_transactions_count": unsettled_transaction_metrics[
+            "staff_with_unsettled_transactions_count"
         ],
         "settled_transaction_count": transaction_summary["settled_transaction_count"],
         "settled_transaction_amount": transaction_summary["settled_transaction_amount"],
-        "pending_settlement_count": pending_summary["count"],
-        "pending_settlement_amount": pending_summary["amount"],
         "settled_settlement_count": settled_summary["count"],
         "settled_settlement_amount": settled_summary["amount"],
     }
+    needs_action = get_needs_action_breakdown(bookings)
+    summary["needs_action_count"] = needs_action["needs_action_count"]
     if not financial_visible:
         summary = null_financial_fields(summary, SUMMARY_FINANCIAL_FIELDS)
 
@@ -485,7 +692,34 @@ def get_dashboard_summary(*, access, date_from, date_to, court=None):
             "date_from": date_from,
             "date_to": date_to,
         },
+        "context": {
+            "club_id": access.club.id,
+            "club_name": access.club.name,
+            "date_from": local_date(date_from),
+            "date_to": local_date(date_to - timedelta(microseconds=1)),
+            "court": court.id if court else None,
+            "court_name": court.name if court else None,
+            "collected_by": collected_by.id if collected_by else None,
+            "collected_by_name": (
+                get_user_display_name(collected_by) if collected_by else None
+            ),
+            "payment_method": payment_method,
+            "settlement_status": settlement_status,
+        },
         "summary": summary,
+        "needs_action_breakdown": {
+            key: value
+            for key, value in needs_action.items()
+            if key != "needs_action_count"
+        },
+        "payment_method_totals": (
+            get_payment_method_totals(transactions) if financial_visible else {}
+        ),
+        "staff_unsettled_money": (
+            get_staff_unsettled_money(unsettled_transactions)
+            if financial_visible
+            else []
+        ),
         "courts": court_results,
     }
 
@@ -518,44 +752,17 @@ def get_dashboard_overview(*, access, date_from, date_to, court=None):
             is_cancelled=False,
         ).aggregate(total=Sum("amount"))["total"]
     )
-    transaction_summary = transactions.aggregate(
-        transaction_total=money_sum("amount"),
-        transaction_count=Count("id"),
-        unsettled_transaction_amount=money_sum(
-            "amount",
-            filter=Q(settlement_line__isnull=True),
-        ),
-        unsettled_transaction_count=Count(
-            "id",
-            filter=Q(settlement_line__isnull=True),
-        ),
-        settled_amount=money_sum(
-            "amount",
-            filter=Q(settlement_line__isnull=False),
-        ),
-        settled_transaction_count=Count(
-            "id",
-            filter=Q(settlement_line__isnull=False),
-        ),
+    transaction_summary = aggregate_transaction_metrics(transactions)
+    unsettled_transaction_metrics = get_unsettled_transaction_metrics(
+        access=access,
+        court=court,
     )
-
-    settlements = Settlement.objects.filter(club=access.club)
-    if court is not None:
-        settlements = settlements.filter(court=court)
-    pending_settlements = settlements.filter(
-        status=Settlement.Status.PENDING,
-        created__gte=date_from,
-        created__lt=date_to,
-    )
-    settled_settlements = settlements.filter(status=Settlement.Status.SETTLED).filter(
-        Q(settled_at__gte=date_from, settled_at__lt=date_to)
-        | Q(settled_at__isnull=True, created__gte=date_from, created__lt=date_to)
-    )
-    pending_summary = pending_settlements.aggregate(
-        amount=money_sum("total_amount"),
-        count=Count("id"),
-    )
-    settled_summary = settled_settlements.aggregate(
+    settled_summary = settled_settlements_queryset(
+        access=access,
+        date_from=date_from,
+        date_to=date_to,
+        court=court,
+    ).aggregate(
         amount=money_sum("total_amount"),
         count=Count("id"),
     )
@@ -575,16 +782,17 @@ def get_dashboard_overview(*, access, date_from, date_to, court=None):
         "total_remaining_amount": booking_value - booking_paid,
         "transaction_total": transaction_summary["transaction_total"],
         "transaction_count": transaction_summary["transaction_count"],
-        "unsettled_transaction_amount": transaction_summary[
-            "unsettled_transaction_amount"
+        "unsettled_transaction_total_amount": unsettled_transaction_metrics[
+            "unsettled_transaction_total_amount"
         ],
-        "unsettled_transaction_count": transaction_summary[
+        "unsettled_transaction_count": unsettled_transaction_metrics[
             "unsettled_transaction_count"
         ],
-        "settled_amount": transaction_summary["settled_amount"],
+        "staff_with_unsettled_transactions_count": unsettled_transaction_metrics[
+            "staff_with_unsettled_transactions_count"
+        ],
+        "settled_amount": transaction_summary["settled_transaction_amount"],
         "settled_transaction_count": transaction_summary["settled_transaction_count"],
-        "pending_settlement_amount": pending_summary["amount"],
-        "pending_settlement_count": pending_summary["count"],
         "settled_settlement_amount": settled_summary["amount"],
         "settled_settlement_count": settled_summary["count"],
         "court_count": courts.count(),

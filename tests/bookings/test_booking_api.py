@@ -608,11 +608,11 @@ class BookingOverlapTests(BookingAPITestCase):
     def test_expired_booking_does_not_block_slot(self):
         self.assert_overlap_is_allowed_for_status(Booking.Status.EXPIRED)
 
-    def test_completed_booking_does_not_block_slot(self):
-        self.assert_overlap_is_allowed_for_status(Booking.Status.COMPLETED)
+    def test_cannot_create_overlapping_completed_booking_on_same_court(self):
+        self.assert_overlap_is_rejected_for_status(Booking.Status.COMPLETED)
 
-    def test_no_show_booking_does_not_block_slot(self):
-        self.assert_overlap_is_allowed_for_status(Booking.Status.NO_SHOW)
+    def test_cannot_create_overlapping_no_show_booking_on_same_court(self):
+        self.assert_overlap_is_rejected_for_status(Booking.Status.NO_SHOW)
 
 
 class BookingUpdateTests(BookingAPITestCase):
@@ -1186,6 +1186,38 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         self.assert_api_error(response, "BOOKING_SLOT_UNAVAILABLE")
         self.assertNotIn("booking", response.data)
 
+    def test_reschedule_blocks_overlapping_completed_booking(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            start_time=self.time_at(18),
+            end_time=self.time_at(19),
+            customer_phone="+201000000779",
+        )
+        self.create_booking(
+            self.court,
+            status=Booking.Status.COMPLETED,
+            start_time=self.time_at(22),
+            end_time=self.time_at(23),
+            customer_phone="+201000000780",
+        )
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "reschedule",
+            self.platform_admin,
+            {
+                "court": self.court.id,
+                "start_time": self.time_at(22).isoformat(),
+                "end_time": self.time_at(23).isoformat(),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_SLOT_UNAVAILABLE")
+        self.assertNotIn("booking", response.data)
+
     def test_reschedule_excludes_current_booking_from_overlap_check(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
 
@@ -1566,6 +1598,78 @@ class BookingFilterTests(BookingAPITestCase):
             {self.booking.id, self.confirmed_booking.id},
         )
         self.assertNotIn(self.other_booking.id, self.list_ids(response))
+
+    def test_needs_action_filter_excludes_completed_bookings_with_remaining_amount(
+        self,
+    ):
+        completed_with_remaining = self.create_booking(
+            self.court,
+            customer_phone="+201000000008",
+            start_time=self.time_at(23),
+            end_time=self.time_at(23, 30),
+            status=Booking.Status.COMPLETED,
+        )
+
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"needs_action": "true"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(self.booking.id, self.list_ids(response))
+        self.assertIn(self.confirmed_booking.id, self.list_ids(response))
+        self.assertNotIn(completed_with_remaining.id, self.list_ids(response))
+
+    def test_overdue_filter_returns_ended_bookings(self):
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"status": Booking.Status.CONFIRMED, "overdue": "true"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {self.confirmed_booking.id})
+
+    def test_remaining_amount_gt_and_ended_filter_returns_confirmed_ended_bookings(
+        self,
+    ):
+        completed_with_remaining = self.create_booking(
+            self.court,
+            customer_phone="+201000000009",
+            start_time=self.time_at(23),
+            end_time=self.time_at(23, 30),
+            status=Booking.Status.COMPLETED,
+        )
+
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"remaining_amount_gt": "0", "ended": "true"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(self.confirmed_booking.id, self.list_ids(response))
+        self.assertNotIn(completed_with_remaining.id, self.list_ids(response))
+
+    def test_hold_expiring_filter_uses_internal_hold_expiry_hours(self):
+        self.court.internal_hold_expiry_hours = 1
+        self.court.save(update_fields=["internal_hold_expiry_hours"])
+        expiring_hold = self.create_booking(
+            self.court,
+            customer_phone="+201000000010",
+            start_time=timezone.now() + timedelta(hours=2),
+            end_time=timezone.now() + timedelta(hours=3),
+            status=Booking.Status.HOLD,
+        )
+        Booking.objects.filter(pk=expiring_hold.pk).update(
+            created=timezone.now() - timedelta(minutes=45)
+        )
+
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"hold_expiring": "true"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {expiring_hold.id})
 
 
 class BookingFilterPatternTests(BookingAPITestCase):

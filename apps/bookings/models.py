@@ -23,7 +23,12 @@ class Booking(models.Model):
         MANUAL = "MANUAL", "Manual"
         ADMIN_CORRECTION = "ADMIN_CORRECTION", "Admin correction"
 
-    BLOCKING_STATUSES = (Status.HOLD, Status.CONFIRMED)
+    BLOCKING_STATUSES = (
+        Status.HOLD,
+        Status.CONFIRMED,
+        Status.COMPLETED,
+        Status.NO_SHOW,
+    )
     LOCKED_STATUSES = (
         Status.COMPLETED,
         Status.CANCELLED,

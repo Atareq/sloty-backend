@@ -68,13 +68,10 @@ class SettlementViewSet(
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
-        response_status = (
-            status.HTTP_200_OK
-            if serializer.data.get("dry_run")
-            else status.HTTP_201_CREATED
-        )
         headers = self.get_success_headers(serializer.data)
-        return Response(serializer.data, status=response_status, headers=headers)
+        return Response(
+            serializer.data, status=status.HTTP_201_CREATED, headers=headers
+        )
 
     @extend_schema(
         tags=["Settlements"],

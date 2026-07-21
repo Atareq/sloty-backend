@@ -5,6 +5,7 @@ from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
+from apps.accounts.models import User
 from apps.bookings.models import Booking
 from apps.courts.models import Court
 from apps.transactions.models import Transaction
@@ -151,6 +152,8 @@ class DashboardOverviewQuerySerializer(AccessScopedCourtMixin, serializers.Seria
 
 
 class DashboardSummaryQuerySerializer(AccessScopedCourtMixin, serializers.Serializer):
+    SETTLEMENT_STATUS_CHOICES = ("unsettled", "settled")
+
     date = serializers.DateField(required=False)
     date_from = serializers.CharField(required=False, allow_blank=True)
     date_to = serializers.CharField(required=False, allow_blank=True)
@@ -158,6 +161,20 @@ class DashboardSummaryQuerySerializer(AccessScopedCourtMixin, serializers.Serial
         queryset=Court.objects.all(),
         required=False,
         allow_null=True,
+    )
+    collected_by = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    payment_method = serializers.ChoiceField(
+        choices=Transaction.PaymentMethod.choices,
+        required=False,
+        allow_blank=True,
+    )
+    settlement_status = serializers.CharField(
+        required=False,
+        allow_blank=True,
     )
 
     def validate(self, attrs):
@@ -194,6 +211,24 @@ class DashboardSummaryQuerySerializer(AccessScopedCourtMixin, serializers.Serial
                 {"date_to": "date_to must be after date_from."}
             )
         attrs["court"] = self.validate_court_access(attrs.get("court"))
+        if attrs.get("payment_method") == "":
+            attrs["payment_method"] = None
+        if attrs.get("settlement_status") == "":
+            attrs["settlement_status"] = None
+        elif attrs.get("settlement_status") not in (
+            None,
+            *self.SETTLEMENT_STATUS_CHOICES,
+        ):
+            raise serializers.ValidationError(
+                {
+                    "settlement_status": [
+                        serializers.ErrorDetail(
+                            "Invalid settlement status value.",
+                            code="INVALID_SETTLEMENT_STATUS",
+                        )
+                    ]
+                }
+            )
         return attrs
 
 
@@ -335,18 +370,14 @@ class DashboardOverviewSerializer(serializers.Serializer):
     total_remaining_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
     transaction_total = serializers.DecimalField(max_digits=12, decimal_places=2)
     transaction_count = serializers.IntegerField()
-    unsettled_transaction_amount = serializers.DecimalField(
+    unsettled_transaction_total_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
     )
     unsettled_transaction_count = serializers.IntegerField()
+    staff_with_unsettled_transactions_count = serializers.IntegerField()
     settled_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
     settled_transaction_count = serializers.IntegerField()
-    pending_settlement_amount = serializers.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-    )
-    pending_settlement_count = serializers.IntegerField()
     settled_settlement_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -372,6 +403,43 @@ class DashboardSummaryScopeSerializer(serializers.Serializer):
 class DashboardSummaryPeriodSerializer(serializers.Serializer):
     date_from = serializers.DateTimeField()
     date_to = serializers.DateTimeField()
+
+
+class DashboardSummaryContextSerializer(serializers.Serializer):
+    club_id = serializers.IntegerField()
+    club_name = serializers.CharField()
+    date_from = serializers.DateField()
+    date_to = serializers.DateField()
+    court = serializers.IntegerField(allow_null=True)
+    court_name = serializers.CharField(allow_blank=True, allow_null=True)
+    collected_by = serializers.IntegerField(allow_null=True)
+    collected_by_name = serializers.CharField(allow_blank=True, allow_null=True)
+    payment_method = serializers.CharField(allow_null=True)
+    settlement_status = serializers.CharField(allow_null=True)
+
+
+class DashboardNeedsActionBreakdownSerializer(serializers.Serializer):
+    hold_waiting_payment_count = serializers.IntegerField()
+    overdue_confirmed_count = serializers.IntegerField()
+    remaining_after_slot_end_count = serializers.IntegerField()
+    expiring_hold_count = serializers.IntegerField()
+
+
+class DashboardPaymentMethodTotalSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    count = serializers.IntegerField()
+
+
+class DashboardStaffUnsettledMoneySerializer(serializers.Serializer):
+    collected_by = serializers.IntegerField(allow_null=True)
+    collected_by_name = serializers.CharField(allow_blank=True)
+    court = serializers.IntegerField()
+    court_name = serializers.CharField()
+    total_unsettled_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    unsettled_transaction_count = serializers.IntegerField()
+    totals_by_payment_method = serializers.DictField(
+        child=serializers.DecimalField(max_digits=12, decimal_places=2)
+    )
 
 
 class DashboardSummaryMetricsSerializer(serializers.Serializer):
@@ -406,19 +474,14 @@ class DashboardSummaryMetricsSerializer(serializers.Serializer):
         allow_null=True,
     )
     unsettled_transaction_count = serializers.IntegerField(allow_null=True)
-    unsettled_transaction_amount = serializers.DecimalField(
+    unsettled_transaction_total_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
         allow_null=True,
     )
+    staff_with_unsettled_transactions_count = serializers.IntegerField(allow_null=True)
     settled_transaction_count = serializers.IntegerField(allow_null=True)
     settled_transaction_amount = serializers.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        allow_null=True,
-    )
-    pending_settlement_count = serializers.IntegerField(allow_null=True)
-    pending_settlement_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
         allow_null=True,
@@ -429,6 +492,7 @@ class DashboardSummaryMetricsSerializer(serializers.Serializer):
         decimal_places=2,
         allow_null=True,
     )
+    needs_action_count = serializers.IntegerField()
 
 
 class DashboardSummaryCourtSerializer(serializers.Serializer):
@@ -464,7 +528,7 @@ class DashboardSummaryCourtSerializer(serializers.Serializer):
         allow_null=True,
     )
     unsettled_transaction_count = serializers.IntegerField(allow_null=True)
-    unsettled_transaction_amount = serializers.DecimalField(
+    unsettled_transaction_total_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
         allow_null=True,
@@ -481,7 +545,14 @@ class DashboardSummaryResponseSerializer(serializers.Serializer):
     club = DashboardSummaryClubSerializer()
     scope = DashboardSummaryScopeSerializer()
     period = DashboardSummaryPeriodSerializer()
+    context = DashboardSummaryContextSerializer()
     summary = DashboardSummaryMetricsSerializer()
+    needs_action_breakdown = DashboardNeedsActionBreakdownSerializer()
+    payment_method_totals = serializers.DictField(
+        child=DashboardPaymentMethodTotalSerializer(),
+        allow_empty=True,
+    )
+    staff_unsettled_money = DashboardStaffUnsettledMoneySerializer(many=True)
     courts = DashboardSummaryCourtSerializer(many=True)
 
 

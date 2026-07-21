@@ -16,6 +16,7 @@ from apps.bookings.models import Booking
 from apps.clubs.access import ClubAccessContext
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court
+from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.filters import TransactionFilter
 from apps.transactions.models import Transaction
 from apps.transactions.services import (
@@ -640,6 +641,27 @@ class TransactionFilterTests(TransactionAPITestCase):
         )
         self.client.force_authenticate(user=self.platform_admin)
 
+    def create_settlement_for_transaction(self, transaction_obj):
+        settlement = Settlement.objects.create(
+            club=transaction_obj.club,
+            court=transaction_obj.court,
+            collected_by=transaction_obj.created_by,
+            period_start=self.time_at(8),
+            period_end=self.time_at(14),
+            status=Settlement.Status.SETTLED,
+            total_amount=transaction_obj.amount,
+            transaction_count=1,
+            created_by=self.platform_admin,
+            settled_by=self.platform_admin,
+            settled_at=self.time_at(14),
+        )
+        SettlementTransaction.objects.create(
+            settlement=settlement,
+            transaction=transaction_obj,
+            amount=transaction_obj.amount,
+        )
+        return settlement
+
     def test_filter_by_booking(self):
         response = self.client.get(
             self.transaction_list_url(self.club),
@@ -709,6 +731,65 @@ class TransactionFilterTests(TransactionAPITestCase):
         )
 
         self.assertEqual(self.list_ids(response), {self.transaction_obj.id})
+
+    def test_filter_by_unsettled_settlement_status(self):
+        self.create_settlement_for_transaction(self.same_club_other_transaction)
+        cancelled = self.create_transaction(
+            self.booking,
+            amount=Decimal("10.00"),
+            is_cancelled=True,
+            cancelled_by=self.platform_admin,
+            cancelled_at=timezone.now(),
+            cancellation_reason="Cancelled filter row",
+        )
+
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"settlement_status": "unsettled"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {self.transaction_obj.id})
+        self.assertNotIn(cancelled.id, self.list_ids(response))
+
+    def test_filter_by_settled_settlement_status(self):
+        self.create_settlement_for_transaction(self.same_club_other_transaction)
+
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"settlement_status": "settled"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {self.same_club_other_transaction.id})
+
+    def test_settlement_status_combines_with_existing_filters(self):
+        self.create_settlement_for_transaction(self.same_club_other_transaction)
+
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {
+                "settlement_status": "settled",
+                "court": self.same_club_other_court.id,
+                "payment_method": Transaction.PaymentMethod.BANK_TRANSFER,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {self.same_club_other_transaction.id})
+
+    def test_invalid_settlement_status_returns_field_error(self):
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"settlement_status": "pending"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "settlement_status")
+        self.assertEqual(
+            response.data["field_errors"]["settlement_status"][0]["code"],
+            "INVALID_SETTLEMENT_STATUS",
+        )
 
     def test_filters_respect_staff_assigned_court_scope(self):
         self.client.force_authenticate(user=self.staff)

@@ -341,13 +341,15 @@ Rules for the flow:
   confirms a HOLD booking to CONFIRMED.
 - `total_price` is calculated by the backend from the court default price and
   slot duration; clients must not control booking price in Sprint 3.
-- Overlap protection is currently application-level: `HOLD` and `CONFIRMED`
-  bookings block overlapping bookings on the same court.
+- Overlap protection is currently application-level: `HOLD`, `CONFIRMED`,
+  `COMPLETED`, and `NO_SHOW` bookings block overlapping bookings on the same
+  court.
 - Booking access is club-scoped through `ClubAccessContext`. Staff users can
   list and create bookings only for their assigned court.
 - Creating bookings on inactive clubs or inactive courts is rejected.
 - `COMPLETED`, `CANCELLED`, `NO_SHOW`, and `EXPIRED` bookings are treated as
-  locked for Sprint 3 update behavior and do not block new overlapping slots.
+  locked for Sprint 3 update behavior. Only `CANCELLED` and `EXPIRED` release
+  their time slot for a new booking.
 - Sprint 5 lifecycle transitions are service-layer controlled through
   action-specific service functions in `apps/bookings/services.py`: cancel,
   complete, no-show, reschedule, expire, and due-hold expiry. The services use
@@ -363,8 +365,8 @@ Rules for the flow:
 - `no-show` is allowed only from `CONFIRMED` and stores an optional reason.
 - `reschedule` is allowed only from `HOLD` or `CONFIRMED`; the new court must
   belong to the selected club, pass `ClubAccessContext` access checks, match the
-  court slot duration, and avoid overlaps with other `HOLD` or `CONFIRMED`
-  bookings while excluding the current booking.
+  court slot duration, and avoid overlaps with blocking bookings while excluding
+  the current booking.
 - Rescheduling keeps existing transactions attached to the same booking. If the
   recalculated price is higher, update `total_price`; if it is lower or equal,
   keep the existing `total_price`.
@@ -437,12 +439,11 @@ Rules for the flow:
 - Settlement serializers must receive `context["club_access"]`.
 - Settlement views should call `access.scoped_settlements_queryset()` for
   list/detail scoping.
-- Settlement preview is read-only dry-run behavior, available through both
-  `GET .../settlements/preview/` and `POST .../settlements/` with
-  `dry_run=true` or omitted. Any active selected-club user can preview their own
-  unsettled transactions, and omitted `collected_by` defaults to `request.user`.
-  Dry-run preview must not create `Settlement`, `SettlementTransaction`, audit
-  rows, locks, or status changes.
+- Settlement preview is read-only behavior available through
+  `GET .../settlements/preview/`. Any active selected-club user can preview
+  their own unsettled transactions, and omitted `collected_by` defaults to
+  `request.user`. Preview must not create `Settlement`,
+  `SettlementTransaction`, audit rows, locks, or transaction state changes.
 - Platform admins and owners can preview active users in the selected club and
   can create, list, retrieve, and mark settlements as settled.
 - Managers can create/list/retrieve/mark settlements only when
@@ -456,11 +457,11 @@ Rules for the flow:
   own collected transactions. Managers and staff must not approve their own
   settlement.
 - Settlement preview/approval is user/collector-based through
-  `Settlement.collected_by`. `POST .../settlements/` defaults to
-  `dry_run=true`; `dry_run=false` is the approval path and requires
-  `collected_by`. Date ranges are not accepted. The backend selects all valid,
-  non-cancelled, unsettled transactions where `Transaction.created_by` is the
-  selected collector in the selected club and accessible court scope, computes
+  `Settlement.collected_by`. `POST .../settlements/` is the approval path and
+  requires `collected_by`; optional `court` limits the candidates to that court.
+  Date ranges are not accepted. The backend selects all valid, non-cancelled,
+  unsettled transactions where `Transaction.created_by` is the selected
+  collector in the selected club and accessible court scope, computes
   `period_start` from the earliest selected transaction, and sets `period_end`
   to creation time.
 - New API-approved settlements are created directly as `SETTLED` with
@@ -541,6 +542,15 @@ Rules for the flow:
   Staff cannot access these endpoints.
 - Calendar payment summaries, dashboard summary financial totals, and all
   financial dashboard transaction totals include non-cancelled transactions only.
+- Dashboard metric names must match their meaning. Do not put counts in fields
+  named `amount`.
+- Dashboard transaction count and total metrics are period-scoped. Dashboard
+  unsettled money metrics represent current open balance by default and still
+  respect optional `court`, `collected_by`, and `payment_method` filters.
+- Dashboard settlement-related metrics are derived from eligible unsettled
+  transactions, not from `Settlement.status=PENDING`. Use
+  `staff_with_unsettled_transactions_count` for the distinct collector count;
+  do not use `pending_settlement_user_count`.
 - Dashboard views must stay thin and use service functions plus
   `ClubAccessContext`; do not query `ClubMembership` in dashboard views,
   serializers, or services.
@@ -549,6 +559,158 @@ Rules for the flow:
   hold expiry jobs.
 - Do not create `apps/dashboard/permissions.py` by default. If dashboard
   permissions need a wrapper, keep it centralized in `apps/clubs/permissions.py`.
+
+## Dashboard, Unsettled Transactions, and Settlement Concepts
+
+### Unsettled transactions are the source of truth
+
+Dashboard settlement-related metrics must be calculated from live unsettled
+transactions, not from `Settlement.status = PENDING`.
+
+A transaction is considered unsettled when:
+
+```text
+is_cancelled = false
+AND transaction is not linked to any settlement line
+```
+
+A settlement record should only be created when an authorized user confirms
+settlement.
+
+Settlement preview endpoints must be read-only and must not create settlement
+rows, settlement lines, audit logs, locks, or transaction state changes.
+
+### Settlement user naming
+
+Use `collected_by` for the staff/user whose collected money is being settled.
+
+Use `created_by` only for the owner/admin/manager who creates the settlement
+record.
+
+Use `settled_by` for the owner/admin/manager who confirms or approves the
+settlement.
+
+Do not use `created_by` to mean the staff member being settled in settlement
+APIs.
+
+### Staff with unsettled transactions count
+
+Use this field name:
+
+```text
+staff_with_unsettled_transactions_count
+```
+
+Meaning:
+
+```text
+The number of distinct staff/users who currently have at least one unsettled non-cancelled transaction.
+```
+
+Do not use names like:
+
+```text
+pending_settlement_user_count
+```
+
+because the dashboard must not depend on pending settlement records.
+
+### Completed bookings and financial closure
+
+A `COMPLETED` booking should normally be financially closed.
+
+This means:
+
+```text
+status = COMPLETED
+remaining_amount = 0
+```
+
+If a completed booking has `remaining_amount > 0`, treat it as a data integrity
+or financial consistency warning, not as a normal operational `needs_action`.
+
+Do not include completed bookings with remaining amount inside the normal
+`needs_action_count`.
+
+If needed later, expose a separate field such as:
+
+```text
+completed_with_remaining_amount_count
+```
+
+or:
+
+```text
+data_integrity_warnings_count
+```
+
+### Needs action definition
+
+`needs_action_count` means a distinct count of bookings requiring normal
+operational attention.
+
+It should include:
+
+```text
+1. HOLD bookings waiting for payment.
+2. CONFIRMED bookings whose end_time has passed and are not completed.
+3. CONFIRMED bookings whose end_time has passed and still have remaining_amount > 0.
+4. HOLD bookings close to expiry.
+```
+
+It should not include:
+
+```text
+COMPLETED bookings with remaining_amount > 0
+```
+
+because that is a data integrity warning.
+
+### Hold expiry logic
+
+Use the existing `internal_hold_expiry_hours` setting to calculate when an
+internal hold expires.
+
+Do not hardcode the hold expiry duration.
+
+Recommended logic:
+
+```text
+hold_expires_at = booking.created + internal_hold_expiry_hours
+```
+
+or use a stored concrete expiry datetime if the booking model already has one.
+
+`hold_expiring=true` should mean:
+
+```text
+status = HOLD
+AND hold_expires_at > now
+AND hold_expires_at <= now + warning_window
+```
+
+The warning window can be a simple MVP default, such as 30 minutes before
+expiry, but the actual expiry duration must come from
+`internal_hold_expiry_hours`.
+
+### Clickable dashboard cards
+
+Every important dashboard number should map to a list endpoint with matching
+filters.
+
+Examples:
+
+```text
+transactions?settlement_status=unsettled
+bookings?needs_action=true
+bookings?overdue=true
+bookings?remaining_amount_gt=0&ended=true
+bookings?hold_expiring=true
+settlements/preview?collected_by=<user_id>
+```
+
+The same backend logic must be used for dashboard counts and the clicked
+filtered lists.
 
 `apps/common/`
 

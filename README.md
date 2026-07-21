@@ -161,6 +161,10 @@ Useful booking list filters:
 - `date_from`
 - `date_to`
 
+Booking overlap validation treats `HOLD`, `CONFIRMED`, `COMPLETED`, and
+`NO_SHOW` bookings as blocking historical or active slots. Only `CANCELLED` and
+`EXPIRED` bookings release their time slot for a new booking.
+
 ## Transaction Endpoints
 
 - `/api/v1/clubs/{club_slug}/transactions/`
@@ -177,6 +181,7 @@ Useful transaction list filters:
 - `date_to`
 - `created_by`
 - `is_cancelled`
+- `settlement_status` (`unsettled` or `settled`)
 
 Creating the first valid transaction for a `HOLD` booking confirms it.
 Transactions are immutable financial history: PATCH, PUT, and DELETE are not
@@ -242,9 +247,9 @@ bookings.
 
 `reschedule` is allowed for `HOLD` and `CONFIRMED` bookings only. The new court
 must belong to the selected club and be accessible to the actor. The new slot
-must not overlap another active booking. Transactions stay attached to the same
-booking. If the recalculated price is higher, `total_price` increases; if it is
-lower or equal, the existing `total_price` remains.
+must not overlap another blocking booking. Transactions stay attached to the
+same booking. If the recalculated price is higher, `total_price` increases; if
+it is lower or equal, the existing `total_price` remains.
 
 ```json
 {"confirm_collect_remaining_cash": true}
@@ -284,34 +289,30 @@ Preview:
 
 ```text
 GET /api/v1/clubs/{club_slug}/settlements/preview/?collected_by={user_id}
+GET /api/v1/clubs/{club_slug}/settlements/preview/?collected_by={user_id}&court={court_id}
 ```
 
-Dry-run through `POST` is also supported and is the default when `dry_run` is
-omitted. It creates no settlement rows, settlement lines, audit rows, or status
-changes:
-
-```json
-{
-  "dry_run": true,
-  "collected_by": 15
-}
-```
+Preview is read-only. It creates no settlement rows, settlement lines, audit
+rows, locks, or transaction state changes.
 
 Approve:
 
 ```json
 {
-  "dry_run": false,
   "collected_by": 15,
+  "court": 3,
   "notes": "End of shift settlement"
 }
 ```
 
-No date range is required for preview or approval. `period_start` is computed
-from the earliest selected transaction and `period_end` is the approval time.
-Cancelled transactions are excluded, and settled transactions cannot be included
-again. API approval creates settlements directly as `SETTLED` with
-`created_by`, `settled_by`, and `settled_at` set to the approving actor.
+`court` is optional. When omitted, approval includes all currently unsettled
+valid transactions for the selected collector inside the actor's allowed court
+scope. No date range is required for preview or approval. `period_start` is
+computed from the earliest selected transaction and `period_end` is the approval
+time. Cancelled transactions are excluded, and settled transactions cannot be
+included again. API approval creates settlements directly as `SETTLED` with
+`collected_by` set to the collector and `created_by`, `settled_by`, and
+`settled_at` set to the approving actor.
 Mark-settled remains for legacy `PENDING` settlements and rejects already
 `SETTLED` settlements.
 
@@ -369,8 +370,9 @@ Useful audit log filters:
 - `GET /api/v1/clubs/{club_slug}/dashboard/revenue/`
 - `GET /api/v1/clubs/{club_slug}/dashboard/court-utilization/`
 
-Availability returns generated slots for one court and date. `HOLD` and
-`CONFIRMED` bookings block slots; terminal booking statuses do not.
+Availability returns generated slots for one court and date. `HOLD`,
+`CONFIRMED`, `COMPLETED`, and `NO_SHOW` bookings block slots. Only `CANCELLED`
+and `EXPIRED` bookings release their slots.
 
 Calendar returns frontend-friendly booking items with payment summary fields.
 Staff can use availability and calendar only for their assigned court. Platform
@@ -382,6 +384,38 @@ owners see all selected-club courts. Managers see all selected-club courts under
 the current club-level manager architecture. Staff can access summary for their
 assigned court only and receive operational counts with
 `financial_visible=false`; financial fields are returned as `null`.
+
+Dashboard transaction cards are period-scoped to the selected summary/overview
+date range. Dashboard unsettled money cards represent current open balance by
+default, so old unsettled money is not hidden just because today's date is
+selected. They still respect optional `court`, `collected_by`, and
+`payment_method` filters.
+
+- `unsettled_transaction_count`: number of eligible unsettled transactions.
+- `unsettled_transaction_total_amount`: total money amount of those eligible
+  unsettled transactions.
+- `staff_with_unsettled_transactions_count`: number of distinct users who
+  currently have eligible unsettled transactions.
+
+Eligible unsettled transactions are non-cancelled, positive-amount transactions
+inside the selected club/court access scope with no settlement line. Dashboard
+settlement-related metrics are derived from unsettled transactions and their
+`created_by` users, not from `Settlement.status=PENDING`. The previous
+`unsettled_transaction_amount`, `pending_settlement_user_count`,
+`pending_settlement_count`, and `pending_settlement_amount` response fields are
+removed from dashboard summary and overview responses.
+
+Summary also returns:
+
+- `needs_action_breakdown`: hold waiting payment, overdue confirmed, remaining
+  after slot end, and expiring hold counts.
+- `payment_method_totals`: grouped period transaction totals.
+- `staff_unsettled_money`: grouped current open balance by collector and court.
+
+Completed bookings with remaining amount are not included in normal
+`needs_action_count`; they are treated as data integrity warnings. Hold expiry
+uses each court's `internal_hold_expiry_hours`; `hold_expiring=true` uses a
+30-minute warning window before the calculated expiry time.
 
 Summary response shape:
 
@@ -403,9 +437,17 @@ Useful Sprint 8 query parameters:
 - Availability: `date`
 - Calendar: `date`, `date_from`, `date_to`, `court`, `status`
 - Overview: `date_from`, `date_to`, `court`
-- Summary: `date`, `date_from`, `date_to`, `court`
+- Summary: `date`, `date_from`, `date_to`, `court`, `collected_by`,
+  `payment_method`, `settlement_status`
 - Revenue: `date_from`, `date_to`, `group_by`, `court`, `payment_method`
 - Court utilization: `date_from`, `date_to`
+
+Useful booking list filters for dashboard cards:
+
+- `needs_action=true`
+- `overdue=true`
+- `remaining_amount_gt=0&ended=true`
+- `hold_expiring=true`
 
 ## Demo Seed Data
 

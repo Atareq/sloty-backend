@@ -2,6 +2,7 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 from apps.accounts.models import User
+from apps.courts.models import Court
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.settlements.services import preview_settlement, process_settlement_request
 
@@ -117,31 +118,37 @@ class SettlementDetailSerializer(serializers.ModelSerializer):
 class SettlementCreateSerializer(serializers.ModelSerializer):
     collected_by = serializers.PrimaryKeyRelatedField(
         queryset=User.objects.all(),
-        required=False,
+        required=True,
     )
-    dry_run = serializers.BooleanField(default=True, write_only=True)
+    court = serializers.PrimaryKeyRelatedField(
+        queryset=Court.objects.all(),
+        required=False,
+        allow_null=True,
+    )
 
     class Meta:
         model = Settlement
         fields = (
             "id",
             "collected_by",
-            "dry_run",
+            "court",
             "notes",
         )
         read_only_fields = ("id",)
         extra_kwargs = {"notes": {"required": False, "allow_blank": True}}
 
     def validate(self, attrs):
-        if attrs.get("dry_run") is False and attrs.get("collected_by") is None:
+        access = self.context["club_access"]
+        court = attrs.get("court")
+        if court is not None and court.club_id != access.club.id:
             raise serializers.ValidationError(
                 {
-                    "collected_by": [
+                    "court": [
                         serializers.ErrorDetail(
-                            _("This field is required when creating a settlement."),
-                            code="required",
-                        )
-                    ]
+                            _("Court must belong to the selected club."),
+                            code="invalid_court",
+                        ),
+                    ],
                 }
             )
         return attrs
@@ -155,23 +162,18 @@ class SettlementCreateSerializer(serializers.ModelSerializer):
         )
 
     def to_representation(self, instance):
-        if isinstance(instance, dict):
-            return SettlementPreviewResponseSerializer(
-                instance,
-                context=self.context,
-            ).data
-        data = SettlementDetailSerializer(instance, context=self.context).data
-        created_at = data.get("created")
-        data["dry_run"] = False
-        data["created"] = True
-        data["created_at"] = created_at
-        return data
+        return SettlementDetailSerializer(instance, context=self.context).data
 
 
 class SettlementPreviewRequestSerializer(serializers.Serializer):
     collected_by = serializers.PrimaryKeyRelatedField(
         queryset=User.objects.all(),
         required=False,
+    )
+    court = serializers.PrimaryKeyRelatedField(
+        queryset=Court.objects.all(),
+        required=False,
+        allow_null=True,
     )
 
     def create(self, validated_data):
@@ -181,6 +183,19 @@ class SettlementPreviewRequestSerializer(serializers.Serializer):
         raise NotImplementedError
 
     def validate(self, attrs):
+        access = self.context["club_access"]
+        court = attrs.get("court")
+        if court is not None and court.club_id != access.club.id:
+            raise serializers.ValidationError(
+                {
+                    "court": [
+                        serializers.ErrorDetail(
+                            _("Court must belong to the selected club."),
+                            code="invalid_court",
+                        ),
+                    ],
+                }
+            )
         attrs.setdefault("collected_by", self.context["request"].user)
         return attrs
 
@@ -204,11 +219,11 @@ class SettlementPreviewTransactionSerializer(serializers.Serializer):
 
 
 class SettlementPreviewResponseSerializer(serializers.Serializer):
-    dry_run = serializers.BooleanField()
-    created = serializers.BooleanField()
     club = serializers.IntegerField()
     collected_by = serializers.IntegerField()
     collected_by_name = serializers.CharField()
+    court = serializers.IntegerField(allow_null=True)
+    court_name = serializers.CharField(allow_blank=True)
     is_self_preview = serializers.BooleanField()
     can_approve = serializers.BooleanField()
     approval_required = serializers.BooleanField()

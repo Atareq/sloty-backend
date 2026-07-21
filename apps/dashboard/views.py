@@ -138,6 +138,9 @@ class DashboardSummaryAPIView(DashboardAPIView):
                 date_from=query["date_from"],
                 date_to=query["date_to"],
                 court=query.get("court"),
+                collected_by=query.get("collected_by"),
+                payment_method=query.get("payment_method"),
+                settlement_status=query.get("settlement_status"),
             )
         )
 

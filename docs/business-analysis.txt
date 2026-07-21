@@ -659,7 +659,7 @@ Owner may configure expiry time.
 Platform bookings may have shorter expiry such as 15 minutes.
 17. Overlap Rule
 
-The system must prevent overlapping active bookings on the same court.
+The system must prevent overlapping active or historical blocking bookings on the same court.
 
 Existing booking:
 
@@ -675,7 +675,7 @@ Allowed:
 
 Rule:
 
-A new booking is not allowed if it overlaps with any Hold or Confirmed booking on the same court.
+A new booking is not allowed if it overlaps with any Hold, Confirmed, Completed, or No-show booking on the same court. Cancelled and Expired bookings release the slot.
 
 18. Booking Duration Rule
 
@@ -1557,8 +1557,10 @@ Booking without transaction becomes Hold.
 Booking with transaction becomes Confirmed.
 Hold blocks slot.
 Confirmed blocks slot.
+Completed blocks slot.
+No-show blocks slot.
 Expired/Cancelled bookings do not block slot.
-System prevents overlapping active bookings.
+System prevents overlapping active or historical blocking bookings.
 Staff cannot change price.
 Price is calculated from court/slot price.
 Owner can override price before completion.

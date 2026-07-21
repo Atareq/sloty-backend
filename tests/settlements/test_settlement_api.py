@@ -289,7 +289,7 @@ class SettlementAccessTests(SettlementAPITestCase):
         )
         create_response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id, dry_run=False),
+            self.settlement_payload(collected_by=self.staff.id),
             format="json",
         )
         settle_response = self.client.post(
@@ -692,6 +692,52 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         transaction_ids = {item["id"] for item in response.data["transactions"]}
         self.assertNotIn(self.already_settled.id, transaction_ids)
 
+    def test_preview_supports_optional_court_filter(self):
+        response = self.client.get(
+            self.settlement_preview_url(self.club),
+            self.settlement_payload(
+                collected_by=self.staff.id,
+                court=self.same_club_other_court.id,
+            ),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["court"], self.same_club_other_court.id)
+        self.assertEqual(response.data["court_name"], self.same_club_other_court.name)
+        self.assertEqual(response.data["transaction_count"], 1)
+        self.assertEqual(response.data["total_amount"], "25.00")
+        self.assertEqual(
+            {item["id"] for item in response.data["transactions"]},
+            {self.other_court_transaction.id},
+        )
+
+    def test_preview_does_not_create_or_mutate_records(self):
+        before_settlements = Settlement.objects.count()
+        before_lines = SettlementTransaction.objects.count()
+        before_audits = AuditLog.objects.count()
+        transaction_ids = [self.first_transaction.id, self.second_transaction.id]
+        before_linked_ids = set(
+            SettlementTransaction.objects.filter(
+                transaction_id__in=transaction_ids
+            ).values_list("transaction_id", flat=True)
+        )
+
+        response = self.client.get(
+            self.settlement_preview_url(self.club),
+            self.settlement_payload(collected_by=self.staff.id),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Settlement.objects.count(), before_settlements)
+        self.assertEqual(SettlementTransaction.objects.count(), before_lines)
+        self.assertEqual(AuditLog.objects.count(), before_audits)
+        after_linked_ids = set(
+            SettlementTransaction.objects.filter(
+                transaction_id__in=transaction_ids
+            ).values_list("transaction_id", flat=True)
+        )
+        self.assertEqual(after_linked_ids, before_linked_ids)
+
     def test_preview_excludes_transactions_created_by_other_users(self):
         response = self.client.get(
             self.settlement_preview_url(self.club),
@@ -776,7 +822,6 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             self.settlement_list_url(self.club),
             self.settlement_payload(
                 collected_by=self.staff.id,
-                dry_run=False,
                 notes="Collected cash from Ahmed",
             ),
             format="json",
@@ -784,8 +829,6 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         settlement = Settlement.objects.get(id=response.data["id"])
-        self.assertEqual(response.data["dry_run"], False)
-        self.assertEqual(response.data["created"], True)
         self.assertEqual(settlement.status, Settlement.Status.SETTLED)
         self.assertIsNone(settlement.court)
         self.assertEqual(settlement.collected_by, self.staff)
@@ -804,7 +847,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
     def test_create_excludes_already_settled_transactions(self):
         response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id, dry_run=False),
+            self.settlement_payload(collected_by=self.staff.id),
             format="json",
         )
 
@@ -818,29 +861,23 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.assertNotIn(self.already_settled.id, transaction_ids)
         self.assertNotIn(self.cancelled_transaction.id, transaction_ids)
 
-    def test_dry_run_defaults_to_request_user_and_creates_nothing(self):
+    def test_preview_defaults_to_request_user_and_creates_nothing(self):
         before_settlements = Settlement.objects.count()
         before_lines = SettlementTransaction.objects.count()
         before_audits = AuditLog.objects.count()
 
-        response = self.client.post(
-            self.settlement_list_url(self.club),
-            {},
-            format="json",
-        )
+        response = self.client.get(self.settlement_preview_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["dry_run"], True)
-        self.assertEqual(response.data["created"], False)
         self.assertEqual(response.data["collected_by"], self.platform_admin.id)
         self.assertEqual(Settlement.objects.count(), before_settlements)
         self.assertEqual(SettlementTransaction.objects.count(), before_lines)
         self.assertEqual(AuditLog.objects.count(), before_audits)
 
-    def test_create_requires_collected_by_when_dry_run_false(self):
+    def test_create_requires_collected_by(self):
         response = self.client.post(
             self.settlement_list_url(self.club),
-            {"dry_run": False},
+            {},
             format="json",
         )
 
@@ -850,7 +887,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
     def test_create_does_not_require_period_start_or_period_end(self):
         response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id, dry_run=False),
+            self.settlement_payload(collected_by=self.staff.id),
             format="json",
         )
 
@@ -876,7 +913,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
 
         response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id, dry_run=False),
+            self.settlement_payload(collected_by=self.staff.id),
             format="json",
         )
 
@@ -889,7 +926,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
 
         response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id, dry_run=False),
+            self.settlement_payload(collected_by=self.staff.id),
             format="json",
         )
 
@@ -930,7 +967,6 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             self.settlement_list_url(self.club),
             self.settlement_payload(
                 collected_by=self.owner.id,
-                dry_run=False,
                 notes="Owner self-settlement",
             ),
             format="json",
@@ -979,7 +1015,6 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             self.settlement_list_url(self.club),
             self.settlement_payload(
                 collected_by=self.platform_admin.id,
-                dry_run=False,
             ),
             format="json",
         )
@@ -1007,7 +1042,6 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             self.settlement_list_url(self.manager_club),
             self.settlement_payload(
                 collected_by=self.manager_collector.id,
-                dry_run=False,
             ),
             format="json",
         )
@@ -1031,18 +1065,12 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.assertEqual(response.data["transaction_count"], 1)
         self.assertEqual(response.data["total_amount"], "130.00")
 
-    def test_manager_with_settlement_permission_can_post_dry_run_for_himself(self):
+    def test_manager_with_settlement_permission_can_preview_himself_without_post(self):
         self.client.force_authenticate(user=self.manager)
 
-        response = self.client.post(
-            self.settlement_list_url(self.manager_club),
-            {"dry_run": True},
-            format="json",
-        )
+        response = self.client.get(self.settlement_preview_url(self.manager_club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["dry_run"], True)
-        self.assertEqual(response.data["created"], False)
         self.assertEqual(response.data["collected_by"], self.manager.id)
         self.assertFalse(response.data["can_approve"])
 
@@ -1067,7 +1095,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
 
         response = self.client.post(
             self.settlement_list_url(self.manager_club),
-            self.settlement_payload(collected_by=self.manager.id, dry_run=False),
+            self.settlement_payload(collected_by=self.manager.id),
             format="json",
         )
 
@@ -1084,7 +1112,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
 
         response = self.client.post(
             self.settlement_list_url(self.manager_club),
-            self.settlement_payload(collected_by=self.manager.id, dry_run=False),
+            self.settlement_payload(collected_by=self.manager.id),
             format="json",
             HTTP_ACCEPT_LANGUAGE="ar",
         )
@@ -1107,7 +1135,6 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             self.settlement_list_url(self.manager_denied_club),
             self.settlement_payload(
                 collected_by=self.manager_denied_collector.id,
-                dry_run=False,
             ),
             format="json",
         )
@@ -1140,7 +1167,6 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             self.settlement_list_url(self.manager_club),
             self.settlement_payload(
                 collected_by=manager_club_owner.id,
-                dry_run=False,
             ),
             format="json",
         )
@@ -1174,7 +1200,6 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             self.settlement_list_url(self.manager_club),
             self.settlement_payload(
                 collected_by=inactive_manager_employee.id,
-                dry_run=False,
             ),
             format="json",
         )
@@ -1187,7 +1212,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
 
         response = self.client.post(
             self.settlement_list_url(self.manager_club),
-            self.settlement_payload(collected_by=self.other_staff.id, dry_run=False),
+            self.settlement_payload(collected_by=self.other_staff.id),
             format="json",
         )
 
@@ -1199,36 +1224,30 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
 
         response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.owner.id, dry_run=False),
+            self.settlement_payload(collected_by=self.owner.id),
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_staff_can_post_dry_run_for_himself(self):
+    def test_staff_can_preview_himself_without_post(self):
         self.client.force_authenticate(user=self.staff)
 
-        response = self.client.post(
-            self.settlement_list_url(self.club),
-            {"dry_run": True},
-            format="json",
-        )
+        response = self.client.get(self.settlement_preview_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["dry_run"], True)
-        self.assertEqual(response.data["created"], False)
         self.assertEqual(response.data["collected_by"], self.staff.id)
         self.assertFalse(response.data["can_approve"])
 
     def test_settled_transactions_cannot_be_included_again(self):
         first_response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id, dry_run=False),
+            self.settlement_payload(collected_by=self.staff.id),
             format="json",
         )
         second_response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id, dry_run=False),
+            self.settlement_payload(collected_by=self.staff.id),
             format="json",
         )
 

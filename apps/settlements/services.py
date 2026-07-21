@@ -99,6 +99,25 @@ def get_settlement_candidate_transactions(*, access, collected_by, lock=False):
     )
 
 
+def get_filtered_settlement_candidate_transactions(
+    *,
+    access,
+    collected_by,
+    court=None,
+    lock=False,
+):
+    if court is not None and not access.can_access_court(court):
+        raise PermissionDenied("You cannot access this court.")
+    queryset = get_settlement_candidate_transactions(
+        access=access,
+        collected_by=collected_by,
+        lock=lock,
+    )
+    if court is not None:
+        queryset = queryset.filter(court=court)
+    return queryset
+
+
 def build_totals_by_payment_method(queryset):
     totals = {
         str(payment_method): Decimal("0.00")
@@ -128,7 +147,7 @@ def serialize_preview_transactions(transactions):
 
 
 def build_settlement_summary(
-    *, access, collected_by, actor, period_start, period_end, queryset
+    *, access, collected_by, actor, period_start, period_end, queryset, court=None
 ):
     transactions = list(queryset)
     aggregate = queryset.aggregate(total=Sum("amount"))
@@ -137,6 +156,8 @@ def build_settlement_summary(
         "club": access.club.id,
         "collected_by": collected_by.id,
         "collected_by_name": get_user_display_name(collected_by),
+        "court": court.id if court else None,
+        "court_name": court.name if court else "",
         "is_self_preview": bool(actor and collected_by.id == actor.id),
         "can_approve": can_approve,
         "approval_required": not can_approve,
@@ -149,15 +170,16 @@ def build_settlement_summary(
     }
 
 
-def build_settlement_preview(*, access, collected_by, actor):
+def build_settlement_preview(*, access, collected_by, actor, court=None):
     validate_preview_collected_by(
         access=access,
         collected_by=collected_by,
         actor=actor,
     )
-    queryset = get_settlement_candidate_transactions(
+    queryset = get_filtered_settlement_candidate_transactions(
         access=access,
         collected_by=collected_by,
+        court=court,
         lock=False,
     )
     first_transaction = queryset.first()
@@ -176,33 +198,33 @@ def build_settlement_preview(*, access, collected_by, actor):
         period_start=period_start,
         period_end=period_end,
         queryset=queryset,
+        court=court,
     )
 
 
-def preview_settlement(*, access, collected_by, actor):
-    preview = build_settlement_preview(
+def preview_settlement(*, access, collected_by, actor, court=None):
+    return build_settlement_preview(
         access=access,
         collected_by=collected_by,
         actor=actor,
+        court=court,
     )
-    preview["dry_run"] = True
-    preview["created"] = False
-    return preview
 
 
-def create_approved_settlement(*, access, collected_by, notes="", actor):
+def create_approved_settlement(*, access, collected_by, notes="", actor, court=None):
     try:
         with transaction.atomic():
-            validate_settlement_access(access=access)
+            validate_settlement_access(access=access, court=court)
             validate_approval_collected_by(
                 access=access,
                 collected_by=collected_by,
                 actor=actor,
             )
             candidates = list(
-                get_settlement_candidate_transactions(
+                get_filtered_settlement_candidate_transactions(
                     access=access,
                     collected_by=collected_by,
+                    court=court,
                     lock=True,
                 ).order_by("created", "id")
             )
@@ -222,7 +244,7 @@ def create_approved_settlement(*, access, collected_by, notes="", actor):
             )
             created_settlement = Settlement.objects.create(
                 club=access.club,
-                court=None,
+                court=court,
                 collected_by=collected_by,
                 period_start=period_start,
                 period_end=period_end,
@@ -255,7 +277,6 @@ def create_approved_settlement(*, access, collected_by, notes="", actor):
                 entity_type="Settlement",
                 entity_id=created_settlement.id,
                 after_data={
-                    "dry_run": False,
                     "settlement_id": created_settlement.id,
                     "court_id": created_settlement.court_id,
                     "collected_by_id": created_settlement.collected_by_id,
@@ -284,30 +305,24 @@ def process_settlement_request(
     *,
     access,
     actor,
-    collected_by=None,
-    dry_run=True,
+    collected_by,
+    court=None,
     notes="",
 ):
-    if collected_by is None:
-        collected_by = actor
-    if dry_run:
-        return preview_settlement(
-            access=access,
-            collected_by=collected_by,
-            actor=actor,
-        )
     return create_approved_settlement(
         access=access,
         collected_by=collected_by,
+        court=court,
         notes=notes,
         actor=actor,
     )
 
 
-def create_settlement(*, access, collected_by, notes="", created_by):
+def create_settlement(*, access, collected_by, notes="", created_by, court=None):
     return create_approved_settlement(
         access=access,
         collected_by=collected_by,
+        court=court,
         notes=notes,
         actor=created_by,
     )
