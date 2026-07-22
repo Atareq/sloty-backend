@@ -1,3 +1,5 @@
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -57,12 +59,18 @@ class MeAPITests(AccountAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_authenticated_user_gets_profile_with_active_memberships(self):
+        creator = self.create_user(
+            username="profile-creator",
+            first_name="Creator",
+            last_name="User",
+        )
         user = self.create_user(
             username="profile-user",
             email="profile@example.com",
             first_name="Profile",
             last_name="User",
             phone_number="+201000000001",
+            created_by=creator,
         )
         owner_club = self.create_club("El Nasr", "el-nasr")
         staff_club = self.create_club("Champions", "champions")
@@ -101,12 +109,17 @@ class MeAPITests(AccountAPITestCase):
                 "phone_number",
                 "is_active",
                 "is_platform_admin",
+                "account_created_by",
                 "memberships",
             },
         )
         self.assertEqual(response.data["id"], user.id)
         self.assertEqual(response.data["username"], user.username)
         self.assertFalse(response.data["is_platform_admin"])
+        self.assertEqual(
+            response.data["account_created_by"],
+            {"id": creator.id, "name": "Creator User"},
+        )
         self.assertNotIn("password", response.data)
 
         memberships = {item["id"]: item for item in response.data["memberships"]}
@@ -123,6 +136,29 @@ class MeAPITests(AccountAPITestCase):
             memberships[staff_membership.id]["court"],
             {"id": staff_court.id, "name": staff_court.name},
         )
+
+    def test_authenticated_user_without_creator_gets_null_account_created_by(self):
+        user = self.create_user(username="profile-user-without-creator")
+        self.client.force_authenticate(user=user)
+
+        response = self.client.get(reverse("me"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["account_created_by"])
+
+    def test_me_response_prefetches_creator_and_active_memberships(self):
+        creator = self.create_user(username="query-creator")
+        user = self.create_user(username="query-profile-user", created_by=creator)
+        club = self.create_club("Query Club", "query-club")
+        court = self.create_court(club, "Query Court")
+        self.create_membership(user, club, ClubMembership.Role.STAFF, court=court)
+        self.client.force_authenticate(user=user)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get(reverse("me"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertLessEqual(len(queries), 2)
 
 
 class JWTAPITests(AccountAPITestCase):

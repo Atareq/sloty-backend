@@ -24,6 +24,12 @@ SECRET_KEY = os.environ.get("SECRET_KEY")
 
 DEBUG = env_bool("DEBUG", default=False)
 
+SQL_QUERY_STATS_ENABLED = env_bool("SQL_QUERY_STATS_ENABLED", default=False)
+SQL_QUERY_STATS_VERBOSE = env_bool("SQL_QUERY_STATS_VERBOSE", default=False)
+SQL_QUERY_STATS_SLOW_QUERY_MS = float(
+    os.environ.get("SQL_QUERY_STATS_SLOW_QUERY_MS", "100")
+)
+
 ALLOWED_HOSTS = [
     host.strip()
     for host in os.environ.get("ALLOWED_HOSTS", "").split(",")
@@ -60,6 +66,7 @@ APPS = [
     "apps.settlements.apps.SettlementsConfig",
     "apps.audit.apps.AuditConfig",
     "apps.dashboard.apps.DashboardConfig",
+    "apps.reports.apps.ReportsConfig",
 ]
 
 DEBUG_APPS = []
@@ -118,9 +125,27 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "apps.common.middleware.SQLQueryStatsMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+        },
+    },
+    "loggers": {
+        "sloty.sql": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}
 
 ROOT_URLCONF = "config.urls"
 

@@ -35,7 +35,7 @@ Current repo reality:
 - Current implemented app: `apps/accounts/`
 - Current implemented domain apps: `apps/clubs/`, `apps/courts/`,
   `apps/bookings/`, `apps/transactions/`, `apps/settlements/`,
-  `apps/audit/`, and `apps/dashboard/`
+  `apps/audit/`, `apps/dashboard/`, and `apps/reports/`
 - Current shared app: `apps/common/`
 - Current public API routes are versioned under `/api/v1/`
 - Current API foundation endpoints include `/api/v1/schema/`,
@@ -45,6 +45,9 @@ Current repo reality:
 - Current account endpoints include `/api/v1/me/` and platform-admin-only
   `/api/v1/users/`
 - Current club users endpoint is `/api/v1/clubs/{club_slug}/users/`
+- Optional local SQL request summaries are controlled by
+  `SQL_QUERY_STATS_ENABLED`, `SQL_QUERY_STATS_VERBOSE`, and
+  `SQL_QUERY_STATS_SLOW_QUERY_MS`
 - Project docs live under `docs/`
 - Requirements are split into `requirements/base.txt` and `requirements/dev.txt`
 - Style tooling exists through `.pre-commit-config.yaml`, `pyproject.toml`, and
@@ -72,10 +75,12 @@ Current repo reality:
 - Sprint 10 adds logged transaction cancelling for safe corrections, excludes
   cancelled transactions from financial totals and settlements, and recalculates
   booking payment status from valid transactions
+- Court usage reporting adds a read-only `apps/reports/` analytics app and
+  `GET /api/v1/clubs/{club_slug}/reports/court-usage/`
 - Planned shared app name is `apps/common/`
 - Domain apps beyond `accounts`, `clubs`, `courts`, `bookings`,
-  `transactions`, `settlements`, `audit`, and `dashboard` are not implemented
-  yet
+  `transactions`, `settlements`, `audit`, `dashboard`, and `reports` are not
+  implemented yet
 
 Planned project direction:
 
@@ -149,6 +154,11 @@ Current implemented app:
   Sprint 4 transactions use `requires_digital_payment_reference` for manual
   payment-reference validation. Hold-expiry behavior remains future lifecycle
   work and must not be implemented in Sprint 4.
+- Future working-hour pricing must use child pricing periods tied explicitly to
+  `CourtWorkingHour`, not one global morning/night price on `Court` and not one
+  price field on `CourtWorkingHour`. Keep `Court.default_price` as the current
+  legacy pricing source until the dedicated pricing-period migration switches
+  booking creation, rescheduling, and availability pricing together.
 - Court working hours are court-scoped under
   `/api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`. They remain one
   `CourtWorkingHour` row per court plus weekday; do not move working-hour fields
@@ -292,6 +302,13 @@ Rules for the flow:
   helpers.
 - `User.is_platform_super_admin()` is a temporary compatibility helper that
   returns `is_platform_admin`.
+- `/api/v1/me/` exposes `account_created_by` as a stable nested object from
+  `User.created_by`, or `null` when the creator is unknown. This is the account
+  creator, not the membership creator.
+- `MeAPIView` must load `created_by` with `select_related()` and active
+  memberships with a `Prefetch(..., to_attr=...)` that selects `club` and
+  `court`; `UserMeSerializer` should consume the prefetched attribute instead
+  of issuing per-membership queries.
 - Do not add or reintroduce club-scoped business roles on `User`.
 - `/api/v1/users/` must not create active non-platform users; use the
   club-scoped membership endpoint for club owners, managers, and staff.
@@ -628,6 +645,38 @@ It is not a persisted booking status and must not be stored in the database.
 - Do not create `apps/dashboard/permissions.py` by default. If dashboard
   permissions need a wrapper, keep it centralized in `apps/clubs/permissions.py`.
 
+`apps/reports/`
+
+- Read-only analytics/reporting app. It owns larger business reports that
+  combine bookings, courts, working hours, staff, and transactions.
+- Current report endpoint is
+  `/api/v1/clubs/{club_slug}/reports/court-usage/`.
+- Reports have no models or migrations in the current MVP.
+- Report constants such as the 31-day maximum, usage statuses, period names,
+  evening boundary, and demand bucket size live in `apps/reports/constants.py`.
+- Report access is centralized through
+  `apps/clubs/access.py -> ClubAccessContext`. Platform admins, owners, and
+  managers may access the current court usage report. Staff cannot access it.
+- `CanViewClubReports` is a thin wrapper in `apps/clubs/permissions.py`; do not
+  create a separate reports permission architecture.
+- Court usage filters are `date_from`, `date_to`, optional `court`, `period`,
+  custom `hour_from`/`hour_to`, `staff`, and one usage `status`.
+- Court usage date ranges are inclusive from the API consumer perspective and
+  limited to 31 calendar days.
+- Default usage statuses are `CONFIRMED`, `COMPLETED`, and `NO_SHOW`. `HOLD`
+  is included only when explicitly requested. `CANCELLED` and `EXPIRED` are not
+  accepted for this report.
+- Court usage selects bookings by booking time overlap and clips occupied
+  minutes to the selected report period. Financial totals count each selected
+  booking once and sum non-cancelled attached transactions regardless of
+  transaction creation date.
+- Peak and low-demand analysis uses generated 60-minute working-hour buckets.
+  Low-demand output must include zero-demand generated buckets.
+- Keep report views thin and call report services. Do not query
+  `ClubMembership` in report views, serializers, or services; add scoped
+  helpers to `ClubAccessContext` when access logic changes.
+- Keep report tests with the report app under `apps/reports/tests/`.
+
 ## Dashboard, Unsettled Transactions, and Settlement Concepts
 
 ### Unsettled transactions are the source of truth
@@ -784,6 +833,10 @@ filtered lists.
 
 - Shared app for reusable infrastructure that is not owned by one business
   domain.
+- `apps/common/middleware.py` contains `SQLQueryStatsMiddleware`, a
+  development-only SQL request summary logger. It uses Django's
+  `connection.execute_wrapper()` and must stay disabled by default in
+  production and tests.
 - Egypt location constants live in `apps/common/egypt_locations.py`.
 - `get_governorate_choices()`, `get_all_city_choices()`,
   `get_city_choices(governorate_code)`, and validation helpers are the source

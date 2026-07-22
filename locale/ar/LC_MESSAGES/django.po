@@ -186,6 +186,34 @@ msgstr "لا يمكن إلغاء عمليات الدفع الخاصة بالحج
 msgid "Transactions can only be added to HOLD or CONFIRMED bookings."
 msgstr "يمكن إضافة عمليات الدفع إلى حجوزات الانتظار أو المؤكدة فقط."
 
+#: apps/reports/serializers.py
+msgid "date_to must be on or after date_from."
+msgstr "يجب أن يكون date_to في نفس يوم date_from أو بعده."
+
+#: apps/reports/serializers.py
+msgid "Court usage reports are limited to 31 calendar days."
+msgstr "تقارير استخدام الملاعب محدودة بـ 31 يوما تقويميا."
+
+#: apps/reports/serializers.py
+msgid "hour_from and hour_to are required for custom period."
+msgstr "hour_from و hour_to مطلوبان عند اختيار فترة مخصصة."
+
+#: apps/reports/serializers.py
+msgid "hour_to must be after hour_from."
+msgstr "يجب أن يكون hour_to بعد hour_from."
+
+#: apps/reports/serializers.py
+msgid "You cannot access this court."
+msgstr "لا يمكنك الوصول إلى هذا الملعب."
+
+#: apps/reports/serializers.py
+msgid "Selected staff must be active in this club."
+msgstr "يجب أن يكون الموظف المحدد نشطا في هذا النادي."
+
+#: apps/reports/serializers.py
+msgid "Invalid court usage status."
+msgstr "حالة استخدام الملعب غير صالحة."
+
 #~ msgid "This field is required when creating a settlement."
 #~ msgstr "هذا الحقل مطلوب عند إنشاء التسوية."
 

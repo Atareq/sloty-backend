@@ -33,6 +33,17 @@ Run the development server:
 python manage.py runserver
 ```
 
+Optional local SQL request summaries can be enabled in `.env`:
+
+```env
+SQL_QUERY_STATS_ENABLED=true
+SQL_QUERY_STATS_VERBOSE=false
+SQL_QUERY_STATS_SLOW_QUERY_MS=100
+```
+
+When enabled, API requests log one terminal line with method, path, status,
+query count, combined SQL time, and total request time.
+
 Swagger UI is available at:
 
 ```text
@@ -48,7 +59,8 @@ and test authenticated requests by providing a bearer token.
 - `POST /api/v1/auth/token/` obtains JWT access and refresh tokens.
 - `POST /api/v1/auth/token/refresh/` refreshes an access token.
 - `GET /api/v1/me/` returns the authenticated user's identity, platform admin
-  flag, and active club memberships for frontend club selection.
+  flag, account creator, and active club memberships for frontend club
+  selection.
 - `GET /api/v1/users/` manages base user accounts for platform admin users.
 - `POST /api/v1/users/` creates platform admin users only.
 
@@ -71,6 +83,10 @@ These claims are derived at token issue time and are not stored on `User`:
 
 Business APIs still verify active club access from the database through
 `ClubAccessContext`; clients must not treat JWT club/court claims as authority.
+
+`/api/v1/me/` always includes `account_created_by`. The value is a nested
+`{"id": ..., "name": ...}` object from `User.created_by`, or `null` for
+historical/system-created accounts.
 
 ## Club User Onboarding
 
@@ -449,6 +465,44 @@ Useful booking list filters for dashboard cards:
 - `overdue=true`
 - `remaining_amount_gt=0&ended=true`
 - `hold_expiring=true`
+
+## Reports Endpoints
+
+- `GET /api/v1/clubs/{club_slug}/reports/court-usage/`
+
+Court usage reporting is a read-only analytics endpoint owned by
+`apps/reports/`. It is separate from compact dashboard endpoints and does not
+change existing dashboard response contracts.
+
+Required filters:
+
+- `date_from`
+- `date_to`
+
+Optional filters:
+
+- `court`
+- `period` (`all_day`, `daytime`, `evening`, or `custom`)
+- `hour_from` and `hour_to` when `period=custom`
+- `staff`
+- `status` (`HOLD`, `CONFIRMED`, `COMPLETED`, or `NO_SHOW`)
+
+The date range is inclusive from the client perspective and limited to 31
+calendar days. Default usage includes `CONFIRMED`, `COMPLETED`, and `NO_SHOW`.
+`HOLD` is included only when requested explicitly. `CANCELLED` and `EXPIRED`
+are not accepted for this usage report.
+
+Stable validation codes include `REPORT_DATE_RANGE_INVALID`,
+`REPORT_DATE_RANGE_TOO_LARGE`, `CUSTOM_REPORT_HOURS_REQUIRED`,
+`INVALID_CUSTOM_REPORT_HOURS`, `REPORT_STAFF_NOT_IN_CLUB`, and
+`INVALID_COURT_USAGE_STATUS`.
+
+Financial totals are selected by booking time: matching bookings are found by
+overlap with the selected report scope, then the endpoint sums each booking's
+full `total_price` and non-cancelled attached transactions. Payments are not
+filtered by transaction creation date. Peak and low-demand rows use generated
+60-minute working-hour buckets, so zero-demand working hours can appear in
+low-demand results.
 
 ## Demo Seed Data
 

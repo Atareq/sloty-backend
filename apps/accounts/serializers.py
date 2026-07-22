@@ -116,7 +116,13 @@ class UserMembershipSerializer(serializers.ModelSerializer):
         )
 
 
+class AccountCreatorSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+
+
 class UserMeSerializer(serializers.ModelSerializer):
+    account_created_by = serializers.SerializerMethodField()
     memberships = serializers.SerializerMethodField()
 
     class Meta:
@@ -130,16 +136,30 @@ class UserMeSerializer(serializers.ModelSerializer):
             "phone_number",
             "is_active",
             "is_platform_admin",
+            "account_created_by",
             "memberships",
         )
         read_only_fields = fields
 
+    def get_account_created_by(self, obj):
+        creator = obj.created_by
+        if creator is None:
+            return None
+        return AccountCreatorSerializer(
+            {
+                "id": creator.id,
+                "name": get_token_name(creator),
+            }
+        ).data
+
     def get_memberships(self, obj):
-        memberships = (
-            obj.club_memberships.filter(is_active=True)
-            .select_related("club", "court")
-            .order_by("club__name", "role", "id")
-        )
+        memberships = getattr(obj, "active_memberships_for_me", None)
+        if memberships is None:
+            memberships = (
+                obj.club_memberships.filter(is_active=True)
+                .select_related("club", "court")
+                .order_by("club__name", "role", "id")
+            )
         return UserMembershipSerializer(memberships, many=True).data
 
 
