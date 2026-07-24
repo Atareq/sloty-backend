@@ -49,6 +49,27 @@ class ClubAccessContext:
         )
 
     @property
+    def active_manager_membership(self):
+        return next(
+            (
+                membership
+                for membership in self.active_memberships
+                if membership.role == ClubMembership.Role.MANAGER
+            ),
+            None,
+        )
+
+    @property
+    def manager_can_settle_transactions(self):
+        membership = self.active_manager_membership
+        return bool(membership and membership.manager_can_settle_transactions)
+
+    @property
+    def manager_can_change_pricing(self):
+        membership = self.active_manager_membership
+        return bool(membership and membership.manager_can_change_pricing)
+
+    @property
     def is_staff(self):
         return any(
             membership.role == ClubMembership.Role.STAFF
@@ -85,11 +106,7 @@ class ClubAccessContext:
         return self.is_platform_admin or self.is_owner
 
     def can_list_club_users(self):
-        return (
-            self.is_platform_admin
-            or self.is_owner
-            or (self.is_manager and self.club.manager_can_settle_transactions)
-        )
+        return self.is_platform_admin or self.is_owner or self.is_manager
 
     def can_create_membership(self, role, court=None):
         if not self.has_any_club_access():
@@ -114,15 +131,11 @@ class ClubAccessContext:
             return False
         if self.is_platform_admin or self.is_owner:
             return True
-        if self.is_manager:
-            return (
-                set(attrs) == {"default_price"} and self.club.manager_can_change_pricing
-            )
         return False
 
     def can_manage_working_hours(self, court):
         return self.can_access_court(court) and (
-            self.is_platform_admin or self.is_owner or self.is_manager
+            self.is_platform_admin or self.is_owner or self.manager_can_change_pricing
         )
 
     def can_access_court(self, court):
@@ -164,7 +177,7 @@ class ClubAccessContext:
     def can_manage_settlements(self):
         if self.is_platform_admin or self.is_owner:
             return True
-        return self.is_manager and self.club.manager_can_settle_transactions
+        return self.manager_can_settle_transactions
 
     def can_preview_settlement_for_user(self, user):
         if not self.has_any_club_access():
@@ -177,7 +190,7 @@ class ClubAccessContext:
             return False
         if self.is_platform_admin or self.is_owner:
             return True
-        if self.is_manager and self.club.manager_can_settle_transactions:
+        if self.manager_can_settle_transactions:
             return ClubMembership.Role.OWNER not in roles and bool(
                 roles
                 & {
@@ -198,7 +211,7 @@ class ClubAccessContext:
             return False
         if self.is_platform_admin or self.is_owner:
             return True
-        if self.is_manager and self.club.manager_can_settle_transactions:
+        if self.manager_can_settle_transactions:
             return ClubMembership.Role.OWNER not in roles and bool(
                 roles
                 & {
@@ -332,7 +345,7 @@ class ClubAccessContext:
         queryset = ClubMembership.objects.filter(club=self.club)
         if self.is_platform_admin or self.is_owner:
             return queryset
-        if self.is_manager and self.club.manager_can_settle_transactions:
+        if self.is_manager:
             return queryset.filter(
                 role__in={
                     ClubMembership.Role.MANAGER,

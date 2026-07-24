@@ -153,7 +153,8 @@ inactive
 Add court status:
 active
 inactive
-Add court default price.
+Keep court default price only as legacy migration data.
+Add working-hour pricing periods for live booking prices.
 Add court sport type.
 Add court working hours.
 Add court slot duration.
@@ -175,7 +176,7 @@ Create/edit club form.
 Owner club view.
 Court list under club.
 Create/edit court form.
-Configure price.
+Configure pricing periods through the weekly court working-hours endpoint.
 Configure working hours.
 Configure slot duration.
 Configure payment reference flag.

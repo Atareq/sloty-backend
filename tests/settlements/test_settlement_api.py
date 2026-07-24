@@ -63,6 +63,7 @@ class SettlementAPITestCase(APITestCase):
         role: str,
         court: Court | None = None,
         is_active: bool = True,
+        **extra_fields,
     ) -> ClubMembership:
         return ClubMembership.objects.create(
             club=club,
@@ -70,6 +71,7 @@ class SettlementAPITestCase(APITestCase):
             role=role,
             court=court,
             is_active=is_active,
+            **extra_fields,
         )
 
     def time_at(self, hour: int):
@@ -246,11 +248,7 @@ class SettlementAccessTests(SettlementAPITestCase):
         self.manager = self.create_user("access-manager")
         self.staff = self.create_user("access-staff")
         self.other_user = self.create_user("access-other")
-        self.club = self.create_club(
-            "Access Club",
-            slug="settlement-access",
-            manager_can_settle_transactions=True,
-        )
+        self.club = self.create_club("Access Club", slug="settlement-access")
         self.other_club = self.create_club(
             "Other Access Club",
             slug="other-settlement-access",
@@ -261,7 +259,12 @@ class SettlementAccessTests(SettlementAPITestCase):
         self.create_transaction(self.booking, created_by=self.staff)
         self.settlement = self.create_settlement(self.club, court=self.court)
         self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
+        self.manager_membership = self.create_membership(
+            self.manager,
+            self.club,
+            ClubMembership.Role.MANAGER,
+            manager_can_settle_transactions=True,
+        )
         self.create_membership(
             self.staff,
             self.club,
@@ -318,8 +321,8 @@ class SettlementAccessTests(SettlementAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_manager_cannot_access_settlements_when_flag_disabled(self):
-        self.club.manager_can_settle_transactions = False
-        self.club.save(update_fields=["manager_can_settle_transactions"])
+        self.manager_membership.manager_can_settle_transactions = False
+        self.manager_membership.save(update_fields=["manager_can_settle_transactions"])
         self.client.force_authenticate(user=self.manager)
 
         response = self.client.get(self.settlement_list_url(self.club))
@@ -362,12 +365,10 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.manager_club = self.create_club(
             "Manager Settlement Club",
             slug="manager-settlement-preview",
-            manager_can_settle_transactions=True,
         )
         self.manager_denied_club = self.create_club(
             "Manager Denied Settlement Club",
             slug="manager-denied-settlement-preview",
-            manager_can_settle_transactions=False,
         )
         self.other_club = self.create_club("Other Preview Club", slug="other-preview")
         self.court = self.create_court(self.club, "Preview Court")
@@ -383,6 +384,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             self.manager,
             self.manager_club,
             ClubMembership.Role.MANAGER,
+            manager_can_settle_transactions=True,
         )
         self.create_membership(
             self.manager_without_permission,

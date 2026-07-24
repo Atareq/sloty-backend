@@ -116,3 +116,47 @@ class CourtWorkingHour(models.Model):
 
     def __str__(self) -> str:
         return f"{self.court} - {self.get_weekday_display()}"
+
+
+class CourtWorkingHourPricePeriod(models.Model):
+    working_hour = models.ForeignKey(
+        CourtWorkingHour,
+        on_delete=models.CASCADE,
+        related_name="pricing_periods",
+    )
+    starts_at = models.TimeField()
+    ends_at = models.TimeField()
+    price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+
+    class Meta:
+        ordering = ("starts_at", "id")
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(starts_at__lt=models.F("ends_at")),
+                name="court_price_period_starts_before_ends",
+            ),
+            models.CheckConstraint(
+                check=models.Q(price__gte=Decimal("0.00")),
+                name="court_price_period_price_non_negative",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["working_hour", "starts_at"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        if self.starts_at and self.ends_at and self.starts_at >= self.ends_at:
+            errors["starts_at"] = "starts_at must be before ends_at."
+        if self.price is not None and self.price < Decimal("0.00"):
+            errors["price"] = "Price must be greater than or equal to zero."
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self) -> str:
+        return f"{self.working_hour} - {self.starts_at}-{self.ends_at}"

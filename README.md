@@ -138,8 +138,8 @@ requests.
 - `PUT /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
 
 Court working hours are court-scoped. The nested `working-hours` route returns
-the selected court name and seven weekday rows. `PUT` replaces the weekly
-schedule for that court:
+the selected court name, `pricing_configured`, and seven weekday rows. `PUT`
+replaces the weekly schedule and pricing for that court:
 
 ```json
 {
@@ -148,21 +148,41 @@ schedule for that court:
       "weekday": 0,
       "opens_at": "10:00:00",
       "closes_at": "23:00:00",
-      "is_closed": false
+      "is_closed": false,
+      "pricing_periods": [
+        {
+          "starts_at": "10:00:00",
+          "ends_at": "18:00:00",
+          "price": "200.00"
+        },
+        {
+          "starts_at": "18:00:00",
+          "ends_at": "23:00:00",
+          "price": "300.00"
+        }
+      ]
     },
     {
       "weekday": 1,
       "opens_at": null,
       "closes_at": null,
-      "is_closed": true
+      "is_closed": true,
+      "pricing_periods": []
     }
   ]
 }
 ```
 
 The older `/api/v1/clubs/{club_slug}/court-working-hours/` row-level route is
-kept temporarily for compatibility. New clients should use the nested court
-route.
+kept temporarily for GET compatibility. POST/PATCH writes are rejected with
+`WORKING_HOURS_USE_WEEKLY_ENDPOINT`; new clients must use the nested court
+route so working hours and pricing remain atomic.
+
+Court create/update requests no longer accept `default_price`. Court responses
+include `pricing_configured`, `minimum_slot_price`, and `maximum_slot_price`.
+`Court.default_price` remains in the database only as legacy migration data.
+Every open working-hours row must have complete, non-overlapping pricing
+coverage with boundaries aligned to `slot_duration_minutes`.
 
 ## Sprint 3 Booking Endpoints
 
@@ -183,9 +203,19 @@ Booking overlap validation treats `HOLD`, `CONFIRMED`, `COMPLETED`, and
 `EXPIRED` bookings release their time slot for a new booking.
 
 The slots endpoint generates availability rows from a selected court's working
-hours and slot duration. It accepts `court` plus either `date` or
-`date_from`/`date_to` query parameters. `FREE` may appear as a response-level
-slot state for UI display, but it is not a persisted booking status.
+hours, pricing periods, and slot duration. It accepts `court` plus either
+`date` or `date_from`/`date_to` query parameters. Each slot includes
+`slot_price`, the current configured price for that specific slot. `FREE` and
+`UNAVAILABLE` may appear as response-level slot states for UI display, but they
+are not persisted booking statuses.
+
+New booking and reschedule prices are calculated from working-hour pricing
+periods and stored in `Booking.total_price` as a historical snapshot. Existing
+booking snapshots are not recalculated when court pricing changes. Booking
+times must be inside working hours, fully priced, and aligned to the court slot
+grid. Pricing errors use `BOOKING_OUTSIDE_WORKING_HOURS`,
+`BOOKING_PRICE_NOT_CONFIGURED`, `BOOKING_MULTIDAY_NOT_SUPPORTED`, and
+`BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID`.
 
 ## Transaction Endpoints
 
@@ -334,8 +364,9 @@ Mark-settled remains for legacy `PENDING` settlements and rejects already
 `SETTLED` settlements.
 
 Platform admins and owners can manage settlements. Managers can manage
-settlements only when the club has `manager_can_settle_transactions=True`.
-Staff cannot access settlement endpoints in Sprint 6.
+settlements only when their club membership has
+`manager_can_settle_transactions=True`. Staff cannot access settlement
+endpoints in Sprint 6.
 
 Useful settlement list filters:
 
@@ -500,9 +531,10 @@ Stable validation codes include `REPORT_DATE_RANGE_INVALID`,
 Financial totals are selected by booking time: matching bookings are found by
 overlap with the selected report scope, then the endpoint sums each booking's
 full `total_price` and non-cancelled attached transactions. Payments are not
-filtered by transaction creation date. Peak and low-demand rows use generated
-60-minute working-hour buckets, so zero-demand working hours can appear in
-low-demand results.
+filtered by transaction creation date. Peak and low-demand rows use fixed
+60-minute clock buckets, so zero-demand working hours can appear in low-demand
+results. Multi-day booking financials appear only on the booking's local start
+date in `usage_by_day`; null creators are labeled as localized `Unknown`.
 
 ## Demo Seed Data
 

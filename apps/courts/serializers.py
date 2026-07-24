@@ -1,9 +1,13 @@
-from decimal import Decimal
-
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
-from apps.courts.models import Court, CourtWorkingHour
+from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
+from apps.courts.services import (
+    get_court_pricing_summary,
+    pricing_configured_for_court,
+    validate_slot_duration_against_pricing,
+)
 
 
 def validate_positive(value, field_name):
@@ -11,7 +15,23 @@ def validate_positive(value, field_name):
         raise serializers.ValidationError({field_name: "Must be greater than 0."})
 
 
+class CourtWorkingHourPricePeriodSerializer(serializers.ModelSerializer):
+    price = serializers.DecimalField(max_digits=10, decimal_places=2)
+
+    class Meta:
+        model = CourtWorkingHourPricePeriod
+        fields = (
+            "id",
+            "starts_at",
+            "ends_at",
+            "price",
+        )
+        read_only_fields = ("id",)
+
+
 class CourtWorkingHourSerializer(serializers.ModelSerializer):
+    pricing_periods = CourtWorkingHourPricePeriodSerializer(many=True, read_only=True)
+
     class Meta:
         model = CourtWorkingHour
         fields = (
@@ -21,8 +41,9 @@ class CourtWorkingHourSerializer(serializers.ModelSerializer):
             "opens_at",
             "closes_at",
             "is_closed",
+            "pricing_periods",
         )
-        read_only_fields = ("id",)
+        read_only_fields = ("id", "pricing_periods")
 
     def validate(self, attrs):
         access = self.context["club_access"]
@@ -80,6 +101,7 @@ class CourtWorkingHourNestedRowSerializer(serializers.Serializer):
     opens_at = serializers.TimeField(required=False, allow_null=True)
     closes_at = serializers.TimeField(required=False, allow_null=True)
     is_closed = serializers.BooleanField(default=False)
+    pricing_periods = CourtWorkingHourPricePeriodSerializer(many=True, required=False)
 
     def validate(self, attrs):
         is_closed = attrs.get("is_closed", False)
@@ -107,6 +129,7 @@ class CourtWorkingHourNestedRowSerializer(serializers.Serializer):
 class CourtWeeklyWorkingHoursSerializer(serializers.Serializer):
     court = serializers.IntegerField(read_only=True)
     court_name = serializers.CharField(read_only=True)
+    pricing_configured = serializers.BooleanField(read_only=True)
     working_hours = CourtWorkingHourNestedRowSerializer(many=True)
 
     def validate_working_hours(self, value):
@@ -117,6 +140,10 @@ class CourtWeeklyWorkingHoursSerializer(serializers.Serializer):
 
 
 class CourtListSerializer(serializers.ModelSerializer):
+    pricing_configured = serializers.SerializerMethodField()
+    minimum_slot_price = serializers.SerializerMethodField()
+    maximum_slot_price = serializers.SerializerMethodField()
+
     class Meta:
         model = Court
         fields = (
@@ -124,18 +151,32 @@ class CourtListSerializer(serializers.ModelSerializer):
             "club",
             "name",
             "sport_type",
-            "default_price",
             "slot_duration_minutes",
             "is_active",
             "requires_digital_payment_reference",
             "internal_hold_expiry_hours",
+            "pricing_configured",
+            "minimum_slot_price",
+            "maximum_slot_price",
         )
         read_only_fields = fields
+
+    def get_pricing_configured(self, obj):
+        return pricing_configured_for_court(obj)
+
+    def get_minimum_slot_price(self, obj):
+        return get_court_pricing_summary(obj)["minimum_slot_price"]
+
+    def get_maximum_slot_price(self, obj):
+        return get_court_pricing_summary(obj)["maximum_slot_price"]
 
 
 class CourtDetailSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     working_hours = CourtWorkingHourSerializer(many=True, read_only=True)
+    pricing_configured = serializers.SerializerMethodField()
+    minimum_slot_price = serializers.SerializerMethodField()
+    maximum_slot_price = serializers.SerializerMethodField()
 
     class Meta:
         model = Court
@@ -144,11 +185,13 @@ class CourtDetailSerializer(serializers.ModelSerializer):
             "club",
             "name",
             "sport_type",
-            "default_price",
             "slot_duration_minutes",
             "is_active",
             "requires_digital_payment_reference",
             "internal_hold_expiry_hours",
+            "pricing_configured",
+            "minimum_slot_price",
+            "maximum_slot_price",
             "notes",
             "created_by",
             "created",
@@ -156,6 +199,15 @@ class CourtDetailSerializer(serializers.ModelSerializer):
             "working_hours",
         )
         read_only_fields = fields
+
+    def get_pricing_configured(self, obj):
+        return pricing_configured_for_court(obj)
+
+    def get_minimum_slot_price(self, obj):
+        return get_court_pricing_summary(obj)["minimum_slot_price"]
+
+    def get_maximum_slot_price(self, obj):
+        return get_court_pricing_summary(obj)["maximum_slot_price"]
 
 
 class CourtCreateSerializer(serializers.ModelSerializer):
@@ -165,7 +217,6 @@ class CourtCreateSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "sport_type",
-            "default_price",
             "slot_duration_minutes",
             "is_active",
             "requires_digital_payment_reference",
@@ -177,9 +228,9 @@ class CourtCreateSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         access = self.context["club_access"]
 
-        if attrs.get("default_price", Decimal("0.00")) < Decimal("0.00"):
+        if "default_price" in self.initial_data:
             raise serializers.ValidationError(
-                {"default_price": "Must be greater than or equal to 0."}
+                {"default_price": _("Court default_price is deprecated.")}
             )
         validate_positive(
             attrs.get("slot_duration_minutes", 60),
@@ -205,7 +256,6 @@ class CourtUpdateSerializer(serializers.ModelSerializer):
         fields = (
             "name",
             "sport_type",
-            "default_price",
             "slot_duration_minutes",
             "is_active",
             "requires_digital_payment_reference",
@@ -217,12 +267,16 @@ class CourtUpdateSerializer(serializers.ModelSerializer):
         access = self.context["club_access"]
         court = self.instance
 
-        if "default_price" in attrs and attrs["default_price"] < Decimal("0.00"):
+        if "default_price" in self.initial_data:
             raise serializers.ValidationError(
-                {"default_price": "Must be greater than or equal to 0."}
+                {"default_price": _("Court default_price is deprecated.")}
             )
         if "slot_duration_minutes" in attrs:
             validate_positive(attrs["slot_duration_minutes"], "slot_duration_minutes")
+            validate_slot_duration_against_pricing(
+                court,
+                attrs["slot_duration_minutes"],
+            )
         if "internal_hold_expiry_hours" in attrs:
             validate_positive(
                 attrs["internal_hold_expiry_hours"],
@@ -230,10 +284,6 @@ class CourtUpdateSerializer(serializers.ModelSerializer):
             )
 
         if not access.can_update_court(court, attrs):
-            if access.is_manager and set(attrs) == {"default_price"}:
-                raise PermissionDenied(
-                    "This club does not allow managers to change pricing."
-                )
             raise PermissionDenied("You cannot update this court.")
 
         return attrs

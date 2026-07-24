@@ -155,11 +155,14 @@ class CourtUsageReportTests(APITestCase):
 
     def create_working_hours(self, court, opens_at, closes_at):
         for weekday in CourtWorkingHour.Weekday.values:
-            CourtWorkingHour.objects.create(
+            CourtWorkingHour.objects.update_or_create(
                 court=court,
                 weekday=weekday,
-                opens_at=opens_at,
-                closes_at=closes_at,
+                defaults={
+                    "opens_at": opens_at,
+                    "closes_at": closes_at,
+                    "is_closed": False,
+                },
             )
 
     def time_at(self, hour=0, minute=0, day=6):
@@ -307,6 +310,92 @@ class CourtUsageReportTests(APITestCase):
             item["booking_count"] for item in response.data["low_demand_hours"]
         }
         self.assertIn(0, low_demand_counts)
+
+    def test_demand_buckets_use_fixed_clock_boundaries(self):
+        CourtWorkingHour.objects.filter(court=self.court).delete()
+        self.create_working_hours(
+            self.court,
+            opens_at=time(8, 30),
+            closes_at=time(10),
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.url(), self.params(court=self.court.id))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        buckets = {
+            (item["hour_from"], item["hour_to"]): item
+            for item in response.data["low_demand_hours"]
+        }
+        self.assertEqual(buckets[("08:00:00", "09:00:00")]["available_minutes"], 30)
+        self.assertEqual(buckets[("09:00:00", "10:00:00")]["available_minutes"], 60)
+
+    def test_multiday_booking_financials_count_once_on_local_start_date(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            start_time=self.time_at(23, day=6),
+            end_time=self.time_at(1, day=7),
+            total_price=Decimal("800.00"),
+        )
+        self.create_transaction(booking, amount=Decimal("200.00"))
+        CourtWorkingHour.objects.filter(court=self.court).delete()
+        self.create_working_hours(
+            self.court,
+            opens_at=time(0),
+            closes_at=time(23, 59),
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(
+            self.url(),
+            {
+                "date_from": "2026-07-06",
+                "date_to": "2026-07-07",
+                "court": self.court.id,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_day = {item["date"]: item for item in response.data["usage_by_day"]}
+        self.assertEqual(
+            by_day["2026-07-06"]["financial"]["total_booking_value"],
+            "1500.00",
+        )
+        self.assertEqual(
+            by_day["2026-07-07"]["financial"]["total_booking_value"],
+            "0.00",
+        )
+
+    def test_null_created_by_returns_localized_unknown_staff(self):
+        self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            created_by=None,
+            total_price=Decimal("100.00"),
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.url(), self.params(court=self.court.id))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        unknown = next(
+            item
+            for item in response.data["staff_booking_activity"]
+            if item["staff"] is None
+        )
+        self.assertEqual(unknown["staff_name"], "Unknown")
+
+        self.client.credentials(HTTP_ACCEPT_LANGUAGE="ar")
+        arabic_response = self.client.get(self.url(), self.params(court=self.court.id))
+        arabic_unknown = next(
+            item
+            for item in arabic_response.data["staff_booking_activity"]
+            if item["staff"] is None
+        )
+        self.assertEqual(arabic_unknown["staff_name"], "غير معروف")
 
     def test_validation_error_codes_are_stable(self):
         self.client.force_authenticate(user=self.owner)

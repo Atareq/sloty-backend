@@ -8,7 +8,7 @@ from apps.accounts.models import User
 from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
-from apps.courts.models import Court, CourtWorkingHour
+from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
@@ -59,6 +59,7 @@ CLUB_SPECS = (
         "manager_can_change_pricing": False,
     },
 )
+CLUB_SPECS_BY_KEY = {spec["key"]: spec for spec in CLUB_SPECS}
 
 BOOKING_SPECS = (
     ("hold", Booking.Status.HOLD, "Hold Customer", 10),
@@ -172,10 +173,6 @@ class Command(BaseCommand):
                     "city": spec["city"],
                     "address": spec["address"],
                     "is_active": True,
-                    "manager_can_settle_transactions": spec[
-                        "manager_can_settle_transactions"
-                    ],
-                    "manager_can_change_pricing": spec["manager_can_change_pricing"],
                     "created_by": users["platform_admin"],
                 },
             )
@@ -207,13 +204,21 @@ class Command(BaseCommand):
         for club_courts in courts.values():
             for court in club_courts.values():
                 for weekday in CourtWorkingHour.Weekday.values:
-                    CourtWorkingHour.objects.update_or_create(
+                    working_hour, _ = CourtWorkingHour.objects.update_or_create(
                         court=court,
                         weekday=weekday,
                         defaults={
                             "opens_at": time(8, 0),
                             "closes_at": time(23, 0),
                             "is_closed": False,
+                        },
+                    )
+                    CourtWorkingHourPricePeriod.objects.update_or_create(
+                        working_hour=working_hour,
+                        starts_at=time(8, 0),
+                        defaults={
+                            "ends_at": time(23, 0),
+                            "price": court.default_price,
                         },
                     )
 
@@ -245,6 +250,18 @@ class Command(BaseCommand):
                     role=role,
                     defaults={
                         "court": court,
+                        "manager_can_settle_transactions": (
+                            role == ClubMembership.Role.MANAGER
+                            and CLUB_SPECS_BY_KEY[club_key][
+                                "manager_can_settle_transactions"
+                            ]
+                        ),
+                        "manager_can_change_pricing": (
+                            role == ClubMembership.Role.MANAGER
+                            and CLUB_SPECS_BY_KEY[club_key][
+                                "manager_can_change_pricing"
+                            ]
+                        ),
                         "is_active": True,
                         "created_by": users["platform_admin"],
                     },

@@ -53,6 +53,7 @@ class ClubAPITestCase(APITestCase):
         role: str,
         court: Court | None = None,
         is_active: bool = True,
+        **extra_fields,
     ) -> ClubMembership:
         return ClubMembership.objects.create(
             club=club,
@@ -60,6 +61,7 @@ class ClubAPITestCase(APITestCase):
             role=role,
             court=court,
             is_active=is_active,
+            **extra_fields,
         )
 
     def list_ids(self, response):
@@ -211,8 +213,10 @@ class ClubAPITests(ClubAPITestCase):
         club = self.create_club("Default Club")
 
         self.assertTrue(club.is_active)
-        self.assertFalse(club.manager_can_settle_transactions)
-        self.assertFalse(club.manager_can_change_pricing)
+        self.assertFalse(
+            hasattr(club, "manager_can_settle_transactions"),
+        )
+        self.assertFalse(hasattr(club, "manager_can_change_pricing"))
 
     def test_club_can_be_deactivated_with_patch(self):
         club = self.create_club("Deactivate Club")
@@ -508,6 +512,8 @@ class ClubMembershipAPITests(ClubAPITestCase):
             self.club,
             ClubMembership.Role.MANAGER,
             "nested-manager",
+            manager_can_settle_transactions=True,
+            manager_can_change_pricing=True,
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -515,6 +521,48 @@ class ClubMembershipAPITests(ClubAPITestCase):
         membership = ClubMembership.objects.get(user=user, club=self.club)
         self.assertEqual(membership.role, ClubMembership.Role.MANAGER)
         self.assertIsNone(membership.court)
+        self.assertTrue(membership.manager_can_settle_transactions)
+        self.assertTrue(membership.manager_can_change_pricing)
+        self.assertTrue(response.data["manager_can_settle_transactions"])
+        self.assertTrue(response.data["manager_can_change_pricing"])
+
+    def test_non_manager_membership_cannot_enable_manager_permissions(self):
+        self.authenticate_platform_admin()
+
+        response = self.post_membership(
+            self.club,
+            self.owner,
+            ClubMembership.Role.OWNER,
+            manager_can_settle_transactions=True,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "manager_permissions")
+
+    def test_owner_can_update_manager_permission_flags(self):
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        manager_membership = self.create_membership(
+            self.manager,
+            self.club,
+            ClubMembership.Role.MANAGER,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.patch(
+            self.membership_detail_url(self.club, manager_membership),
+            {
+                "manager_can_settle_transactions": True,
+                "manager_can_change_pricing": False,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        manager_membership.refresh_from_db()
+        self.assertTrue(manager_membership.manager_can_settle_transactions)
+        self.assertFalse(manager_membership.manager_can_change_pricing)
+        self.assertTrue(response.data["manager_can_settle_transactions"])
+        self.assertFalse(response.data["manager_can_change_pricing"])
 
     def test_platform_admin_can_create_staff_with_nested_user_payload_and_court(self):
         self.authenticate_platform_admin()
@@ -846,15 +894,10 @@ class ClubUserListAPITests(ClubAPITestCase):
         )
         self.inactive_staff = self.create_user("club-users-inactive-staff")
         self.other_staff = self.create_user("club-users-other-staff")
-        self.club = self.create_club(
-            "Club Users Club",
-            slug="club-users",
-            manager_can_settle_transactions=True,
-        )
+        self.club = self.create_club("Club Users Club", slug="club-users")
         self.restricted_club = self.create_club(
             "Restricted Club Users Club",
             slug="restricted-club-users",
-            manager_can_settle_transactions=False,
         )
         self.other_club = self.create_club(
             "Other Club Users Club",
@@ -872,6 +915,7 @@ class ClubUserListAPITests(ClubAPITestCase):
             self.manager,
             self.club,
             ClubMembership.Role.MANAGER,
+            manager_can_settle_transactions=True,
         )
         self.restricted_manager_membership = self.create_membership(
             self.restricted_manager,
@@ -953,12 +997,13 @@ class ClubUserListAPITests(ClubAPITestCase):
         self.assertNotIn(self.inactive_staff.id, self.list_ids(response))
         self.assertNotIn(self.other_staff.id, self.list_ids(response))
 
-    def test_manager_without_settlement_permission_cannot_list_users(self):
+    def test_manager_without_settlement_permission_can_list_active_employees(self):
         self.client.force_authenticate(user=self.restricted_manager)
 
         response = self.client.get(self.club_user_list_url(self.restricted_club))
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {self.restricted_manager.id})
 
     def test_staff_cannot_list_club_users(self):
         self.client.force_authenticate(user=self.staff)
@@ -1116,12 +1161,7 @@ class ClubUserListResponseFieldAPITests(ClubAPITestCase):
             first_name="Inactive",
             phone_number="+201000000104",
         )
-        self.club = self.create_club(
-            "Club Users Club",
-            slug="club-users",
-            manager_can_settle_transactions=True,
-            manager_can_change_pricing=True,
-        )
+        self.club = self.create_club("Club Users Club", slug="club-users")
         self.other_club = self.create_club(
             "Other Club Users Club",
             slug="other-club-users",
@@ -1138,6 +1178,8 @@ class ClubUserListResponseFieldAPITests(ClubAPITestCase):
             self.manager,
             self.club,
             ClubMembership.Role.MANAGER,
+            manager_can_settle_transactions=True,
+            manager_can_change_pricing=True,
         )
         self.staff_membership = self.create_membership(
             self.staff,

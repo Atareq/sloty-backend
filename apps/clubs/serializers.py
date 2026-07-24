@@ -54,8 +54,6 @@ class ClubListSerializer(serializers.ModelSerializer):
             "city",
             "phone_number",
             "is_active",
-            "manager_can_settle_transactions",
-            "manager_can_change_pricing",
             "created",
             "modified",
         )
@@ -77,8 +75,6 @@ class ClubDetailSerializer(serializers.ModelSerializer):
             "phone_number",
             "notes",
             "is_active",
-            "manager_can_settle_transactions",
-            "manager_can_change_pricing",
             "created_by",
             "created",
             "modified",
@@ -99,8 +95,6 @@ class ClubCreateSerializer(ClubLocationValidationMixin, serializers.ModelSeriali
             "phone_number",
             "notes",
             "is_active",
-            "manager_can_settle_transactions",
-            "manager_can_change_pricing",
         )
         read_only_fields = ("id",)
         extra_kwargs = {
@@ -133,8 +127,6 @@ class ClubUpdateSerializer(ClubLocationValidationMixin, serializers.ModelSeriali
             "phone_number",
             "notes",
             "is_active",
-            "manager_can_settle_transactions",
-            "manager_can_change_pricing",
         )
 
     def validate(self, attrs):
@@ -199,12 +191,15 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
             "user_summary",
             "role",
             "court",
+            "manager_can_settle_transactions",
+            "manager_can_change_pricing",
             "is_active",
             "created_by",
             "created",
             "modified",
         )
         read_only_fields = ("id", "created_by", "created", "modified")
+        validators = []
 
     def validate(self, attrs):
         access = self.context["club_access"]
@@ -212,6 +207,14 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
         user = attrs.get("user", getattr(self.instance, "user", None))
         role = attrs.get("role", getattr(self.instance, "role", None))
         court = attrs.get("court", getattr(self.instance, "court", None))
+        manager_can_settle_transactions = attrs.get(
+            "manager_can_settle_transactions",
+            getattr(self.instance, "manager_can_settle_transactions", False),
+        )
+        manager_can_change_pricing = attrs.get(
+            "manager_can_change_pricing",
+            getattr(self.instance, "manager_can_change_pricing", False),
+        )
         is_active = attrs.get(
             "is_active",
             getattr(self.instance, "is_active", True),
@@ -233,6 +236,17 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
         if role == ClubMembership.Role.STAFF and not court:
             raise serializers.ValidationError(
                 {"court": "STAFF memberships require a court."}
+            )
+        if role != ClubMembership.Role.MANAGER and (
+            manager_can_settle_transactions or manager_can_change_pricing
+        ):
+            raise serializers.ValidationError(
+                {
+                    "manager_permissions": (
+                        "Manager permission flags are only valid for "
+                        "MANAGER memberships."
+                    )
+                }
             )
         if court and court.club_id != club.id:
             raise serializers.ValidationError(
@@ -352,7 +366,7 @@ class ClubUserListSerializer(serializers.ModelSerializer):
             return True
         return (
             membership.role == ClubMembership.Role.MANAGER
-            and membership.club.manager_can_change_pricing
+            and membership.manager_can_change_pricing
         )
 
     def get_court_name(self, membership):
@@ -361,17 +375,19 @@ class ClubUserListSerializer(serializers.ModelSerializer):
         return membership.court.name
 
     def get_can_manage_working_hours(self, membership):
-        return membership.role in {
-            ClubMembership.Role.OWNER,
-            ClubMembership.Role.MANAGER,
-        }
+        if membership.role == ClubMembership.Role.OWNER:
+            return True
+        return (
+            membership.role == ClubMembership.Role.MANAGER
+            and membership.manager_can_change_pricing
+        )
 
     def get_can_manage_settlements(self, membership):
         if membership.role == ClubMembership.Role.OWNER:
             return True
         return (
             membership.role == ClubMembership.Role.MANAGER
-            and membership.club.manager_can_settle_transactions
+            and membership.manager_can_settle_transactions
         )
 
 
@@ -388,12 +404,25 @@ class ClubMembershipCreateSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
     )
+    manager_can_settle_transactions = serializers.BooleanField(
+        required=False,
+        default=False,
+    )
+    manager_can_change_pricing = serializers.BooleanField(
+        required=False,
+        default=False,
+    )
     is_active = serializers.BooleanField(required=False, default=True, write_only=True)
 
     def validate(self, attrs):
         access = self.context["club_access"]
         role = attrs["role"]
         court = attrs.get("court")
+        manager_can_settle_transactions = attrs.get(
+            "manager_can_settle_transactions",
+            False,
+        )
+        manager_can_change_pricing = attrs.get("manager_can_change_pricing", False)
         user_payload = attrs.get("user")
         user = attrs.get("user_id")
 
@@ -443,6 +472,17 @@ class ClubMembershipCreateSerializer(serializers.Serializer):
         if role == ClubMembership.Role.STAFF and not court:
             raise serializers.ValidationError(
                 {"court": "STAFF memberships require a court."}
+            )
+        if role != ClubMembership.Role.MANAGER and (
+            manager_can_settle_transactions or manager_can_change_pricing
+        ):
+            raise serializers.ValidationError(
+                {
+                    "manager_permissions": (
+                        "Manager permission flags are only valid for "
+                        "MANAGER memberships."
+                    )
+                }
             )
         if court and court.club_id != access.club.id:
             raise serializers.ValidationError(
@@ -506,6 +546,14 @@ class ClubMembershipCreateSerializer(serializers.Serializer):
             access=self.context["club_access"],
             role=validated_data["role"],
             court=validated_data.get("court"),
+            manager_can_settle_transactions=validated_data.get(
+                "manager_can_settle_transactions",
+                False,
+            ),
+            manager_can_change_pricing=validated_data.get(
+                "manager_can_change_pricing",
+                False,
+            ),
             user_data=user_data,
             user=user,
             created_by=self.context["request"].user,

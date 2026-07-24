@@ -16,7 +16,7 @@ from apps.audit.services import record_audit_log
 from apps.audit.views import AuditLogViewSet
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
-from apps.courts.models import Court
+from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
 
@@ -61,13 +61,39 @@ class AuditAPITestCase(APITestCase):
         club: Club,
         role: str,
         court: Court | None = None,
+        **extra_fields,
     ) -> ClubMembership:
         return ClubMembership.objects.create(
             club=club,
             user=user,
             role=role,
             court=court,
+            **extra_fields,
         )
+
+    def create_working_hour_price_period(
+        self,
+        court,
+        weekday,
+        *,
+        opens_at="09:00:00",
+        closes_at="23:00:00",
+        price=Decimal("300.00"),
+    ):
+        working_hour = CourtWorkingHour.objects.create(
+            court=court,
+            weekday=weekday,
+            opens_at=opens_at,
+            closes_at=closes_at,
+            is_closed=False,
+        )
+        CourtWorkingHourPricePeriod.objects.create(
+            working_hour=working_hour,
+            starts_at=opens_at,
+            ends_at=closes_at,
+            price=price,
+        )
+        return working_hour
 
     def time_at(self, hour: int):
         day_start = timezone.datetime(
@@ -531,9 +557,12 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
         self.club = self.create_club(
             "Audit Business Club",
             slug="audit-business",
-            manager_can_settle_transactions=True,
         )
         self.court = self.create_court(self.club, "Audit Business Court")
+        self.create_working_hour_price_period(
+            self.court,
+            CourtWorkingHour.Weekday.FRIDAY,
+        )
         self.staff = self.create_user("audit-business-staff")
         self.create_membership(
             self.staff,

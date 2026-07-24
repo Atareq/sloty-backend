@@ -12,6 +12,8 @@ def create_club_member(
     role,
     created_by,
     court=None,
+    manager_can_settle_transactions=False,
+    manager_can_change_pricing=False,
     user_data=None,
     user=None,
 ):
@@ -28,6 +30,16 @@ def create_club_member(
     if role == ClubMembership.Role.STAFF and not court:
         raise serializers.ValidationError(
             {"court": "STAFF memberships require a court."}
+        )
+    if role != ClubMembership.Role.MANAGER and (
+        manager_can_settle_transactions or manager_can_change_pricing
+    ):
+        raise serializers.ValidationError(
+            {
+                "manager_permissions": (
+                    "Manager permission flags are only valid for MANAGER memberships."
+                )
+            }
         )
     if court and court.club_id != access.club.id:
         raise serializers.ValidationError(
@@ -52,6 +64,8 @@ def create_club_member(
             user=user,
             role=role,
             court=court,
+            manager_can_settle_transactions=manager_can_settle_transactions,
+            manager_can_change_pricing=manager_can_change_pricing,
             is_active=True,
             created_by=created_by,
         )

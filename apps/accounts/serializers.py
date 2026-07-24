@@ -102,9 +102,16 @@ class UserMembershipCourtSerializer(serializers.Serializer):
     name = serializers.CharField()
 
 
+class UserMembershipPermissionsSerializer(serializers.Serializer):
+    can_change_pricing = serializers.BooleanField()
+    can_manage_working_hours = serializers.BooleanField()
+    can_manage_settlements = serializers.BooleanField()
+
+
 class UserMembershipSerializer(serializers.ModelSerializer):
     club = UserMembershipClubSerializer(read_only=True)
     court = UserMembershipCourtSerializer(read_only=True)
+    permissions = serializers.SerializerMethodField()
 
     class Meta:
         model = ClubMembership
@@ -113,7 +120,29 @@ class UserMembershipSerializer(serializers.ModelSerializer):
             "role",
             "club",
             "court",
+            "permissions",
         )
+
+    def get_permissions(self, membership):
+        if membership.role == ClubMembership.Role.OWNER:
+            permissions = {
+                "can_change_pricing": True,
+                "can_manage_working_hours": True,
+                "can_manage_settlements": True,
+            }
+        elif membership.role == ClubMembership.Role.MANAGER:
+            permissions = {
+                "can_change_pricing": membership.manager_can_change_pricing,
+                "can_manage_working_hours": membership.manager_can_change_pricing,
+                "can_manage_settlements": (membership.manager_can_settle_transactions),
+            }
+        else:
+            permissions = {
+                "can_change_pricing": False,
+                "can_manage_working_hours": False,
+                "can_manage_settlements": False,
+            }
+        return UserMembershipPermissionsSerializer(permissions).data
 
 
 class AccountCreatorSerializer(serializers.Serializer):

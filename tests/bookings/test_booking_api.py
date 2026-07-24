@@ -15,7 +15,7 @@ from apps.bookings.filters import BookingFilter
 from apps.bookings.models import Booking
 from apps.bookings.views import BookingViewSet
 from apps.clubs.models import Club, ClubMembership
-from apps.courts.models import Court, CourtWorkingHour
+from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.transactions.models import Transaction
 
 
@@ -51,7 +51,15 @@ class BookingAPITestCase(APITestCase):
             "slot_duration_minutes": 60,
         }
         data.update(extra_fields)
-        return Court.objects.create(**data)
+        court = Court.objects.create(**data)
+        self.create_working_hours(
+            court,
+            weekday=2,
+            opens_at=time(9, 0),
+            closes_at=time(23, 0),
+            price=court.default_price,
+        )
+        return court
 
     def create_membership(
         self,
@@ -160,14 +168,36 @@ class BookingAPITestCase(APITestCase):
         opens_at=time(9, 0),
         closes_at=time(12, 0),
         is_closed=False,
+        price=None,
     ) -> CourtWorkingHour:
-        return CourtWorkingHour.objects.create(
+        working_hour, _ = CourtWorkingHour.objects.update_or_create(
             court=court,
             weekday=weekday,
-            opens_at=opens_at if not is_closed else None,
-            closes_at=closes_at if not is_closed else None,
-            is_closed=is_closed,
+            defaults={
+                "opens_at": opens_at if not is_closed else None,
+                "closes_at": closes_at if not is_closed else None,
+                "is_closed": is_closed,
+            },
         )
+        working_hour.pricing_periods.all().delete()
+        if not is_closed:
+            CourtWorkingHourPricePeriod.objects.create(
+                working_hour=working_hour,
+                starts_at=opens_at,
+                ends_at=closes_at,
+                price=price if price is not None else court.default_price,
+            )
+        return working_hour
+
+    def set_price_periods(self, working_hour, *periods):
+        working_hour.pricing_periods.all().delete()
+        for starts_at, ends_at, price in periods:
+            CourtWorkingHourPricePeriod.objects.create(
+                working_hour=working_hour,
+                starts_at=starts_at,
+                ends_at=ends_at,
+                price=price,
+            )
 
 
 class BookingCreationTests(BookingAPITestCase):
@@ -205,7 +235,7 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(booking.status, Booking.Status.HOLD)
         self.assertEqual(booking.source, Booking.Source.MANUAL)
 
-    def test_total_price_is_calculated_from_court_price_and_duration(self):
+    def test_total_price_is_calculated_from_pricing_periods(self):
         self.client.force_authenticate(user=self.platform_admin)
 
         response = self.post_booking(
@@ -220,6 +250,49 @@ class BookingCreationTests(BookingAPITestCase):
         booking = Booking.objects.get(id=response.data["id"])
         self.assertEqual(booking.total_price, Decimal("600.00"))
         self.assertEqual(response.data["total_price"], "600.00")
+
+    def test_booking_crossing_pricing_boundary_uses_each_period(self):
+        working_hour = CourtWorkingHour.objects.get(court=self.court, weekday=2)
+        self.set_price_periods(
+            working_hour,
+            (time(9, 0), time(18, 0), Decimal("200.00")),
+            (time(18, 0), time(23, 0), Decimal("300.00")),
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(17).isoformat(),
+            end_time=self.time_at(19).isoformat(),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["total_price"], "500.00")
+
+    def test_booking_missing_pricing_is_rejected(self):
+        CourtWorkingHour.objects.get(
+            court=self.court, weekday=2
+        ).pricing_periods.all().delete()
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.post_booking(self.club, self.court)
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_PRICE_NOT_CONFIGURED")
+
+    def test_booking_time_must_align_with_slot_grid(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(17, 30).isoformat(),
+            end_time=self.time_at(18, 30).isoformat(),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID")
 
     def test_booking_club_is_set_from_url_slug_club(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -265,9 +338,9 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assert_field_error(response, "end_time")
 
-    def test_booking_outside_working_hours_is_allowed(self):
-        CourtWorkingHour.objects.create(
-            court=self.court,
+    def test_booking_outside_working_hours_is_rejected(self):
+        self.create_working_hours(
+            self.court,
             weekday=2,
             opens_at=time(10, 0),
             closes_at=time(18, 0),
@@ -281,7 +354,8 @@ class BookingCreationTests(BookingAPITestCase):
             end_time=self.time_at(23).isoformat(),
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_OUTSIDE_WORKING_HOURS")
 
 
 class BookingSlotAvailabilityTests(BookingAPITestCase):
@@ -321,9 +395,24 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertEqual(len(response.data["slots"]), 3)
         first_slot = response.data["slots"][0]
         self.assertEqual(first_slot["slot_status"], "FREE")
+        self.assertEqual(first_slot["slot_price"], "300.00")
         self.assertEqual(first_slot["is_available"], True)
         self.assertIsNone(first_slot["booking"])
         self.assertEqual(first_slot["label"], "Available")
+
+    def test_slots_return_current_morning_and_evening_prices(self):
+        working_hour = CourtWorkingHour.objects.get(court=self.court, weekday=2)
+        self.set_price_periods(
+            working_hour,
+            (time(9, 0), time(10, 0), Decimal("200.00")),
+            (time(10, 0), time(12, 0), Decimal("300.00")),
+        )
+
+        response = self.get_slots()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.slot_by_hour(response, 9)["slot_price"], "200.00")
+        self.assertEqual(self.slot_by_hour(response, 10)["slot_price"], "300.00")
 
     def test_slots_endpoint_marks_blocking_booking_statuses(self):
         hold = self.create_booking(
@@ -355,9 +444,45 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertEqual(self.slot_by_hour(response, 10)["booking"]["id"], confirmed.id)
         completed_slot = self.slot_by_hour(response, 11)
         self.assertEqual(completed_slot["slot_status"], "COMPLETED")
+        self.assertEqual(completed_slot["slot_price"], "300.00")
         self.assertEqual(completed_slot["is_available"], False)
         self.assertEqual(completed_slot["booking"]["id"], completed.id)
         self.assertEqual(completed_slot["booking"]["remaining_amount"], "0.00")
+
+    def test_slot_price_changes_do_not_change_occupied_booking_snapshot(self):
+        booking = self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            status=Booking.Status.CONFIRMED,
+            total_price=Decimal("300.00"),
+        )
+        working_hour = CourtWorkingHour.objects.get(court=self.court, weekday=2)
+        self.set_price_periods(
+            working_hour,
+            (time(9, 0), time(12, 0), Decimal("450.00")),
+        )
+
+        response = self.get_slots()
+
+        slot = self.slot_by_hour(response, 9)
+        self.assertEqual(slot["slot_price"], "450.00")
+        self.assertEqual(slot["booking"]["id"], booking.id)
+        self.assertEqual(slot["booking"]["total_booking_value"], "300.00")
+
+    def test_missing_slot_pricing_returns_unavailable_slot(self):
+        CourtWorkingHour.objects.get(
+            court=self.court, weekday=2
+        ).pricing_periods.all().delete()
+
+        response = self.get_slots()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slot = self.slot_by_hour(response, 9)
+        self.assertIsNone(slot["slot_price"])
+        self.assertEqual(slot["slot_status"], "UNAVAILABLE")
+        self.assertFalse(slot["is_available"])
+        self.assertIsNone(slot["booking"])
 
     def test_cancelled_and_expired_bookings_do_not_block_slots(self):
         self.create_booking(
@@ -435,7 +560,7 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             closes_at=time(23, 0),
         )
 
-        with self.assertNumQueries(4):
+        with self.assertNumQueries(5):
             response = self.get_slots()
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -718,8 +843,8 @@ class BookingOverlapTests(BookingAPITestCase):
         response = self.post_booking(
             self.club,
             self.court,
-            start_time=self.time_at(20, 30).isoformat(),
-            end_time=self.time_at(21, 30).isoformat(),
+            start_time=self.time_at(20).isoformat(),
+            end_time=self.time_at(21).isoformat(),
         )
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
@@ -732,8 +857,8 @@ class BookingOverlapTests(BookingAPITestCase):
         response = self.post_booking(
             self.club,
             self.court,
-            start_time=self.time_at(20, 30).isoformat(),
-            end_time=self.time_at(21, 30).isoformat(),
+            start_time=self.time_at(20).isoformat(),
+            end_time=self.time_at(21).isoformat(),
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -774,8 +899,8 @@ class BookingOverlapTests(BookingAPITestCase):
         response = self.post_booking(
             self.club,
             self.other_court,
-            start_time=self.time_at(20, 30).isoformat(),
-            end_time=self.time_at(21, 30).isoformat(),
+            start_time=self.time_at(20).isoformat(),
+            end_time=self.time_at(21).isoformat(),
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)

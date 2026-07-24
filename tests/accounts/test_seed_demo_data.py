@@ -54,10 +54,18 @@ class SeedDemoDataCommandTests(TestCase):
 
         club_a = Club.objects.get(slug="demo-football-club")
         club_b = Club.objects.get(slug="demo-restricted-club")
-        self.assertTrue(club_a.manager_can_settle_transactions)
-        self.assertTrue(club_a.manager_can_change_pricing)
-        self.assertFalse(club_b.manager_can_settle_transactions)
-        self.assertFalse(club_b.manager_can_change_pricing)
+        manager_a = ClubMembership.objects.get(
+            club=club_a,
+            role=ClubMembership.Role.MANAGER,
+        )
+        manager_b = ClubMembership.objects.get(
+            club=club_b,
+            role=ClubMembership.Role.MANAGER,
+        )
+        self.assertTrue(manager_a.manager_can_settle_transactions)
+        self.assertTrue(manager_a.manager_can_change_pricing)
+        self.assertFalse(manager_b.manager_can_settle_transactions)
+        self.assertFalse(manager_b.manager_can_change_pricing)
         self.assertEqual(club_a.governorate, "ASSIUT")
         self.assertEqual(club_a.city, "ASSIUT_MARKAZ")
         self.assertEqual(club_b.governorate, "SOHAG")

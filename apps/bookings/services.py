@@ -2,7 +2,7 @@ from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import DecimalField, Q, Sum, Value
+from django.db.models import DecimalField, Q, Sum, Value, prefetch_related_objects
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -13,10 +13,15 @@ from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log
 from apps.bookings.models import Booking
 from apps.common.exceptions import SlotyAPIException
-from apps.courts.models import Court, CourtWorkingHour
+from apps.courts.models import Court
+from apps.courts.pricing import (
+    calculate_booking_price_from_schedule,
+    slot_price_from_schedule,
+)
 from apps.transactions.services import get_booking_remaining_amount
 
 FREE_SLOT_STATUS = "FREE"
+UNAVAILABLE_SLOT_STATUS = "UNAVAILABLE"
 MAX_SLOT_PERIOD_DAYS = 31
 BOOKING_STATUS_TRANSITIONS = {
     Booking.Status.HOLD: {
@@ -40,6 +45,7 @@ BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT_MESSAGE = _(
     "This booking cannot be completed until the remaining amount is paid."
 )
 COURT_CLOSED_ON_THIS_DAY_MESSAGE = _("The court is closed on this day.")
+PRICING_NOT_CONFIGURED_LABEL = _("Pricing not configured")
 BOOKING_NOT_IN_CLUB_MESSAGE = _("Booking must belong to the selected club.")
 BOOKING_ALREADY_CANCELLED_MESSAGE = _("This booking is already cancelled.")
 INVALID_BOOKING_STATUS_TRANSITION_MESSAGE = _(
@@ -58,10 +64,11 @@ def booking_audit_snapshot(booking):
 
 
 def calculate_booking_price(court, start_time, end_time) -> Decimal:
-    duration_minutes = (end_time - start_time).total_seconds() / 60
-    slot_duration = court.slot_duration_minutes
-    number_of_slots = Decimal(str(duration_minutes / slot_duration))
-    return court.default_price * number_of_slots
+    return calculate_booking_price_from_schedule(
+        court=court,
+        start_time=start_time,
+        end_time=end_time,
+    )
 
 
 def validate_booking_duration(court, start_time, end_time):
@@ -123,6 +130,8 @@ def local_datetime_for_date(value, value_time):
 def format_slot_label(slot_status):
     if slot_status == FREE_SLOT_STATUS:
         return str(_("Available"))
+    if slot_status == UNAVAILABLE_SLOT_STATUS:
+        return str(PRICING_NOT_CONFIGURED_LABEL)
     return str(Booking.Status(slot_status).label)
 
 
@@ -156,9 +165,10 @@ def generate_booking_slots(*, access, court, date_from, date_to):
 
     range_start = local_datetime_for_date(date_from, time.min)
     range_end = local_datetime_for_date(date_to + timedelta(days=1), time.min)
-    working_hours_by_weekday = {
-        row.weekday: row for row in CourtWorkingHour.objects.filter(court=court)
-    }
+    if "working_hours" not in getattr(court, "_prefetched_objects_cache", {}):
+        prefetch_related_objects([court], "working_hours__pricing_periods")
+    working_hours = list(court.working_hours.all())
+    working_hours_by_weekday = {row.weekday: row for row in working_hours}
     blocking_bookings = list(
         Booking.objects.filter(
             club=access.club,
@@ -209,14 +219,31 @@ def generate_booking_slots(*, access, court, date_from, date_to):
                 ),
                 None,
             )
-            slot_status = booking.status if booking is not None else FREE_SLOT_STATUS
+            slot_price = slot_price_from_schedule(
+                court=court,
+                start_time=slot_start,
+                end_time=slot_end,
+                working_hours=working_hours,
+            )
+            if booking is not None:
+                slot_status = booking.status
+                is_available = False
+            elif slot_price is None:
+                slot_status = UNAVAILABLE_SLOT_STATUS
+                is_available = False
+            else:
+                slot_status = FREE_SLOT_STATUS
+                is_available = True
             slots.append(
                 {
                     "date": current_date.isoformat(),
                     "start_time": slot_start,
                     "end_time": slot_end,
+                    "slot_price": (
+                        f"{slot_price:.2f}" if slot_price is not None else None
+                    ),
                     "slot_status": slot_status,
-                    "is_available": booking is None,
+                    "is_available": is_available,
                     "booking": (
                         booking_slot_payload(booking) if booking is not None else None
                     ),
@@ -242,14 +269,18 @@ def generate_booking_slots(*, access, court, date_from, date_to):
 
 def create_booking(*, created_by, court, start_time, end_time, **booking_data):
     with transaction.atomic():
-        locked_court = court.__class__.objects.select_for_update().get(pk=court.pk)
+        locked_court = (
+            court.__class__.objects.select_for_update()
+            .prefetch_related("working_hours__pricing_periods")
+            .get(pk=court.pk)
+        )
         validate_booking_duration(locked_court, start_time, end_time)
-        validate_no_booking_overlap(locked_court, start_time, end_time)
         total_price = calculate_booking_price(
             locked_court,
             start_time,
             end_time,
         )
+        validate_no_booking_overlap(locked_court, start_time, end_time)
 
         created_booking = Booking.objects.create(
             club=locked_court.club,
@@ -440,7 +471,10 @@ def reschedule_booking(
         )
 
         locked_court = (
-            Court.objects.select_for_update().select_related("club").get(pk=court.pk)
+            Court.objects.select_for_update()
+            .select_related("club")
+            .prefetch_related("working_hours__pricing_periods")
+            .get(pk=court.pk)
         )
         if locked_court.club_id != access.club.id:
             raise serializers.ValidationError(
@@ -450,6 +484,7 @@ def reschedule_booking(
             raise PermissionDenied("You cannot reschedule bookings to this court.")
 
         validate_booking_duration(locked_court, start_time, end_time)
+        new_price = calculate_booking_price(locked_court, start_time, end_time)
         validate_no_booking_overlap(
             locked_court,
             start_time,
@@ -458,7 +493,6 @@ def reschedule_booking(
         )
 
         before_data = booking_audit_snapshot(locked_booking)
-        new_price = calculate_booking_price(locked_court, start_time, end_time)
         locked_booking.court = locked_court
         locked_booking.start_time = start_time
         locked_booking.end_time = end_time

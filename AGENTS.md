@@ -133,32 +133,33 @@ Current implemented app:
 - `Club.address` remains detailed free text. `Club.area` has been removed;
   do not add or accept `area` in future Club APIs unless a new task explicitly
   reintroduces it.
-- `Club` stores `manager_can_settle_transactions` and
-  `manager_can_change_pricing` flags. `manager_can_change_pricing` currently
-  gates manager updates to a court's `default_price`.
-  `manager_can_settle_transactions` gates manager settlement access in
-  Sprint 6.
 - `ClubMembership` is the single source of OWNER, MANAGER, and STAFF authority
   inside a club. STAFF memberships are tied to a court through
   `ClubMembership.court`.
+- `ClubMembership` stores manager-specific
+  `manager_can_settle_transactions` and `manager_can_change_pricing` flags.
+  They are meaningful only for MANAGER memberships and must remain false for
+  OWNER and STAFF memberships. `manager_can_change_pricing` gates manager
+  updates to court working hours and pricing periods.
+  `manager_can_settle_transactions` gates manager settlement access.
 - `POST /api/v1/clubs/{club_slug}/memberships/` supports club-scoped onboarding:
   nested user data plus membership role/court are persisted together through
   `apps/clubs/services.py`.
 - `GET /api/v1/clubs/{club_slug}/users/` is a read-only, club-scoped,
   membership-based users list. Platform admins and owners see all selected-club
-  memberships. Managers can list active MANAGER/STAFF employees only when
-  `club.manager_can_settle_transactions=True`. Staff cannot list club users.
+  memberships. Managers can list active MANAGER/STAFF employees read-only.
+  Staff cannot list club users.
 - `apps/courts/` contains court setup and court working hours logic.
-- `Court` stores `default_price`, `slot_duration_minutes`,
+- `Court` keeps `default_price` only as legacy migration data. It stores
+  `slot_duration_minutes`,
   `requires_digital_payment_reference`, and `internal_hold_expiry_hours`.
   Sprint 4 transactions use `requires_digital_payment_reference` for manual
   payment-reference validation. Hold-expiry behavior remains future lifecycle
   work and must not be implemented in Sprint 4.
-- Future working-hour pricing must use child pricing periods tied explicitly to
+- Working-hour pricing uses child pricing periods tied explicitly to
   `CourtWorkingHour`, not one global morning/night price on `Court` and not one
-  price field on `CourtWorkingHour`. Keep `Court.default_price` as the current
-  legacy pricing source until the dedicated pricing-period migration switches
-  booking creation, rescheduling, and availability pricing together.
+  price field on `CourtWorkingHour`. `Court.default_price` must not be used for
+  new booking creation, rescheduling, or slot availability prices.
 - Court working hours are court-scoped under
   `/api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`. They remain one
   `CourtWorkingHour` row per court plus weekday; do not move working-hour fields
@@ -174,11 +175,13 @@ Current implemented app:
   status, source, or price.
 - Booking list filters currently supported by the API are `court`, `status`,
   `source`, `date`, `date_from`, and `date_to`.
-- Booking outside working hours is allowed in Sprint 3, and no
-  `outside_working_hours` flag is stored.
+- New booking creation and rescheduling must be inside configured court working
+  hours and fully covered by pricing periods. No `outside_working_hours` flag is
+  stored.
 - `GET /api/v1/clubs/{club_slug}/bookings/slots/` returns generated schedule
-  slots for a selected court and date/date range. `FREE` is a response-level
-  availability state only; do not add it to `Booking.Status`.
+  slots for a selected court and date/date range, including current configured
+  `slot_price`. `FREE` and `UNAVAILABLE` are response-level availability states
+  only; do not add them to `Booking.Status`.
 - Slot availability and overlap checks treat `HOLD`, `CONFIRMED`, `COMPLETED`,
   and `NO_SHOW` bookings as blocking. `CANCELLED` and `EXPIRED` bookings release
   their slots.
@@ -343,15 +346,18 @@ Rules for the flow:
 `apps/courts/`
 
 - Court setup app.
-- Contains `Court` and `CourtWorkingHour`.
+- Contains `Court`, `CourtWorkingHour`, and `CourtWorkingHourPricePeriod`.
 - Platform admins and club owners can create and update courts. Managers can
-  update only `default_price`, and only when the selected club has
-  `manager_can_change_pricing=True`. Staff can list/retrieve only their
-  assigned court and cannot update courts.
-- Platform admins, owners, and managers can manage working hours for accessible
-  courts. Staff can list working hours for their assigned court only.
+  list/retrieve courts but cannot update court fields in the current pricing
+  release. Staff can list/retrieve only their assigned court and cannot update
+  courts.
+- Platform admins, owners, and managers with membership-level
+  `manager_can_change_pricing=True` can manage working hours and pricing for
+  accessible courts. Managers without that flag cannot update weekly working
+  hours because boundary changes can invalidate pricing.
 - The nested court working-hours endpoint is the primary API for frontend
-  settings pages. The older `/court-working-hours/` route is compatibility-only.
+  settings pages. The older `/court-working-hours/` route is read-compatible;
+  POST/PATCH writes are rejected with `WORKING_HOURS_USE_WEEKLY_ENDPOINT`.
 - `CourtStaffAssignment` has been removed. Staff access is represented by
   `ClubMembership(role=STAFF, court=<court>)`.
 - Do not place booking, transaction, settlement, pricing, or audit behavior
@@ -364,8 +370,9 @@ Rules for the flow:
   creation/lifecycle services.
 - New bookings start as `HOLD`; in Sprint 4 a valid booking transaction
   confirms a HOLD booking to CONFIRMED.
-- `total_price` is calculated by the backend from the court default price and
-  slot duration; clients must not control booking price in Sprint 3.
+- `total_price` is calculated by the backend from the selected court's
+  working-hour pricing periods and stored as a historical agreed-price
+  snapshot. Clients must not control booking price.
 - Overlap protection is currently application-level: `HOLD`, `CONFIRMED`,
   `COMPLETED`, and `NO_SHOW` bookings block overlapping bookings on the same
   court.
@@ -471,6 +478,30 @@ This is a business-state conflict and should return 409 Conflict.
 
 It is not a persisted booking status and must not be stored in the database.
 
+## Working-Hour Pricing
+
+Court booking prices are configured through pricing periods attached to
+`CourtWorkingHour`.
+
+`Court.default_price` is legacy migration data and must not be used for new
+booking calculations.
+
+Every open working-hours row must have complete, gap-free, non-overlapping
+pricing coverage.
+
+Pricing-period boundaries and booking times must align with
+`Court.slot_duration_minutes`.
+
+`Booking.total_price` is a historical agreed-price snapshot and must not be
+recalculated when court pricing changes.
+
+Booking slot responses expose the current configured `slot_price`. A generated
+slot with missing/corrupt pricing uses response-only `UNAVAILABLE` with
+`slot_price=null`; do not add `UNAVAILABLE` to `Booking.Status`.
+
+Court Usage Report financial values use `Booking.total_price`, not current
+pricing periods.
+
 `apps/transactions/`
 
 - Transaction recording and Sprint 10 correction app.
@@ -531,11 +562,11 @@ It is not a persisted booking status and must not be stored in the database.
   `SettlementTransaction`, audit rows, locks, or transaction state changes.
 - Platform admins and owners can preview active users in the selected club and
   can create, list, retrieve, and mark settlements as settled.
-- Managers can create/list/retrieve/mark settlements only when
-  `club.manager_can_settle_transactions=True`. Managers with that flag can
-  preview/create for active STAFF and MANAGER users in the selected club, but
-  not OWNER users by default. Managers can preview their own transactions as a
-  dry run but must not approve/create their own settlement.
+- Managers can create/list/retrieve/mark settlements only when their own
+  membership has `manager_can_settle_transactions=True`. Managers with that
+  flag can preview/create for active STAFF and MANAGER users in the selected
+  club, but not OWNER users by default. Managers can preview their own
+  transactions as a dry run but must not approve/create their own settlement.
 - Staff can preview only their own unsettled transactions and cannot create,
   list, retrieve, or mark settlements.
 - For settlement create/approval, platform admins and owners may approve their
@@ -670,8 +701,11 @@ It is not a persisted booking status and must not be stored in the database.
   minutes to the selected report period. Financial totals count each selected
   booking once and sum non-cancelled attached transactions regardless of
   transaction creation date.
-- Peak and low-demand analysis uses generated 60-minute working-hour buckets.
-  Low-demand output must include zero-demand generated buckets.
+- Peak and low-demand analysis uses fixed 60-minute clock buckets. Low-demand
+  output must include zero-demand generated buckets.
+- `usage_by_day` occupancy may split across dates, but booking financial totals
+  are assigned only to the booking's local start date. Null booking creators are
+  labeled as localized `Unknown`.
 - Keep report views thin and call report services. Do not query
   `ClubMembership` in report views, serializers, or services; add scoped
   helpers to `ClubAccessContext` when access logic changes.

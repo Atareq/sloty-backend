@@ -102,9 +102,12 @@ class CourtUsageReportQuerySerializer(serializers.Serializer):
                 "REPORT_STAFF_NOT_IN_CLUB",
             )
 
-        if attrs.get("status") == "":
+        status_value = attrs.get("status")
+        if status_value == "":
             attrs["status"] = None
-        elif attrs.get("status") not in set(ALLOWED_USAGE_STATUSES):
+        elif status_value is not None and status_value not in set(
+            ALLOWED_USAGE_STATUSES
+        ):
             raise self.coded_error(
                 "status",
                 _("Invalid court usage status."),

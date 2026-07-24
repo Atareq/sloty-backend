@@ -127,6 +127,14 @@ class MeAPITests(AccountAPITestCase):
         self.assertEqual(memberships[owner_membership.id]["role"], "OWNER")
         self.assertEqual(memberships[owner_membership.id]["club"]["slug"], "el-nasr")
         self.assertIsNone(memberships[owner_membership.id]["court"])
+        self.assertEqual(
+            memberships[owner_membership.id]["permissions"],
+            {
+                "can_change_pricing": True,
+                "can_manage_working_hours": True,
+                "can_manage_settlements": True,
+            },
+        )
         self.assertEqual(memberships[staff_membership.id]["role"], "STAFF")
         self.assertEqual(
             memberships[staff_membership.id]["club"]["slug"],
@@ -135,6 +143,14 @@ class MeAPITests(AccountAPITestCase):
         self.assertEqual(
             memberships[staff_membership.id]["court"],
             {"id": staff_court.id, "name": staff_court.name},
+        )
+        self.assertEqual(
+            memberships[staff_membership.id]["permissions"],
+            {
+                "can_change_pricing": False,
+                "can_manage_working_hours": False,
+                "can_manage_settlements": False,
+            },
         )
 
     def test_authenticated_user_without_creator_gets_null_account_created_by(self):

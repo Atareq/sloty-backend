@@ -11,6 +11,7 @@ from apps.bookings.models import Booking
 from apps.bookings.services import (
     FREE_SLOT_STATUS,
     MAX_SLOT_PERIOD_DAYS,
+    UNAVAILABLE_SLOT_STATUS,
     create_booking,
     validate_booking_duration,
 )
@@ -213,7 +214,9 @@ class BookingExpireSerializer(serializers.Serializer):
 
 
 class BookingSlotQuerySerializer(serializers.Serializer):
-    court = serializers.PrimaryKeyRelatedField(queryset=Court.objects.all())
+    court = serializers.PrimaryKeyRelatedField(
+        queryset=Court.objects.prefetch_related("working_hours__pricing_periods")
+    )
     date = serializers.DateField(required=False)
     date_from = serializers.DateField(required=False)
     date_to = serializers.DateField(required=False)
@@ -272,8 +275,17 @@ class BookingSlotSerializer(serializers.Serializer):
     date = serializers.DateField()
     start_time = serializers.DateTimeField()
     end_time = serializers.DateTimeField()
+    slot_price = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        allow_null=True,
+    )
     slot_status = serializers.ChoiceField(
-        choices=[(FREE_SLOT_STATUS, FREE_SLOT_STATUS)] + list(Booking.Status.choices)
+        choices=[
+            (FREE_SLOT_STATUS, FREE_SLOT_STATUS),
+            (UNAVAILABLE_SLOT_STATUS, UNAVAILABLE_SLOT_STATUS),
+        ]
+        + list(Booking.Status.choices)
     )
     is_available = serializers.BooleanField()
     booking = BookingSlotBookingSerializer(allow_null=True)

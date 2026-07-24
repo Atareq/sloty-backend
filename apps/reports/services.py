@@ -5,6 +5,7 @@ from decimal import Decimal
 from django.db.models import DecimalField, Q, Sum, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
+from django.utils.translation import pgettext
 
 from apps.bookings.models import Booking
 from apps.reports.constants import (
@@ -52,7 +53,7 @@ def empty_metrics():
 
 def user_name(user):
     if user is None:
-        return ""
+        return pgettext("reports missing staff", "Unknown")
     return user.get_full_name() or user.username
 
 
@@ -76,6 +77,10 @@ def overlap_minutes(start_a, end_a, start_b, end_b):
     if start >= end:
         return 0
     return int((end - start).total_seconds() // 60)
+
+
+def fixed_clock_bucket_start(value):
+    return value.replace(minute=0, second=0, microsecond=0)
 
 
 def period_window_for_working_hours(
@@ -121,11 +126,13 @@ def finalize(metrics):
     }
 
 
-def add_booking_once(metrics, booking):
+def add_booking_once(metrics, booking, *, include_financial=True):
     if booking.id in metrics["booking_ids"]:
         return
     metrics["booking_ids"].add(booking.id)
     metrics["status_counts"][booking.status] += 1
+    if not include_financial:
+        return
     paid_amount = money(booking.paid_amount)
     metrics["financial"]["total_booking_value"] += booking.total_price
     metrics["financial"]["total_paid_amount"] += paid_amount
@@ -162,20 +169,26 @@ def get_court_usage_report(*, access, query):
             if window is None:
                 continue
             windows_by_court_date[(court.id, date_value)] = window
-            current, end = window
-            while current < end:
-                bucket_end = min(
-                    current + timedelta(minutes=DEMAND_BUCKET_MINUTES),
-                    end,
+            bucket_start = fixed_clock_bucket_start(window[0])
+            while bucket_start < window[1]:
+                bucket_end = bucket_start + timedelta(minutes=DEMAND_BUCKET_MINUTES)
+                available = overlap_minutes(
+                    bucket_start,
+                    bucket_end,
+                    window[0],
+                    window[1],
                 )
+                if not available:
+                    bucket_start = bucket_end
+                    continue
                 key = (
-                    current.time().replace(second=0, microsecond=0),
+                    bucket_start.time().replace(second=0, microsecond=0),
                     bucket_end.time().replace(second=0, microsecond=0),
                 )
                 demand_buckets.setdefault(key, empty_metrics())[
                     "available_minutes"
-                ] += int((bucket_end - current).total_seconds() // 60)
-                current = bucket_end
+                ] += available
+                bucket_start = bucket_end
 
     queryset = (
         Booking.objects.filter(
@@ -256,7 +269,8 @@ def get_court_usage_report(*, access, query):
             by_period[query["period"]]["available_minutes"] += available
 
     for booking in bookings:
-        current_date = timezone.localtime(booking.start_time).date()
+        local_start_date = timezone.localtime(booking.start_time).date()
+        current_date = local_start_date
         while current_date <= timezone.localtime(booking.end_time).date():
             window = windows_by_court_date.get((booking.court_id, current_date))
             minutes = (
@@ -269,7 +283,11 @@ def get_court_usage_report(*, access, query):
             if minutes:
                 add_booking_once(summary, booking)
                 add_booking_once(by_court[booking.court_id], booking)
-                add_booking_once(by_day[current_date], booking)
+                add_booking_once(
+                    by_day[current_date],
+                    booking,
+                    include_financial=current_date == local_start_date,
+                )
                 summary["occupied_minutes"] += minutes
                 by_court[booking.court_id]["occupied_minutes"] += minutes
                 by_day[current_date]["occupied_minutes"] += minutes

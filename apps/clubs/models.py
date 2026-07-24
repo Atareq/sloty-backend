@@ -44,8 +44,6 @@ class Club(models.Model):
     phone_number = PhoneNumberField(blank=True, null=True)
     notes = models.TextField(blank=True)
     is_active = models.BooleanField(default=True, db_index=True)
-    manager_can_settle_transactions = models.BooleanField(default=False)
-    manager_can_change_pricing = models.BooleanField(default=False)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         blank=True,
@@ -111,6 +109,8 @@ class ClubMembership(models.Model):
         on_delete=models.CASCADE,
         related_name="memberships",
     )
+    manager_can_settle_transactions = models.BooleanField(default=False)
+    manager_can_change_pricing = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -148,6 +148,14 @@ class ClubMembership(models.Model):
                 condition=Q(is_active=True, role="STAFF"),
                 name="unique_active_staff_club_membership",
             ),
+            models.CheckConstraint(
+                check=Q(role="MANAGER")
+                | (
+                    Q(manager_can_settle_transactions=False)
+                    & Q(manager_can_change_pricing=False)
+                ),
+                name="club_membership_manager_flags_only_for_managers",
+            ),
         ]
         indexes = [
             models.Index(fields=["club", "role", "is_active"]),
@@ -168,5 +176,11 @@ class ClubMembership(models.Model):
                 errors["court"] = "STAFF memberships require a court."
             elif self.club_id and self.court.club_id != self.club_id:
                 errors["court"] = "Staff membership court must belong to the club."
+        if self.role != self.Role.MANAGER and (
+            self.manager_can_settle_transactions or self.manager_can_change_pricing
+        ):
+            errors["manager_permissions"] = (
+                "Manager permission flags are only valid for MANAGER memberships."
+            )
         if errors:
             raise ValidationError(errors)
