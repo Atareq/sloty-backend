@@ -2,6 +2,7 @@ from datetime import time, timedelta
 from decimal import Decimal
 
 from django.core.management.base import BaseCommand
+from django.db import transaction
 from django.utils import timezone
 
 from apps.accounts.models import User
@@ -9,10 +10,46 @@ from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
+from apps.courts.services import replace_weekly_working_hours
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
 DEMO_PASSWORD = "test-pass-123"
+ALBALADYA_PASSWORD = "Admin@123456"
+ALBALADYA_USER_SPECS = (
+    {
+        "username": "admin",
+        "email": "admin@sloty.test",
+        "first_name": "Platform",
+        "last_name": "Admin",
+        "is_platform_admin": True,
+        "created_by": None,
+    },
+    {
+        "username": "owner",
+        "email": "owner@sloty.test",
+        "first_name": "Test",
+        "last_name": "Owner",
+        "is_platform_admin": False,
+        "created_by": "admin",
+    },
+    {
+        "username": "manager",
+        "email": "manager@sloty.test",
+        "first_name": "Test",
+        "last_name": "Manager",
+        "is_platform_admin": False,
+        "created_by": "owner",
+    },
+    {
+        "username": "staff",
+        "email": "staff@sloty.test",
+        "first_name": "Test",
+        "last_name": "Staff",
+        "is_platform_admin": False,
+        "created_by": "owner",
+    },
+)
 
 USER_SPECS = (
     ("platform_admin", "Platform", "Admin", True, True, True),
@@ -107,7 +144,19 @@ AUDIT_ACTION_SPECS = (
 class Command(BaseCommand):
     help = "Create idempotent local/demo data for manual API testing."
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--scenario",
+            choices=("default", "albaladya-test"),
+            default="default",
+            help="Seed the default demo data or a scoped deterministic scenario.",
+        )
+
     def handle(self, *args, **options):
+        if options["scenario"] == "albaladya-test":
+            self.seed_albaladya_test()
+            return
+
         users = self.create_users()
         clubs = self.create_clubs(users)
         courts = self.create_courts(users, clubs)
@@ -133,6 +182,166 @@ class Command(BaseCommand):
             transactions,
             settlements,
             audit_logs,
+        )
+
+    def seed_albaladya_test(self):
+        with transaction.atomic():
+            users = self.create_albaladya_users()
+            club = self.create_albaladya_club(users)
+            court = self.create_albaladya_court(users, club)
+            memberships = self.create_albaladya_memberships(users, club, court)
+            self.replace_albaladya_working_hours(court)
+        self.print_albaladya_summary(users, club, court, memberships)
+
+    def create_albaladya_users(self):
+        users = {}
+        for spec in ALBALADYA_USER_SPECS:
+            user, _ = User.objects.update_or_create(
+                username=spec["username"],
+                defaults={
+                    "email": spec["email"],
+                    "first_name": spec["first_name"],
+                    "last_name": spec["last_name"],
+                    "is_active": True,
+                    "is_platform_admin": spec["is_platform_admin"],
+                    "is_staff": spec["is_platform_admin"],
+                    "is_superuser": spec["is_platform_admin"],
+                },
+            )
+            user.set_password(ALBALADYA_PASSWORD)
+            user.save(update_fields=["password"])
+            users[spec["username"]] = user
+
+        for spec in ALBALADYA_USER_SPECS:
+            created_by_username = spec["created_by"]
+            created_by = (
+                users[created_by_username] if created_by_username is not None else None
+            )
+            user = users[spec["username"]]
+            if user.created_by_id != getattr(created_by, "id", None):
+                user.created_by = created_by
+                user.save(update_fields=["created_by"])
+        return users
+
+    def create_albaladya_club(self, users):
+        club, _ = Club.objects.update_or_create(
+            slug="albaladya-test",
+            defaults={
+                "name": "Albaladya Test",
+                "governorate": "ASSIUT",
+                "city": "ASSIUT_MARKAZ",
+                "address": "Albaladya Test Club, Assiut",
+                "phone_number": "+201000000001",
+                "is_active": True,
+                "created_by": users["admin"],
+            },
+        )
+        return club
+
+    def create_albaladya_court(self, users, club):
+        court, _ = Court.objects.update_or_create(
+            club=club,
+            name="Albaladya Main Court",
+            defaults={
+                "sport_type": Court.SportType.FOOTBALL,
+                "players_count": 10,
+                "default_price": Decimal("200.00"),
+                "slot_duration_minutes": 60,
+                "is_active": True,
+                "requires_digital_payment_reference": False,
+                "internal_hold_expiry_hours": 12,
+                "notes": "Main court for local development and frontend testing.",
+                "created_by": users["owner"],
+            },
+        )
+        return court
+
+    def create_albaladya_memberships(self, users, club, court):
+        specs = (
+            {
+                "key": "owner",
+                "role": ClubMembership.Role.OWNER,
+                "court": None,
+                "created_by": users["admin"],
+                "manager_can_settle_transactions": False,
+                "manager_can_change_pricing": False,
+            },
+            {
+                "key": "manager",
+                "role": ClubMembership.Role.MANAGER,
+                "court": None,
+                "created_by": users["owner"],
+                "manager_can_settle_transactions": True,
+                "manager_can_change_pricing": True,
+            },
+            {
+                "key": "staff",
+                "role": ClubMembership.Role.STAFF,
+                "court": court,
+                "created_by": users["owner"],
+                "manager_can_settle_transactions": False,
+                "manager_can_change_pricing": False,
+            },
+        )
+        memberships = {}
+        for spec in specs:
+            membership, _ = ClubMembership.objects.update_or_create(
+                club=club,
+                user=users[spec["key"]],
+                role=spec["role"],
+                defaults={
+                    "court": spec["court"],
+                    "is_active": True,
+                    "created_by": spec["created_by"],
+                    "manager_can_settle_transactions": spec[
+                        "manager_can_settle_transactions"
+                    ],
+                    "manager_can_change_pricing": spec["manager_can_change_pricing"],
+                },
+            )
+            memberships[spec["key"]] = membership
+        return memberships
+
+    def albaladya_working_hours_payload(self):
+        rows = []
+        for weekday in CourtWorkingHour.Weekday.values:
+            if weekday == CourtWorkingHour.Weekday.FRIDAY:
+                rows.append(
+                    {
+                        "weekday": weekday,
+                        "opens_at": None,
+                        "closes_at": None,
+                        "is_closed": True,
+                        "pricing_periods": [],
+                    }
+                )
+                continue
+            rows.append(
+                {
+                    "weekday": weekday,
+                    "opens_at": time(10, 0),
+                    "closes_at": time(23, 0),
+                    "is_closed": False,
+                    "pricing_periods": [
+                        {
+                            "starts_at": time(10, 0),
+                            "ends_at": time(18, 0),
+                            "price": Decimal("200.00"),
+                        },
+                        {
+                            "starts_at": time(18, 0),
+                            "ends_at": time(23, 0),
+                            "price": Decimal("300.00"),
+                        },
+                    ],
+                }
+            )
+        return rows
+
+    def replace_albaladya_working_hours(self, court):
+        return replace_weekly_working_hours(
+            court=court,
+            working_hours=self.albaladya_working_hours_payload(),
         )
 
     def create_users(self):
@@ -592,3 +801,38 @@ class Command(BaseCommand):
             f"transactions={len(transactions)}, settlements={len(settlements)}, "
             f"audit_logs={len(audit_logs)}"
         )
+
+    def print_albaladya_summary(self, users, club, court, memberships):
+        self.stdout.write(self.style.SUCCESS("Albaladya test data is ready."))
+        self.stdout.write("")
+        self.stdout.write("Club:")
+        self.stdout.write(f"- {club.name}")
+        self.stdout.write(f"- slug: {club.slug}")
+        self.stdout.write("")
+        self.stdout.write("Users:")
+        for username in ("admin", "owner", "manager", "staff"):
+            self.stdout.write(f"- {username} / {ALBALADYA_PASSWORD}")
+        self.stdout.write("")
+        self.stdout.write("Password:")
+        self.stdout.write(
+            f"- {ALBALADYA_PASSWORD} (development/test-only; never use in production)"
+        )
+        self.stdout.write("")
+        self.stdout.write("Creation hierarchy:")
+        self.stdout.write("- admin created by bootstrap/null")
+        self.stdout.write("- owner created by admin")
+        self.stdout.write("- manager created by owner")
+        self.stdout.write("- staff created by owner")
+        self.stdout.write("")
+        self.stdout.write("Manager permissions:")
+        self.stdout.write(
+            "- settlements: "
+            f"{'enabled' if memberships['manager'].manager_can_settle_transactions else 'disabled'}"  # noqa
+        )
+        self.stdout.write(
+            "- pricing and working hours: "
+            f"{'enabled' if memberships['manager'].manager_can_change_pricing else 'disabled'}"  # noqa
+        )
+        self.stdout.write("")
+        self.stdout.write("Staff court:")
+        self.stdout.write(f"- {court.name}")

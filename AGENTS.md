@@ -1284,6 +1284,12 @@ Notes:
 - Demo seed data must be added through an idempotent management command, not
   migrations.
 - Current command: `python manage.py seed_demo_data`.
+- Scoped Albaladya frontend/local testing data is seeded with
+  `python manage.py seed_demo_data --scenario albaladya-test`. It creates the
+  `albaladya-test` club, one court, deterministic `admin`/`owner`/`manager`/
+  `staff` users, membership-level manager permissions, and weekly pricing.
+  Its shared password is development/test-only and must never be production
+  credentials.
 - Seed data is for local/manual testing only and must not create production
   side effects.
 - Use predictable usernames, slugs, dates, and references.

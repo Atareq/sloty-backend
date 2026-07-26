@@ -575,6 +575,21 @@ Token examples:
 }
 ```
 
+Create the scoped Albaladya frontend/local testing scenario:
+
+```bash
+python manage.py seed_demo_data --scenario albaladya-test
+```
+
+This creates or repairs one club (`albaladya-test`), one court, all seven
+working-hour rows, and these development/test-only users. Never use these
+credentials in production:
+
+- `admin` / `Admin@123456`
+- `owner` / `Admin@123456`
+- `manager` / `Admin@123456`
+- `staff` / `Admin@123456`
+
 The seed command includes role-specific memberships, two courts per club,
 working hours, bookings across all statuses, transactions, pending and settled
 settlements, unsettled transactions for preview testing, and audit log examples.

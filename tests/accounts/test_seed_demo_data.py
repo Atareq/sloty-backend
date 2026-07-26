@@ -1,3 +1,6 @@
+from datetime import time
+from decimal import Decimal
+
 from django.core.management import call_command
 from django.db.models import Count
 from django.test import TestCase
@@ -8,7 +11,7 @@ from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
 from apps.common.egypt_locations import is_valid_city_for_governorate
-from apps.courts.models import Court
+from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
@@ -22,6 +25,9 @@ DEMO_CLUB_SLUGS = (
 class SeedDemoDataCommandTests(TestCase):
     def run_seed_command(self):
         call_command("seed_demo_data", verbosity=0)
+
+    def run_albaladya_seed_command(self):
+        call_command("seed_demo_data", scenario="albaladya-test", verbosity=0)
 
     def test_seed_demo_data_creates_predictable_demo_records(self):
         self.run_seed_command()
@@ -199,3 +205,184 @@ class SeedDemoDataCommandTests(TestCase):
         self.run_seed_command()
 
         self.assertFalse(find_orphan_business_users().exists())
+
+    def test_albaladya_scenario_creates_required_deterministic_records(self):
+        self.run_albaladya_seed_command()
+
+        users = {
+            user.username: user
+            for user in User.objects.filter(
+                username__in=("admin", "owner", "manager", "staff")
+            )
+        }
+        self.assertEqual(set(users), {"admin", "owner", "manager", "staff"})
+        self.assertEqual(
+            {username: user.email for username, user in users.items()},
+            {
+                "admin": "admin@sloty.test",
+                "owner": "owner@sloty.test",
+                "manager": "manager@sloty.test",
+                "staff": "staff@sloty.test",
+            },
+        )
+        for user in users.values():
+            self.assertTrue(user.check_password("Admin@123456"))
+
+        self.assertTrue(users["admin"].is_platform_admin)
+        self.assertIsNone(users["admin"].created_by)
+        self.assertEqual(users["owner"].created_by, users["admin"])
+        self.assertEqual(users["manager"].created_by, users["owner"])
+        self.assertEqual(users["staff"].created_by, users["owner"])
+
+        club = Club.objects.get(slug="albaladya-test")
+        self.assertEqual(club.name, "Albaladya Test")
+        self.assertEqual(club.created_by, users["admin"])
+        self.assertEqual(club.governorate, "ASSIUT")
+        self.assertEqual(club.city, "ASSIUT_MARKAZ")
+        self.assertEqual(str(club.phone_number), "+201000000001")
+        self.assertTrue(club.is_active)
+
+        court = Court.objects.get(club=club, name="Albaladya Main Court")
+        self.assertEqual(court.sport_type, Court.SportType.FOOTBALL)
+        self.assertEqual(court.players_count, 10)
+        self.assertEqual(court.slot_duration_minutes, 60)
+        self.assertTrue(court.is_active)
+        self.assertFalse(court.requires_digital_payment_reference)
+        self.assertEqual(court.internal_hold_expiry_hours, 12)
+        self.assertEqual(court.created_by, users["owner"])
+
+        owner_membership = ClubMembership.objects.get(
+            club=club,
+            user=users["owner"],
+            role=ClubMembership.Role.OWNER,
+        )
+        manager_membership = ClubMembership.objects.get(
+            club=club,
+            user=users["manager"],
+            role=ClubMembership.Role.MANAGER,
+        )
+        staff_membership = ClubMembership.objects.get(
+            club=club,
+            user=users["staff"],
+            role=ClubMembership.Role.STAFF,
+        )
+        self.assertEqual(owner_membership.created_by, users["admin"])
+        self.assertEqual(manager_membership.created_by, users["owner"])
+        self.assertEqual(staff_membership.created_by, users["owner"])
+        self.assertIsNone(owner_membership.court)
+        self.assertIsNone(manager_membership.court)
+        self.assertEqual(staff_membership.court, court)
+        self.assertFalse(owner_membership.manager_can_settle_transactions)
+        self.assertFalse(owner_membership.manager_can_change_pricing)
+        self.assertTrue(manager_membership.manager_can_settle_transactions)
+        self.assertTrue(manager_membership.manager_can_change_pricing)
+        self.assertFalse(staff_membership.manager_can_settle_transactions)
+        self.assertFalse(staff_membership.manager_can_change_pricing)
+
+        self.assertEqual(CourtWorkingHour.objects.filter(court=court).count(), 7)
+        friday = CourtWorkingHour.objects.get(
+            court=court,
+            weekday=CourtWorkingHour.Weekday.FRIDAY,
+        )
+        self.assertTrue(friday.is_closed)
+        self.assertIsNone(friday.opens_at)
+        self.assertIsNone(friday.closes_at)
+        self.assertFalse(friday.pricing_periods.exists())
+
+        open_days = CourtWorkingHour.objects.filter(court=court, is_closed=False)
+        self.assertEqual(open_days.count(), 6)
+        for working_hour in open_days:
+            self.assertEqual(working_hour.opens_at, time(10, 0))
+            self.assertEqual(working_hour.closes_at, time(23, 0))
+            periods = list(working_hour.pricing_periods.order_by("starts_at"))
+            self.assertEqual(len(periods), 2)
+            self.assertEqual(periods[0].starts_at, time(10, 0))
+            self.assertEqual(periods[0].ends_at, time(18, 0))
+            self.assertEqual(periods[0].price, Decimal("200.00"))
+            self.assertEqual(periods[1].starts_at, time(18, 0))
+            self.assertEqual(periods[1].ends_at, time(23, 0))
+            self.assertEqual(periods[1].price, Decimal("300.00"))
+
+    def test_albaladya_scenario_is_idempotent_and_repairs_values(self):
+        self.run_albaladya_seed_command()
+        counts = {
+            "users": User.objects.filter(
+                username__in=("admin", "owner", "manager", "staff")
+            ).count(),
+            "clubs": Club.objects.filter(slug="albaladya-test").count(),
+            "courts": Court.objects.filter(club__slug="albaladya-test").count(),
+            "memberships": ClubMembership.objects.filter(
+                club__slug="albaladya-test"
+            ).count(),
+            "working_hours": CourtWorkingHour.objects.filter(
+                court__club__slug="albaladya-test"
+            ).count(),
+            "pricing_periods": CourtWorkingHourPricePeriod.objects.filter(
+                working_hour__court__club__slug="albaladya-test"
+            ).count(),
+        }
+
+        owner = User.objects.get(username="owner")
+        manager_membership = ClubMembership.objects.get(
+            club__slug="albaladya-test",
+            user__username="manager",
+            role=ClubMembership.Role.MANAGER,
+        )
+        club = Club.objects.get(slug="albaladya-test")
+        court = Court.objects.get(club=club, name="Albaladya Main Court")
+        owner.email = "wrong@example.com"
+        owner.created_by = None
+        owner.set_password("wrong-password")
+        owner.save(update_fields=["email", "created_by", "password"])
+        club.name = "Wrong Club Name"
+        club.save(update_fields=["name"])
+        court.slot_duration_minutes = 30
+        court.save(update_fields=["slot_duration_minutes"])
+        manager_membership.manager_can_settle_transactions = False
+        manager_membership.manager_can_change_pricing = False
+        manager_membership.save(
+            update_fields=[
+                "manager_can_settle_transactions",
+                "manager_can_change_pricing",
+            ]
+        )
+
+        self.run_albaladya_seed_command()
+
+        self.assertEqual(
+            User.objects.filter(
+                username__in=("admin", "owner", "manager", "staff")
+            ).count(),
+            counts["users"],
+        )
+        self.assertEqual(Club.objects.filter(slug="albaladya-test").count(), 1)
+        self.assertEqual(
+            Court.objects.filter(club__slug="albaladya-test").count(),
+            counts["courts"],
+        )
+        self.assertEqual(
+            ClubMembership.objects.filter(club__slug="albaladya-test").count(),
+            counts["memberships"],
+        )
+        self.assertEqual(
+            CourtWorkingHour.objects.filter(court__club__slug="albaladya-test").count(),
+            counts["working_hours"],
+        )
+        self.assertEqual(
+            CourtWorkingHourPricePeriod.objects.filter(
+                working_hour__court__club__slug="albaladya-test"
+            ).count(),
+            counts["pricing_periods"],
+        )
+
+        owner.refresh_from_db()
+        manager_membership.refresh_from_db()
+        club.refresh_from_db()
+        court.refresh_from_db()
+        self.assertEqual(owner.email, "owner@sloty.test")
+        self.assertEqual(owner.created_by, User.objects.get(username="admin"))
+        self.assertTrue(owner.check_password("Admin@123456"))
+        self.assertEqual(club.name, "Albaladya Test")
+        self.assertEqual(court.slot_duration_minutes, 60)
+        self.assertTrue(manager_membership.manager_can_settle_transactions)
+        self.assertTrue(manager_membership.manager_can_change_pricing)
