@@ -39,7 +39,6 @@ class Settlement(models.Model):
     total_amount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        validators=[MinValueValidator(Decimal("0.00"))],
     )
     transaction_count = models.PositiveIntegerField(default=0)
     notes = models.TextField(blank=True)
@@ -73,10 +72,6 @@ class Settlement(models.Model):
             models.CheckConstraint(
                 check=Q(period_start__lt=models.F("period_end")),
                 name="settlement_period_start_before_end",
-            ),
-            models.CheckConstraint(
-                check=Q(total_amount__gte=0),
-                name="settlement_total_amount_gte_zero",
             ),
             models.CheckConstraint(
                 check=Q(transaction_count__gte=0),
@@ -138,6 +133,44 @@ class SettlementTransaction(models.Model):
 
     def __str__(self) -> str:
         return f"{self.settlement_id} - {self.transaction_id}"
+
+    def clean(self):
+        super().clean()
+        if self.amount is not None and self.amount <= 0:
+            raise ValidationError({"amount": "Amount must be greater than 0."})
+
+
+class SettlementRecurringDepositTransaction(models.Model):
+    settlement = models.ForeignKey(
+        Settlement,
+        on_delete=models.CASCADE,
+        related_name="deposit_lines",
+    )
+    recurring_deposit_transaction = models.OneToOneField(
+        "recurring.RecurringDepositTransaction",
+        on_delete=models.CASCADE,
+        related_name="settlement_deposit_line",
+    )
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.01"))],
+    )
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                check=Q(amount__gt=0),
+                name="settlement_recurring_deposit_amount_gt_zero",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"{self.settlement_id} - deposit "
+            f"{self.recurring_deposit_transaction_id}"
+        )
 
     def clean(self):
         super().clean()

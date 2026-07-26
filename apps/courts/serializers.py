@@ -155,6 +155,7 @@ class CourtListSerializer(serializers.ModelSerializer):
             "is_active",
             "requires_digital_payment_reference",
             "internal_hold_expiry_hours",
+            "recurring_deposit_refund_notice_days",
             "pricing_configured",
             "minimum_slot_price",
             "maximum_slot_price",
@@ -189,6 +190,7 @@ class CourtDetailSerializer(serializers.ModelSerializer):
             "is_active",
             "requires_digital_payment_reference",
             "internal_hold_expiry_hours",
+            "recurring_deposit_refund_notice_days",
             "pricing_configured",
             "minimum_slot_price",
             "maximum_slot_price",
@@ -221,6 +223,7 @@ class CourtCreateSerializer(serializers.ModelSerializer):
             "is_active",
             "requires_digital_payment_reference",
             "internal_hold_expiry_hours",
+            "recurring_deposit_refund_notice_days",
             "notes",
         )
         read_only_fields = ("id",)
@@ -260,6 +263,7 @@ class CourtUpdateSerializer(serializers.ModelSerializer):
             "is_active",
             "requires_digital_payment_reference",
             "internal_hold_expiry_hours",
+            "recurring_deposit_refund_notice_days",
             "notes",
         )
 

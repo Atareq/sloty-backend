@@ -22,6 +22,38 @@ class AuditLog(models.Model):
             "SETTLEMENT_MARKED_SETTLED",
             _("Settlement marked settled"),
         )
+        RECURRING_AGREEMENT_CREATED = (
+            "RECURRING_AGREEMENT_CREATED",
+            _("Recurring agreement created"),
+        )
+        RECURRING_AGREEMENT_CANCELLED = (
+            "RECURRING_AGREEMENT_CANCELLED",
+            _("Recurring agreement cancelled"),
+        )
+        RECURRING_DEPOSIT_COLLECTED = (
+            "RECURRING_DEPOSIT_COLLECTED",
+            _("Recurring deposit collected"),
+        )
+        RECURRING_DEPOSIT_REFUND_DUE = (
+            "RECURRING_DEPOSIT_REFUND_DUE",
+            _("Recurring deposit refund due"),
+        )
+        RECURRING_DEPOSIT_REFUNDED = (
+            "RECURRING_DEPOSIT_REFUNDED",
+            _("Recurring deposit refunded"),
+        )
+        RECURRING_DEPOSIT_FORFEITED = (
+            "RECURRING_DEPOSIT_FORFEITED",
+            _("Recurring deposit forfeited"),
+        )
+        RECURRING_OCCURRENCE_GENERATED = (
+            "RECURRING_OCCURRENCE_GENERATED",
+            _("Recurring occurrence generated"),
+        )
+        RECURRING_GENERATION_FAILED = (
+            "RECURRING_GENERATION_FAILED",
+            _("Recurring generation failed"),
+        )
 
     club = models.ForeignKey(
         Club,

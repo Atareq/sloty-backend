@@ -174,6 +174,35 @@ class ClubAccessContext:
             return False
         return self.is_platform_admin or transaction.created_by_id == self.user.id
 
+    def can_view_recurring_agreement(self, agreement=None):
+        if agreement is None:
+            return self.has_any_club_access()
+        return agreement.club_id == self.club.id and self.can_access_court(
+            agreement.court
+        )
+
+    def can_create_recurring_agreement(self, court):
+        return self.can_access_court(court)
+
+    def can_cancel_recurring_agreement(self, agreement):
+        return self.can_view_recurring_agreement(agreement)
+
+    def can_refund_recurring_deposit(self, agreement):
+        if not self.can_view_recurring_agreement(agreement):
+            return False
+        if self.is_platform_admin or self.is_owner or self.is_manager:
+            return True
+        if self.is_staff:
+            return agreement.deposit_collected_by_id == self.user.id
+        return False
+
+    def scoped_recurring_agreements_queryset(self):
+        from apps.recurring.models import RecurringAgreement
+
+        return RecurringAgreement.objects.filter(
+            court__in=self.scoped_courts_queryset()
+        )
+
     def can_manage_settlements(self):
         if self.is_platform_admin or self.is_owner:
             return True

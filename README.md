@@ -378,6 +378,28 @@ Useful settlement list filters:
 - `created_by`
 - `settled_by`
 
+Settlement preview/create also include recurring deposit collections and
+refunds. Net amount is booking payments + deposit collections − deposit
+refunds.
+
+## Recurring Agreement Endpoints
+
+- `GET /api/v1/clubs/{club_slug}/recurring-agreements/`
+- `POST /api/v1/clubs/{club_slug}/recurring-agreements/`
+- `GET /api/v1/clubs/{club_slug}/recurring-agreements/{id}/`
+- `GET /api/v1/clubs/{club_slug}/recurring-agreements/availability/`
+- `POST /api/v1/clubs/{club_slug}/recurring-agreements/{id}/cancellation-preview/`
+- `POST /api/v1/clubs/{club_slug}/recurring-agreements/{id}/cancel/`
+- `POST /api/v1/clubs/{club_slug}/recurring-agreements/{id}/refund-deposit/`
+
+Create is atomic: agreement + full deposit collection + initial occurrences.
+Deposits use `RecurringDepositTransaction`, not booking `Transaction`.
+There is no replace/pause/resume/skip endpoint; start a new agreement after
+cancel when the schedule changes.
+
+Court field `recurring_deposit_refund_notice_days` (`null` or `0`–`30`) is
+required for create. Only platform admins and owners may change it.
+
 ## Sprint 7 Audit Log Endpoints
 
 - `GET /api/v1/clubs/{club_slug}/audit-logs/`

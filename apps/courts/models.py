@@ -49,6 +49,16 @@ class Court(models.Model):
         validators=[MinValueValidator(1)],
         help_text="OnHold period without payment",
     )
+    recurring_deposit_refund_notice_days = models.PositiveSmallIntegerField(
+        blank=True,
+        null=True,
+        validators=[MaxValueValidator(30)],
+        help_text=(
+            "Null blocks recurring agreement creation. "
+            "0 means refundable until the affected occurrence starts. "
+            "1-30 is the required calendar-day notice."
+        ),
+    )
     notes = models.TextField(blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

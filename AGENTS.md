@@ -5,8 +5,10 @@
 This file is the living guide for AI coding agents working in this repository.
 Always read it before planning commands or code changes. Also read
 `docs/business-analysis.txt` and `docs/documentation.txt`, when present, for
-project and product context before planning changes. Update this file whenever
-the repository's backend structure, conventions, or workflow changes.
+project and product context before planning changes. For recurring agreements
+work, also read the locked contract in
+`docs/recurring-agreements-contract.txt`. Update this file whenever the
+repository's backend structure, conventions, or workflow changes.
 
 The goal is to keep this Django backend moving toward a disciplined
 Django + Django REST Framework modular monolith without copying business logic
@@ -35,7 +37,7 @@ Current repo reality:
 - Current implemented app: `apps/accounts/`
 - Current implemented domain apps: `apps/clubs/`, `apps/courts/`,
   `apps/bookings/`, `apps/transactions/`, `apps/settlements/`,
-  `apps/audit/`, `apps/dashboard/`, and `apps/reports/`
+  `apps/audit/`, `apps/dashboard/`, `apps/reports/`, and `apps/recurring/`
 - Current shared app: `apps/common/`
 - Current public API routes are versioned under `/api/v1/`
 - Current API foundation endpoints include `/api/v1/schema/`,
@@ -78,9 +80,12 @@ Current repo reality:
 - Court usage reporting adds a read-only `apps/reports/` analytics app and
   `GET /api/v1/clubs/{club_slug}/reports/court-usage/`
 - Planned shared app name is `apps/common/`
+- Current implemented domain app `apps/recurring/` owns recurring agreements
+  and dedicated deposit collection/refund transactions.
+- Locked contract: `docs/recurring-agreements-contract.txt`.
 - Domain apps beyond `accounts`, `clubs`, `courts`, `bookings`,
-  `transactions`, `settlements`, `audit`, `dashboard`, and `reports` are not
-  implemented yet
+  `transactions`, `settlements`, `audit`, `dashboard`, `reports`, and
+  `recurring` are not implemented yet
 
 Planned project direction:
 
@@ -89,9 +94,13 @@ Planned project direction:
 - Keep business workflows in service modules and keep HTTP views thin.
 - Add shared infrastructure only when repeated patterns justify it.
 - Planned app layout: `accounts`, `clubs`, `courts`, `bookings`,
-  `transactions`, `settlements`, `pricing`, `audit`, and `common`.
+  `transactions`, `settlements`, `pricing`, `audit`, `recurring`, and
+  `common`.
 - Only `accounts`, `clubs`, `courts`, and `bookings` should exist through
   Sprint 3. Sprint 4 adds `transactions`.
+- Recurring deposit cash movements use dedicated
+  `RecurringDepositTransaction` rows. Do not generalize the booking
+  `Transaction` model for deposits.
 
 ## 3. Architecture Overview
 
@@ -539,7 +548,10 @@ pricing periods.
   booking, the cancel service returns the booking to `HOLD` in the same atomic,
   row-locked workflow.
 - Transaction creation may change booking status only from HOLD to CONFIRMED.
-  Transaction cancel may change booking status only from CONFIRMED to HOLD.
+  Transaction cancel may change booking status only from CONFIRMED to HOLD for
+  non-recurring bookings. When `Booking.source == RECURRING`, do not demote
+  `CONFIRMED` to `HOLD` when paid amount reaches zero; recurring occurrences
+  stay `CONFIRMED` while the agreement remains active.
 
 `apps/settlements/`
 
@@ -710,6 +722,35 @@ pricing periods.
   `ClubMembership` in report views, serializers, or services; add scoped
   helpers to `ClubAccessContext` when access logic changes.
 - Keep report tests with the report app under `apps/reports/tests/`.
+
+## Recurring Agreements
+
+Owning app: `apps/recurring/`. Locked contract:
+`docs/recurring-agreements-contract.txt`.
+
+- `RecurringAgreement` statuses: `ACTIVE`, `CANCELLED`, `ACTION_REQUIRED`.
+- Deposit statuses: `HELD`, `REFUND_DUE`, `REFUNDED`, `FORFEITED`.
+- Atomic create collects a full deposit via `RecurringDepositTransaction`
+  (`COLLECTION`) and generates an initial occurrence horizon using
+  `RECURRING_GENERATION_HORIZON_WEEKS`.
+- Do not redesign booking `Transaction`. Deposits use
+  `RecurringDepositTransaction`; settlement deposit lines use
+  `SettlementRecurringDepositTransaction`.
+- Settlement net =
+  booking payments + deposit collections − deposit refunds.
+- Forfeiture is deposit-status + audit only; no cash transaction.
+- No replace/pause/resume/skip endpoints. New period = cancel then create a
+  separate agreement.
+- Court `recurring_deposit_refund_notice_days` max is 30; `null` blocks create.
+  Only platform admin/owner may change it. Agreements store
+  `refund_notice_days_snapshot`.
+- Access helpers live on `ClubAccessContext`:
+  `can_view_recurring_agreement`, `can_create_recurring_agreement`,
+  `can_cancel_recurring_agreement`, `can_refund_recurring_deposit`,
+  `scoped_recurring_agreements_queryset`.
+- Staff refunds require assigned court + original deposit collector.
+- Preview uses `previewed_at`; cancel recalculates with server
+  `cancellation_requested_at`.
 
 ## Dashboard, Unsettled Transactions, and Settlement Concepts
 
@@ -1265,7 +1306,13 @@ Notes:
   `/api/v1/clubs/{club_slug}/settlements/preview/`, and
   `/api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`,
   `/api/v1/clubs/{club_slug}/audit-logs/`, and
-  `/api/v1/clubs/{club_slug}/audit-logs/{id}/`.
+  `/api/v1/clubs/{club_slug}/audit-logs/{id}/`,
+  `/api/v1/clubs/{club_slug}/recurring-agreements/`,
+  `/api/v1/clubs/{club_slug}/recurring-agreements/availability/`,
+  `/api/v1/clubs/{club_slug}/recurring-agreements/{id}/`,
+  `/api/v1/clubs/{club_slug}/recurring-agreements/{id}/cancellation-preview/`,
+  `/api/v1/clubs/{club_slug}/recurring-agreements/{id}/cancel/`, and
+  `/api/v1/clubs/{club_slug}/recurring-agreements/{id}/refund-deposit/`.
 - Sprint 8 read-only dashboard routes include:
   `/api/v1/clubs/{club_slug}/courts/{court_id}/availability/`,
   `/api/v1/clubs/{club_slug}/calendar/`,

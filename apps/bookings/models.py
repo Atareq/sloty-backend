@@ -4,6 +4,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models
+from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 from phonenumber_field.modelfields import PhoneNumberField
 
@@ -23,6 +24,7 @@ class Booking(models.Model):
     class Source(models.TextChoices):
         MANUAL = "MANUAL", _("Manual")
         ADMIN_CORRECTION = "ADMIN_CORRECTION", _("Admin correction")
+        RECURRING = "RECURRING", _("Recurring")
 
     BLOCKING_STATUSES = (
         Status.HOLD,
@@ -68,6 +70,13 @@ class Booking(models.Model):
         default=Source.MANUAL,
         db_index=True,
     )
+    recurring_agreement = models.ForeignKey(
+        "recurring.RecurringAgreement",
+        blank=True,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="bookings",
+    )
     notes = models.TextField(blank=True)
     cancellation_reason = models.TextField(blank=True)
     no_show_reason = models.TextField(blank=True)
@@ -87,11 +96,19 @@ class Booking(models.Model):
     modified = models.DateTimeField(auto_now=True)
 
     class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["recurring_agreement", "start_time"],
+                condition=Q(recurring_agreement__isnull=False),
+                name="unique_recurring_agreement_occurrence_start",
+            ),
+        ]
         indexes = [
             models.Index(fields=["court", "start_time"]),
             models.Index(fields=["club", "start_time"]),
             models.Index(fields=["status"]),
             models.Index(fields=["source"]),
+            models.Index(fields=["recurring_agreement", "start_time"]),
             models.Index(fields=["created_by"]),
             models.Index(fields=["created"]),
             models.Index(fields=["completed_at"]),

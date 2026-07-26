@@ -54,6 +54,8 @@ class SettlementViewSet(
             queryset = queryset.prefetch_related(
                 "lines__transaction__booking",
                 "lines__transaction__court",
+                "deposit_lines__recurring_deposit_transaction__court",
+                "deposit_lines__recurring_deposit_transaction__agreement",
             )
         return queryset
 

@@ -181,6 +181,8 @@ def create_booking_transaction(
 
 def recalculate_booking_status_after_transaction_cancel(booking):
     old_status = booking.status
+    if booking.source == Booking.Source.RECURRING:
+        return old_status, booking.status
     if booking.status == Booking.Status.CONFIRMED and get_booking_paid_amount(
         booking
     ) == Decimal("0.00"):

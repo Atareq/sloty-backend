@@ -683,6 +683,12 @@ Do not build settlement before transactions.
 Do not build bookings before courts.
 Do not build dashboards before core data is stable.
 
+Sprint note — Recurring Agreements
+
+Implemented in apps/recurring/ with dedicated RecurringDepositTransaction
+rows. Booking Transaction remains booking-specific. No replace/pause/skip.
+See docs/recurring-agreements-contract.txt.
+
 Overall MVP Definition of Done
 
 MVP 1 is done when:
