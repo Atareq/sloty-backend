@@ -57,9 +57,18 @@ msgstr "تم إنشاء التسوية"
 msgid "Settlement marked settled"
 msgstr "تم اعتماد التسوية"
 
+msgid "Recurring agreement automatically terminated"
+msgstr "تم إنهاء الاتفاق المتكرر تلقائيًا"
+
+msgid "Cancellation refund notice days must be configured on this court."
+msgstr "يجب ضبط عدد أيام إشعار استرداد الإلغاء لهذا الملعب."
+
+msgid "The first recurring occurrence must be in the future."
+msgstr "يجب أن يكون أول موعد متكرر في المستقبل."
+
 #: apps/bookings/models.py:16
 msgid "Hold"
-msgstr "حجز مؤقت"
+msgstr "بانتظار العربون"
 
 #: apps/bookings/models.py:17
 msgid "Confirmed"
@@ -134,6 +143,24 @@ msgstr "تم إلغاء هذا الحجز بالفعل."
 msgid "This booking status transition is not allowed."
 msgstr "تغيير حالة هذا الحجز غير مسموح."
 
+msgid "A booking cannot be cancelled after its start time."
+msgstr "لا يمكن إلغاء الحجز بعد وقت بدايته."
+
+msgid "Booking cancellation policy is not configured for this court."
+msgstr "سياسة إلغاء الحجز غير مضبوطة لهذا الملعب."
+
+msgid "Refund payment method is required."
+msgstr "طريقة دفع الاسترداد مطلوبة."
+
+msgid "Payment reference is required for this court."
+msgstr "مرجع الدفع مطلوب لهذا الملعب."
+
+msgid "Refunds may only be created for cancelled bookings."
+msgstr "لا يمكن إنشاء الاستردادات إلا للحجوزات الملغية."
+
+msgid "Refund amount cannot exceed collected booking payments."
+msgstr "لا يمكن أن يتجاوز مبلغ الاسترداد المدفوعات المحصلة للحجز."
+
 #: apps/bookings/services.py:125
 msgid "Available"
 msgstr "متاح"
@@ -182,9 +209,19 @@ msgstr "لا يمكن إلغاء عمليات الدفع التي تمت تسو�
 msgid "Payments on terminal bookings cannot be cancelled."
 msgstr "لا يمكن إلغاء عمليات الدفع الخاصة بالحجوزات النهائية."
 
+#: apps/transactions/services.py
+msgid "Refund transactions cannot be cancelled."
+msgstr "لا يمكن إلغاء معاملات الاسترداد."
+
 #: apps/transactions/services.py:26
 msgid "Transactions can only be added to HOLD or CONFIRMED bookings."
 msgstr "يمكن إضافة عمليات الدفع إلى حجوزات الانتظار أو المؤكدة فقط."
+
+msgid "The first payment must be at least the court minimum deposit."
+msgstr "يجب ألا تقل الدفعة الأولى عن الحد الأدنى للعربون المحدد للملعب."
+
+msgid "Transaction amount cannot exceed remaining booking amount."
+msgstr "لا يمكن أن يتجاوز مبلغ الدفعة المبلغ المتبقي للحجز."
 
 #: apps/reports/serializers.py
 msgid "date_to must be on or after date_from."

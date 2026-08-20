@@ -47,6 +47,13 @@ def get_prefetched_pricing_periods(working_hour):
     return list(working_hour.pricing_periods.all())
 
 
+def working_hour_bounds(working_hour):
+    periods = get_prefetched_pricing_periods(working_hour)
+    if not periods:
+        return None
+    return periods[0].starts_at, periods[-1].ends_at, periods
+
+
 def get_working_hour_for_local_date(*, court, local_date, working_hours=None):
     weekday = local_date.weekday()
     if working_hours is not None:
@@ -85,20 +92,17 @@ def calculate_booking_price_from_schedule(
         local_date=local_start.date(),
         working_hours=working_hours,
     )
-    if (
-        working_hour is None
-        or working_hour.is_closed
-        or working_hour.opens_at is None
-        or working_hour.closes_at is None
-    ):
+    bounds = working_hour_bounds(working_hour) if working_hour is not None else None
+    if bounds is None:
         raise_booking_error(
             "BOOKING_OUTSIDE_WORKING_HOURS",
             BOOKING_OUTSIDE_WORKING_HOURS_MESSAGE,
         )
 
-    opens_at = datetime_for_local_date(local_start.date(), working_hour.opens_at)
-    closes_at = datetime_for_local_date(local_start.date(), working_hour.closes_at)
-    if local_start < opens_at or local_end > closes_at:
+    opens_at, closes_at, pricing_periods = bounds
+    day_open = datetime_for_local_date(local_start.date(), opens_at)
+    day_close = datetime_for_local_date(local_start.date(), closes_at)
+    if local_start < day_open or local_end > day_close:
         raise_booking_error(
             "BOOKING_OUTSIDE_WORKING_HOURS",
             BOOKING_OUTSIDE_WORKING_HOURS_MESSAGE,
@@ -114,12 +118,12 @@ def calculate_booking_price_from_schedule(
     if not (
         is_aligned_to_slot_grid(
             boundary=local_start.time(),
-            opens_at=working_hour.opens_at,
+            opens_at=opens_at,
             slot_duration_minutes=slot_duration,
         )
         and is_aligned_to_slot_grid(
             boundary=local_end.time(),
-            opens_at=working_hour.opens_at,
+            opens_at=opens_at,
             slot_duration_minutes=slot_duration,
         )
     ):
@@ -130,7 +134,7 @@ def calculate_booking_price_from_schedule(
 
     total = Decimal("0.00")
     cursor = local_start
-    for period in get_prefetched_pricing_periods(working_hour):
+    for period in pricing_periods:
         period_start = datetime_for_local_date(local_start.date(), period.starts_at)
         period_end = datetime_for_local_date(local_start.date(), period.ends_at)
         if period_end <= cursor:

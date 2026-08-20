@@ -8,17 +8,19 @@ from django.db.models import (
     DurationField,
     ExpressionWrapper,
     F,
+    IntegerField,
     Q,
     Sum,
     Value,
 )
-from django.db.models.functions import Coalesce, TruncDate, TruncMonth, TruncWeek
+from django.db.models.functions import Cast, Coalesce, TruncDate, TruncMonth, TruncWeek
 from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
 from apps.bookings.models import Booking
 from apps.courts.models import CourtWorkingHour
+from apps.courts.pricing import working_hour_bounds
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
 
@@ -50,10 +52,14 @@ def get_court_availability(*, access, court, date):
     if not court.is_active:
         raise serializers.ValidationError({"court": "Court is inactive."})
 
-    working_hour = CourtWorkingHour.objects.filter(
-        court=court,
-        weekday=date.weekday(),
-    ).first()
+    working_hour = (
+        CourtWorkingHour.objects.filter(
+            court=court,
+            weekday=date.weekday(),
+        )
+        .prefetch_related("pricing_periods")
+        .first()
+    )
     base_response = {
         "club": {
             "id": access.club.id,
@@ -74,14 +80,16 @@ def get_court_availability(*, access, court, date):
     if working_hour is None:
         return base_response
 
-    base_response["opens_at"] = working_hour.opens_at
-    base_response["closes_at"] = working_hour.closes_at
-    if working_hour.is_closed:
+    bounds = working_hour_bounds(working_hour)
+    if bounds is None:
         return base_response
 
+    opens_at, closes_at, _pricing_periods = bounds
+    base_response["opens_at"] = opens_at
+    base_response["closes_at"] = closes_at
     base_response["is_closed"] = False
-    opens_at = datetime_for_date(date, working_hour.opens_at)
-    closes_at = datetime_for_date(date, working_hour.closes_at)
+    opens_at = datetime_for_date(date, opens_at)
+    closes_at = datetime_for_date(date, closes_at)
     slot_delta = timedelta(minutes=court.slot_duration_minutes)
 
     blocking_bookings = list(
@@ -140,7 +148,10 @@ def get_calendar_items(*, access, date_from, date_to, court=None, status=None):
         .annotate(
             paid_amount=money_sum(
                 "transactions__amount",
-                filter=Q(transactions__is_cancelled=False),
+                filter=Q(
+                    transactions__is_cancelled=False,
+                    transactions__transaction_type=Transaction.Type.PAYMENT,
+                ),
             ),
         )
         .order_by("start_time", "id")
@@ -218,6 +229,8 @@ SUMMARY_FINANCIAL_FIELDS = (
     "total_paid_amount",
     "total_remaining_amount",
     "transaction_count",
+    "booking_payment_total",
+    "booking_refund_total",
     "transaction_total",
     "unsettled_transaction_count",
     "unsettled_transaction_total_amount",
@@ -284,7 +297,8 @@ def local_date(value):
 
 def with_hold_expiry(queryset):
     hold_expiry_duration = ExpressionWrapper(
-        F("court__internal_hold_expiry_hours") * Value(timedelta(hours=1)),
+        Cast("court__internal_hold_expiry_hours", IntegerField())
+        * Value(timedelta(hours=1)),
         output_field=DurationField(),
     )
     return queryset.annotate(
@@ -314,9 +328,17 @@ def apply_transaction_filters(
 
 
 def aggregate_transaction_metrics(transactions):
-    return transactions.aggregate(
+    metrics = transactions.aggregate(
         transaction_total=money_sum("amount"),
         transaction_count=Count("id"),
+        booking_payment_total=money_sum(
+            "amount",
+            filter=Q(transaction_type=Transaction.Type.PAYMENT),
+        ),
+        booking_refund_total=money_sum(
+            "amount",
+            filter=Q(transaction_type=Transaction.Type.REFUND),
+        ),
         settled_transaction_amount=money_sum(
             "amount",
             filter=Q(settlement_line__isnull=False),
@@ -326,16 +348,28 @@ def aggregate_transaction_metrics(transactions):
             filter=Q(settlement_line__isnull=False),
         ),
     )
+    metrics["booking_refund_total"] = abs(money(metrics["booking_refund_total"]))
+    return metrics
 
 
 def get_unsettled_transactions_queryset(
-    *, access, court=None, collected_by=None, payment_method=None
+    *,
+    access,
+    date_from,
+    date_to,
+    court=None,
+    collected_by=None,
+    payment_method=None,
+    settlement_status=None,
 ):
+    if settlement_status == "settled":
+        return Transaction.objects.none()
     if court is not None and not access.can_access_court(court):
         raise PermissionDenied("You cannot access this court.")
     queryset = access.scoped_transactions_queryset().filter(
         club=access.club,
-        amount__gt=0,
+        created__gte=date_from,
+        created__lt=date_to,
         settlement_line__isnull=True,
         is_cancelled=False,
     )
@@ -351,15 +385,21 @@ def get_unsettled_transactions_queryset(
 def get_unsettled_transaction_metrics(
     *,
     access,
+    date_from,
+    date_to,
     court=None,
     collected_by=None,
     payment_method=None,
+    settlement_status=None,
 ):
     queryset = get_unsettled_transactions_queryset(
         access=access,
+        date_from=date_from,
+        date_to=date_to,
         court=court,
         collected_by=collected_by,
         payment_method=payment_method,
+        settlement_status=settlement_status,
     )
     return queryset.aggregate(
         unsettled_transaction_count=Count("id"),
@@ -369,15 +409,33 @@ def get_unsettled_transaction_metrics(
 
 
 def get_payment_method_totals(transactions):
-    return {
-        row["payment_method"]: {
-            "amount": money(row["amount"]),
+    totals = {
+        payment_method: {
+            "amount": ZERO,
+            "refund": ZERO,
+            "count": 0,
+        }
+        for payment_method, _label in Transaction.PaymentMethod.choices
+    }
+    rows = (
+        transactions.values("payment_method")
+        .annotate(
+            net_amount=money_sum("amount"),
+            refund=money_sum(
+                "amount",
+                filter=Q(transaction_type=Transaction.Type.REFUND),
+            ),
+            count=Count("id"),
+        )
+        .order_by("payment_method")
+    )
+    for row in rows:
+        totals[row["payment_method"]] = {
+            "amount": money(row["net_amount"]),
+            "refund": abs(money(row["refund"])),
             "count": row["count"],
         }
-        for row in transactions.values("payment_method")
-        .annotate(amount=money_sum("amount"), count=Count("id"))
-        .order_by("payment_method")
-    }
+    return totals
 
 
 def get_staff_unsettled_money(unsettled_transactions):
@@ -436,7 +494,10 @@ def get_needs_action_breakdown(bookings):
         bookings.annotate(
             paid_amount=money_sum(
                 "transactions__amount",
-                filter=Q(transactions__is_cancelled=False),
+                filter=Q(
+                    transactions__is_cancelled=False,
+                    transactions__transaction_type=Transaction.Type.PAYMENT,
+                ),
             ),
         )
     )
@@ -557,6 +618,7 @@ def get_dashboard_summary(
             Transaction.objects.filter(
                 booking__in=bookings.values("id"),
                 is_cancelled=False,
+                transaction_type=Transaction.Type.PAYMENT,
             )
             .values("booking__court_id")
             .annotate(total=money_sum("amount"))
@@ -627,15 +689,21 @@ def get_dashboard_summary(
     transaction_summary = aggregate_transaction_metrics(transactions)
     unsettled_transaction_metrics = get_unsettled_transaction_metrics(
         access=access,
+        date_from=date_from,
+        date_to=date_to,
         court=court,
         collected_by=collected_by,
         payment_method=payment_method,
+        settlement_status=settlement_status,
     )
     unsettled_transactions = get_unsettled_transactions_queryset(
         access=access,
+        date_from=date_from,
+        date_to=date_to,
         court=court,
         collected_by=collected_by,
         payment_method=payment_method,
+        settlement_status=settlement_status,
     )
     settled_settlements = settled_settlements_queryset(
         access=access,
@@ -656,6 +724,8 @@ def get_dashboard_summary(
         "total_paid_amount": paid_amount,
         "total_remaining_amount": booking_value - paid_amount,
         "transaction_count": transaction_summary["transaction_count"],
+        "booking_payment_total": transaction_summary["booking_payment_total"],
+        "booking_refund_total": transaction_summary["booking_refund_total"],
         "transaction_total": transaction_summary["transaction_total"],
         "unsettled_transaction_count": unsettled_transaction_metrics[
             "unsettled_transaction_count"
@@ -675,6 +745,12 @@ def get_dashboard_summary(
     summary["needs_action_count"] = needs_action["needs_action_count"]
     if not financial_visible:
         summary = null_financial_fields(summary, SUMMARY_FINANCIAL_FIELDS)
+
+    effective_context_court = (
+        court
+        if court is not None
+        else courts[0] if access.is_staff and len(courts) == 1 else None
+    )
 
     return {
         "club": {
@@ -697,8 +773,10 @@ def get_dashboard_summary(
             "club_name": access.club.name,
             "date_from": local_date(date_from),
             "date_to": local_date(date_to - timedelta(microseconds=1)),
-            "court": court.id if court else None,
-            "court_name": court.name if court else None,
+            "court": effective_context_court.id if effective_context_court else None,
+            "court_name": (
+                effective_context_court.name if effective_context_court else None
+            ),
             "collected_by": collected_by.id if collected_by else None,
             "collected_by_name": (
                 get_user_display_name(collected_by) if collected_by else None
@@ -750,11 +828,14 @@ def get_dashboard_overview(*, access, date_from, date_to, court=None):
         Transaction.objects.filter(
             booking__in=bookings.values("id"),
             is_cancelled=False,
+            transaction_type=Transaction.Type.PAYMENT,
         ).aggregate(total=Sum("amount"))["total"]
     )
     transaction_summary = aggregate_transaction_metrics(transactions)
     unsettled_transaction_metrics = get_unsettled_transaction_metrics(
         access=access,
+        date_from=date_from,
+        date_to=date_to,
         court=court,
     )
     settled_summary = settled_settlements_queryset(
@@ -892,15 +973,12 @@ def available_minutes_for_court(court, working_hours_by_weekday, date_from, date
     total = 0
     for date_value in iter_dates(date_from, date_to):
         working_hour = working_hours_by_weekday.get(date_value.weekday())
-        if (
-            working_hour is None
-            or working_hour.is_closed
-            or working_hour.opens_at is None
-            or working_hour.closes_at is None
-        ):
+        bounds = working_hour_bounds(working_hour) if working_hour is not None else None
+        if bounds is None:
             continue
-        opens_at = datetime_for_date(date_value, working_hour.opens_at)
-        closes_at = datetime_for_date(date_value, working_hour.closes_at)
+        opens_at, closes_at, _pricing_periods = bounds
+        opens_at = datetime_for_date(date_value, opens_at)
+        closes_at = datetime_for_date(date_value, closes_at)
         clipped_start = max(opens_at, date_from)
         clipped_end = min(closes_at, date_to)
         if clipped_start < clipped_end:
@@ -920,7 +998,7 @@ def get_court_utilization(*, access, date_from, date_to):
     validate_dashboard_access(access)
     courts = list(
         access.scoped_dashboard_courts_queryset()
-        .prefetch_related("working_hours")
+        .prefetch_related("working_hours__pricing_periods")
         .order_by("id")
     )
     bookings_by_court = {court.id: [] for court in courts}

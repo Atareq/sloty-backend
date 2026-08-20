@@ -93,7 +93,6 @@ def get_settlement_candidate_transactions(*, access, collected_by, lock=False):
     queryset = access.scoped_transactions_queryset().filter(
         club=access.club,
         created_by=collected_by,
-        amount__gt=0,
         settlement_line__isnull=True,
         is_cancelled=False,
     )
@@ -169,6 +168,21 @@ def build_totals_by_payment_method(queryset):
     return totals
 
 
+def build_deposit_totals_by_payment_method(queryset):
+    totals = {
+        str(payment_method): Decimal("0.00")
+        for payment_method, _label in Transaction.PaymentMethod.choices
+    }
+    for tx in queryset:
+        signed_amount = tx.amount
+        if tx.transaction_type == RecurringDepositTransaction.Type.REFUND:
+            signed_amount = -signed_amount
+        totals[str(tx.payment_method)] = (
+            totals.get(str(tx.payment_method), Decimal("0.00")) + signed_amount
+        )
+    return totals
+
+
 def merge_payment_method_totals(*totals_maps):
     merged = {
         str(payment_method): Decimal("0.00")
@@ -184,7 +198,7 @@ def serialize_preview_transactions(transactions):
     return [
         {
             "id": transaction_obj.id,
-            "kind": "BOOKING_PAYMENT",
+            "kind": transaction_obj.transaction_type,
             "booking": transaction_obj.booking_id,
             "agreement": None,
             "court": transaction_obj.court_id,
@@ -218,7 +232,19 @@ def serialize_preview_deposit_transactions(deposit_transactions):
 
 def compute_settlement_breakdown(transactions, deposit_transactions):
     booking_payments = sum(
-        (tx.amount for tx in transactions),
+        (
+            tx.amount
+            for tx in transactions
+            if tx.transaction_type == Transaction.Type.PAYMENT
+        ),
+        Decimal("0.00"),
+    )
+    booking_refunds = sum(
+        (
+            tx.amount
+            for tx in transactions
+            if tx.transaction_type == Transaction.Type.REFUND
+        ),
         Decimal("0.00"),
     )
     deposit_collections = sum(
@@ -239,9 +265,12 @@ def compute_settlement_breakdown(transactions, deposit_transactions):
     )
     return {
         "booking_payments": booking_payments,
+        "booking_refunds": booking_refunds,
         "deposit_collections": deposit_collections,
         "deposit_refunds": deposit_refunds,
-        "net_amount": booking_payments + deposit_collections - deposit_refunds,
+        "net_amount": (
+            booking_payments + booking_refunds + deposit_collections - deposit_refunds
+        ),
     }
 
 
@@ -274,12 +303,13 @@ def build_settlement_summary(
         "transaction_count": len(transactions) + len(deposit_transactions),
         "total_amount": breakdown["net_amount"],
         "booking_payments": breakdown["booking_payments"],
+        "booking_refunds": breakdown["booking_refunds"],
         "deposit_collections": breakdown["deposit_collections"],
         "deposit_refunds": breakdown["deposit_refunds"],
         "net_amount": breakdown["net_amount"],
         "totals_by_payment_method": merge_payment_method_totals(
             build_totals_by_payment_method(queryset),
-            build_totals_by_payment_method(deposit_queryset),
+            build_deposit_totals_by_payment_method(deposit_transactions),
         ),
         "transactions": (
             serialize_preview_transactions(transactions)
@@ -433,6 +463,7 @@ def create_approved_settlement(*, access, collected_by, notes="", actor, court=N
                     "total_amount": str(created_settlement.total_amount),
                     "transaction_count": created_settlement.transaction_count,
                     "booking_payments": str(breakdown["booking_payments"]),
+                    "booking_refunds": str(breakdown["booking_refunds"]),
                     "deposit_collections": str(breakdown["deposit_collections"]),
                     "deposit_refunds": str(breakdown["deposit_refunds"]),
                     "transaction_ids": [

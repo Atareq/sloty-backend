@@ -21,9 +21,6 @@ def default_closed_working_hour(court, weekday):
         "id": None,
         "court": court.id,
         "weekday": weekday,
-        "opens_at": None,
-        "closes_at": None,
-        "is_closed": True,
         "pricing_periods": [],
     }
 
@@ -52,9 +49,6 @@ def serialize_weekly_working_hours(court):
                 "id": working_hour.id,
                 "court": court.id,
                 "weekday": working_hour.weekday,
-                "opens_at": format_time(working_hour.opens_at),
-                "closes_at": format_time(working_hour.closes_at),
-                "is_closed": working_hour.is_closed,
                 "pricing_periods": [
                     serialize_price_period(period)
                     for period in working_hour.pricing_periods.all()
@@ -65,31 +59,16 @@ def serialize_weekly_working_hours(court):
 
 
 def validate_pricing_periods_for_row(*, court, row):
-    is_closed = row.get("is_closed", False)
     pricing_periods = sorted(
         row.get("pricing_periods", []),
         key=lambda period: (period["starts_at"], period["ends_at"]),
     )
 
-    if is_closed:
-        if pricing_periods:
-            raise coded_error(
-                "pricing_periods",
-                _("Closed days cannot contain pricing periods."),
-                "CLOSED_DAY_CANNOT_HAVE_PRICING",
-            )
+    if not pricing_periods:
         return
 
-    opens_at = row.get("opens_at")
-    closes_at = row.get("closes_at")
-    if not pricing_periods:
-        raise coded_error(
-            "pricing_periods",
-            _("Open working hours require at least one pricing period."),
-            "WORKING_HOUR_PRICING_REQUIRED",
-        )
-
-    previous_end = opens_at
+    day_start = pricing_periods[0]["starts_at"]
+    previous_end = day_start
     for period in pricing_periods:
         starts_at = period["starts_at"]
         ends_at = period["ends_at"]
@@ -106,21 +85,15 @@ def validate_pricing_periods_for_row(*, court, row):
                 _("Price must be greater than or equal to zero."),
                 "INVALID_WORKING_HOUR_PRICE",
             )
-        if starts_at < opens_at or ends_at > closes_at:
-            raise coded_error(
-                "pricing_periods",
-                _("Pricing periods must be inside the configured working hours."),
-                "WORKING_HOUR_PRICING_OUTSIDE_HOURS",
-            )
         if not (
             is_aligned_to_slot_grid(
                 boundary=starts_at,
-                opens_at=opens_at,
+                opens_at=day_start,
                 slot_duration_minutes=court.slot_duration_minutes,
             )
             and is_aligned_to_slot_grid(
                 boundary=ends_at,
-                opens_at=opens_at,
+                opens_at=day_start,
                 slot_duration_minutes=court.slot_duration_minutes,
             )
         ):
@@ -143,13 +116,6 @@ def validate_pricing_periods_for_row(*, court, row):
             )
         previous_end = ends_at
 
-    if previous_end != closes_at:
-        raise coded_error(
-            "pricing_periods",
-            _("Pricing periods must cover the full working period without gaps."),
-            "WORKING_HOUR_PRICING_INCOMPLETE",
-        )
-
 
 def validate_weekly_working_hours_payload(*, court, working_hours):
     for row in working_hours:
@@ -157,28 +123,22 @@ def validate_weekly_working_hours_payload(*, court, working_hours):
 
 
 def pricing_configured_for_working_hour(working_hour):
-    if (
-        working_hour.is_closed
-        or working_hour.opens_at is None
-        or working_hour.closes_at is None
-    ):
+    pricing_periods = [
+        {
+            "starts_at": period.starts_at,
+            "ends_at": period.ends_at,
+            "price": period.price,
+        }
+        for period in working_hour.pricing_periods.all()
+    ]
+    if not pricing_periods:
         return True
     try:
         validate_pricing_periods_for_row(
             court=working_hour.court,
             row={
                 "weekday": working_hour.weekday,
-                "opens_at": working_hour.opens_at,
-                "closes_at": working_hour.closes_at,
-                "is_closed": working_hour.is_closed,
-                "pricing_periods": [
-                    {
-                        "starts_at": period.starts_at,
-                        "ends_at": period.ends_at,
-                        "price": period.price,
-                    }
-                    for period in working_hour.pricing_periods.all()
-                ],
+                "pricing_periods": pricing_periods,
             },
         )
     except serializers.ValidationError:
@@ -188,9 +148,7 @@ def pricing_configured_for_working_hour(working_hour):
 
 def pricing_configured_for_court(court):
     open_rows = [
-        row
-        for row in court.working_hours.all()
-        if not row.is_closed and row.opens_at is not None and row.closes_at is not None
+        row for row in court.working_hours.all() if list(row.pricing_periods.all())
     ]
     if not open_rows:
         return False
@@ -201,7 +159,6 @@ def get_court_pricing_summary(court):
     prices = [
         period.price
         for working_hour in court.working_hours.all()
-        if not working_hour.is_closed
         for period in working_hour.pricing_periods.all()
     ]
     return {
@@ -212,18 +169,20 @@ def get_court_pricing_summary(court):
 
 def validate_slot_duration_against_pricing(court, slot_duration_minutes):
     for working_hour in court.working_hours.all():
-        if working_hour.is_closed or working_hour.opens_at is None:
+        periods = list(working_hour.pricing_periods.all())
+        if not periods:
             continue
-        for period in working_hour.pricing_periods.all():
+        opens_at = periods[0].starts_at
+        for period in periods:
             if not (
                 is_aligned_to_slot_grid(
                     boundary=period.starts_at,
-                    opens_at=working_hour.opens_at,
+                    opens_at=opens_at,
                     slot_duration_minutes=slot_duration_minutes,
                 )
                 and is_aligned_to_slot_grid(
                     boundary=period.ends_at,
-                    opens_at=working_hour.opens_at,
+                    opens_at=opens_at,
                     slot_duration_minutes=slot_duration_minutes,
                 )
             ):
@@ -255,20 +214,13 @@ def replace_weekly_working_hours(*, court, working_hours):
                 weekday,
                 {
                     "weekday": weekday,
-                    "opens_at": None,
-                    "closes_at": None,
-                    "is_closed": True,
                     "pricing_periods": [],
                 },
             )
             working_hour, _created = CourtWorkingHour.objects.update_or_create(
                 court=locked_court,
                 weekday=weekday,
-                defaults={
-                    "opens_at": row.get("opens_at"),
-                    "closes_at": row.get("closes_at"),
-                    "is_closed": row.get("is_closed", False),
-                },
+                defaults={},
             )
             saved.append(working_hour)
         CourtWorkingHourPricePeriod.objects.filter(working_hour__in=saved).delete()

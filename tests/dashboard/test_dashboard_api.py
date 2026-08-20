@@ -12,7 +12,7 @@ from apps.accounts.models import User
 from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
-from apps.courts.models import Court, CourtWorkingHour
+from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.dashboard.views import (
     ClubCalendarAPIView,
     CourtAvailabilityAPIView,
@@ -93,13 +93,17 @@ class DashboardAPITestCase(APITestCase):
         is_closed=False,
     ):
         for weekday in CourtWorkingHour.Weekday.values:
-            CourtWorkingHour.objects.create(
+            working_hour = CourtWorkingHour.objects.create(
                 court=court,
                 weekday=weekday,
-                opens_at=None if is_closed else opens_at,
-                closes_at=None if is_closed else closes_at,
-                is_closed=is_closed,
             )
+            if not is_closed:
+                CourtWorkingHourPricePeriod.objects.create(
+                    working_hour=working_hour,
+                    starts_at=opens_at,
+                    ends_at=closes_at,
+                    price=court.default_price,
+                )
 
     def create_booking(self, court: Court, **extra_fields) -> Booking:
         start_time = extra_fields.pop("start_time", self.time_at(9))
@@ -407,7 +411,11 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
         CourtWorkingHour.objects.filter(
             court=self.court,
             weekday=1,
-        ).update(is_closed=True, opens_at=None, closes_at=None)
+        ).delete()
+        CourtWorkingHour.objects.create(
+            court=self.court,
+            weekday=1,
+        )
         self.client.force_authenticate(user=self.platform_admin)
 
         response = self.client.get(
@@ -425,11 +433,15 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
             "Thirty Minute Court",
             slot_duration_minutes=30,
         )
-        CourtWorkingHour.objects.create(
+        working_hour = CourtWorkingHour.objects.create(
             court=short_court,
             weekday=0,
-            opens_at=time(8, 0),
-            closes_at=time(9, 0),
+        )
+        CourtWorkingHourPricePeriod.objects.create(
+            working_hour=working_hour,
+            starts_at=time(8, 0),
+            ends_at=time(9, 0),
+            price=short_court.default_price,
         )
         self.client.force_authenticate(user=self.platform_admin)
 
@@ -600,6 +612,8 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["scope"]["role"], "STAFF")
         self.assertEqual(response.data["scope"]["court_ids"], [self.court.id])
+        self.assertEqual(response.data["context"]["court"], self.court.id)
+        self.assertEqual(response.data["context"]["court_name"], self.court.name)
         self.assertFalse(response.data["scope"]["financial_visible"])
         self.assertEqual(response.data["summary"]["total_bookings"], 6)
         self.assertEqual(response.data["summary"]["confirmed_bookings"], 1)
@@ -635,6 +649,96 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(default_response.status_code, status.HTTP_200_OK)
         self.assertIn("date_from", default_response.data["period"])
         self.assertIn("date_to", default_response.data["period"])
+
+    def test_booking_metrics_use_booking_date_and_transactions_use_created_date(self):
+        booking_occurs_later = self.create_booking(
+            self.court,
+            customer_name="Future Booking Paid Today",
+            customer_phone="+201000000201",
+            start_time=timezone.datetime(
+                2026,
+                8,
+                20,
+                20,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+            end_time=timezone.datetime(
+                2026,
+                8,
+                20,
+                21,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+            status=Booking.Status.CONFIRMED,
+        )
+        booking_occurs_in_range = self.create_booking(
+            self.court,
+            customer_name="Today Booking Paid Yesterday",
+            customer_phone="+201000000202",
+            start_time=timezone.datetime(
+                2026,
+                8,
+                17,
+                20,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+            end_time=timezone.datetime(
+                2026,
+                8,
+                17,
+                21,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+            status=Booking.Status.CONFIRMED,
+        )
+        self.create_transaction(
+            booking_occurs_later,
+            amount=Decimal("300.00"),
+            created_by=self.staff,
+            created=timezone.datetime(
+                2026,
+                8,
+                17,
+                14,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+        )
+        self.create_transaction(
+            booking_occurs_in_range,
+            amount=Decimal("200.00"),
+            created_by=self.staff,
+            created=timezone.datetime(
+                2026,
+                8,
+                16,
+                14,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(
+            self.summary_url(self.club),
+            {"date_from": "2026-08-17", "date_to": "2026-08-17"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        summary = response.data["summary"]
+        self.assertEqual(summary["total_bookings"], 1)
+        self.assertEqual(summary["confirmed_bookings"], 1)
+        self.assertEqual(summary["total_booking_value"], "300.00")
+        self.assertEqual(summary["total_paid_amount"], "200.00")
+        self.assertEqual(summary["total_remaining_amount"], "100.00")
+        self.assertEqual(summary["transaction_count"], 1)
+        self.assertEqual(summary["booking_payment_total"], "300.00")
+        self.assertEqual(summary["booking_refund_total"], "0.00")
+        self.assertEqual(summary["transaction_total"], "300.00")
 
     def test_date_range_validation(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -739,6 +843,8 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(summary["total_paid_amount"], "480.00")
         self.assertEqual(summary["total_remaining_amount"], "1620.00")
         self.assertEqual(summary["transaction_count"], 3)
+        self.assertEqual(summary["booking_payment_total"], "480.00")
+        self.assertEqual(summary["booking_refund_total"], "0.00")
         self.assertEqual(summary["transaction_total"], "480.00")
         self.assertEqual(summary["unsettled_transaction_count"], 1)
         self.assertEqual(summary["unsettled_transaction_total_amount"], "80.00")
@@ -779,13 +885,17 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(response.data["context"]["club_id"], self.club.id)
         self.assertEqual(
             response.data["payment_method_totals"][Transaction.PaymentMethod.CASH],
-            {"amount": "400.00", "count": 2},
+            {"amount": "400.00", "refund": "0.00", "count": 2},
         )
         self.assertEqual(
             response.data["payment_method_totals"][
                 Transaction.PaymentMethod.DIGITAL_WALLET
             ],
-            {"amount": "80.00", "count": 1},
+            {"amount": "80.00", "refund": "0.00", "count": 1},
+        )
+        self.assertEqual(
+            response.data["payment_method_totals"][Transaction.PaymentMethod.OTHER],
+            {"amount": "0.00", "refund": "0.00", "count": 0},
         )
         self.assertEqual(len(response.data["staff_unsettled_money"]), 1)
         staff_money = response.data["staff_unsettled_money"][0]
@@ -799,6 +909,71 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             ],
             "80.00",
         )
+
+    def test_payment_method_totals_include_net_amount_refund_and_count(self):
+        selected_at = timezone.datetime(
+            2026,
+            8,
+            17,
+            14,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        self.create_transaction(
+            self.confirmed,
+            amount=Decimal("500.00"),
+            created_by=self.staff,
+            created=selected_at,
+        )
+        self.create_transaction(
+            self.confirmed,
+            amount=Decimal("300.00"),
+            created_by=self.staff,
+            created=selected_at + timedelta(minutes=5),
+        )
+        self.create_transaction(
+            self.confirmed,
+            transaction_type=Transaction.Type.REFUND,
+            amount=Decimal("-200.00"),
+            created_by=self.staff,
+            created=selected_at + timedelta(minutes=10),
+        )
+        self.create_transaction(
+            self.confirmed,
+            transaction_type=Transaction.Type.REFUND,
+            amount=Decimal("-100.00"),
+            created_by=self.staff,
+            created=selected_at - timedelta(days=1),
+        )
+        self.create_transaction(
+            self.confirmed,
+            amount=Decimal("700.00"),
+            created_by=self.staff,
+            created=selected_at + timedelta(minutes=15),
+            is_cancelled=True,
+            cancelled_by=self.platform_admin,
+            cancelled_at=selected_at + timedelta(minutes=16),
+            cancellation_reason="Excluded from dashboard totals",
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(
+            self.summary_url(self.club),
+            {"date_from": "2026-08-17", "date_to": "2026-08-17"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        cash_totals = response.data["payment_method_totals"][
+            Transaction.PaymentMethod.CASH
+        ]
+        self.assertEqual(
+            cash_totals,
+            {"amount": "600.00", "refund": "200.00", "count": 3},
+        )
+        self.assertEqual(response.data["summary"]["transaction_count"], 3)
+        self.assertEqual(response.data["summary"]["booking_payment_total"], "800.00")
+        self.assertEqual(response.data["summary"]["booking_refund_total"], "200.00")
+        self.assertEqual(response.data["summary"]["transaction_total"], "600.00")
 
     def test_summary_filters_transaction_metrics_without_filtering_booking_counts(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -828,7 +1003,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         )
         self.assertEqual(response.data["context"]["settlement_status"], "unsettled")
 
-    def test_summary_unsettled_metrics_are_current_open_balance_not_period_only(self):
+    def test_summary_unsettled_metrics_use_transaction_created_period(self):
         old_unsettled = self.create_transaction(
             self.confirmed,
             amount=Decimal("20.00"),
@@ -843,10 +1018,10 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         summary = response.data["summary"]
         self.assertEqual(summary["transaction_count"], 3)
         self.assertEqual(summary["transaction_total"], "480.00")
-        self.assertEqual(summary["unsettled_transaction_count"], 2)
-        self.assertEqual(summary["unsettled_transaction_total_amount"], "100.00")
-        self.assertEqual(summary["staff_with_unsettled_transactions_count"], 2)
-        self.assertIn(
+        self.assertEqual(summary["unsettled_transaction_count"], 1)
+        self.assertEqual(summary["unsettled_transaction_total_amount"], "80.00")
+        self.assertEqual(summary["staff_with_unsettled_transactions_count"], 1)
+        self.assertNotIn(
             old_unsettled.created_by_id,
             {item["collected_by"] for item in response.data["staff_unsettled_money"]},
         )

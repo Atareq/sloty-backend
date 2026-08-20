@@ -8,6 +8,7 @@ from django.utils import timezone
 from django.utils.translation import pgettext
 
 from apps.bookings.models import Booking
+from apps.courts.pricing import working_hour_bounds
 from apps.reports.constants import (
     DEMAND_BUCKET_MINUTES,
     EVENING_START_TIME,
@@ -16,6 +17,7 @@ from apps.reports.constants import (
     PERIOD_DAYTIME,
     PERIOD_EVENING,
 )
+from apps.transactions.models import Transaction
 
 ZERO = Decimal("0.00")
 
@@ -86,13 +88,15 @@ def fixed_clock_bucket_start(value):
 def period_window_for_working_hours(
     date_value, working_hour, period, hour_from, hour_to
 ):
-    if working_hour is None or working_hour.is_closed:
+    if working_hour is None:
         return None
-    if working_hour.opens_at is None or working_hour.closes_at is None:
+    bounds = working_hour_bounds(working_hour)
+    if bounds is None:
         return None
 
-    opens_at = aware_combine(date_value, working_hour.opens_at)
-    closes_at = aware_combine(date_value, working_hour.closes_at)
+    opens_at, closes_at, _pricing_periods = bounds
+    opens_at = aware_combine(date_value, opens_at)
+    closes_at = aware_combine(date_value, closes_at)
     if period == PERIOD_DAYTIME:
         period_start = opens_at
         period_end = min(closes_at, aware_combine(date_value, EVENING_START_TIME))
@@ -146,7 +150,9 @@ def get_court_usage_report(*, access, query):
     selected_courts = access.scoped_report_courts_queryset().order_by("id")
     if query.get("court") is not None:
         selected_courts = selected_courts.filter(pk=query["court"].pk)
-    selected_courts = list(selected_courts.prefetch_related("working_hours"))
+    selected_courts = list(
+        selected_courts.prefetch_related("working_hours__pricing_periods")
+    )
     court_ids = [court.id for court in selected_courts]
     courts_by_id = {court.id: court for court in selected_courts}
 
@@ -202,7 +208,10 @@ def get_court_usage_report(*, access, query):
             paid_amount=Coalesce(
                 Sum(
                     "transactions__amount",
-                    filter=Q(transactions__is_cancelled=False),
+                    filter=Q(
+                        transactions__is_cancelled=False,
+                        transactions__transaction_type=Transaction.Type.PAYMENT,
+                    ),
                 ),
                 Value(ZERO),
                 output_field=DecimalField(max_digits=12, decimal_places=2),

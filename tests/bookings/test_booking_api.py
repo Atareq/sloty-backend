@@ -49,6 +49,7 @@ class BookingAPITestCase(APITestCase):
             "name": name,
             "default_price": Decimal("300.00"),
             "slot_duration_minutes": 60,
+            "cancellation_refund_notice_days": 0,
         }
         data.update(extra_fields)
         court = Court.objects.create(**data)
@@ -173,11 +174,7 @@ class BookingAPITestCase(APITestCase):
         working_hour, _ = CourtWorkingHour.objects.update_or_create(
             court=court,
             weekday=weekday,
-            defaults={
-                "opens_at": opens_at if not is_closed else None,
-                "closes_at": closes_at if not is_closed else None,
-                "is_closed": is_closed,
-            },
+            defaults={},
         )
         working_hour.pricing_periods.all().delete()
         if not is_closed:
@@ -270,7 +267,7 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["total_price"], "500.00")
 
-    def test_booking_missing_pricing_is_rejected(self):
+    def test_booking_on_closed_day_is_rejected(self):
         CourtWorkingHour.objects.get(
             court=self.court, weekday=2
         ).pricing_periods.all().delete()
@@ -279,7 +276,7 @@ class BookingCreationTests(BookingAPITestCase):
         response = self.post_booking(self.club, self.court)
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-        self.assert_api_error(response, "BOOKING_PRICE_NOT_CONFIGURED")
+        self.assert_api_error(response, "BOOKING_OUTSIDE_WORKING_HOURS")
 
     def test_booking_time_must_align_with_slot_grid(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -470,7 +467,7 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertEqual(slot["booking"]["id"], booking.id)
         self.assertEqual(slot["booking"]["total_booking_value"], "300.00")
 
-    def test_missing_slot_pricing_returns_unavailable_slot(self):
+    def test_weekday_with_empty_pricing_returns_closed_day_message(self):
         CourtWorkingHour.objects.get(
             court=self.court, weekday=2
         ).pricing_periods.all().delete()
@@ -478,11 +475,8 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         response = self.get_slots()
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        slot = self.slot_by_hour(response, 9)
-        self.assertIsNone(slot["slot_price"])
-        self.assertEqual(slot["slot_status"], "UNAVAILABLE")
-        self.assertFalse(slot["is_available"])
-        self.assertIsNone(slot["booking"])
+        self.assertEqual(response.data["slots"], [])
+        self.assertEqual(response.data["message"], "The court is closed on this day.")
 
     def test_cancelled_and_expired_bookings_do_not_block_slots(self):
         self.create_booking(
@@ -536,7 +530,7 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         response = self.get_slots()
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(self.slot_by_hour(response, 9)["label"], "حجز مؤقت")
+        self.assertEqual(self.slot_by_hour(response, 9)["label"], "بانتظار العربون")
         self.assertEqual(self.slot_by_hour(response, 10)["label"], "متاح")
 
     def test_date_range_too_large_returns_slot_period_error(self):
@@ -1072,15 +1066,29 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             format="json",
         )
 
+    def future_time_at(self, days_ahead: int, hour: int):
+        base = timezone.now() + timedelta(days=days_ahead)
+        return base.replace(hour=hour, minute=0, second=0, microsecond=0)
+
     def test_anonymous_cannot_call_lifecycle_actions(self):
-        booking = self.create_booking(self.court, status=Booking.Status.HOLD)
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            start_time=self.future_time_at(1, 20),
+            end_time=self.future_time_at(1, 21),
+        )
 
         response = self.post_lifecycle(self.club, booking, "cancel", None)
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_platform_admin_can_cancel_hold(self):
-        booking = self.create_booking(self.court, status=Booking.Status.HOLD)
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            start_time=self.future_time_at(1, 20),
+            end_time=self.future_time_at(1, 21),
+        )
 
         response = self.post_lifecycle(
             self.club,
@@ -1095,7 +1103,12 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         self.assertIsNotNone(booking.cancelled_at)
 
     def test_owner_can_cancel_confirmed(self):
-        booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            start_time=self.future_time_at(1, 20),
+            end_time=self.future_time_at(1, 21),
+        )
 
         response = self.post_lifecycle(
             self.club,
@@ -1109,6 +1122,58 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CANCELLED)
         self.assertEqual(booking.cancellation_reason, "Customer cancelled")
+
+    def test_cancellation_preview_and_cancel_create_signed_refund(self):
+        self.court.minimum_deposit = Decimal("50.00")
+        self.court.cancellation_refund_notice_days = 3
+        self.court.save(
+            update_fields=["minimum_deposit", "cancellation_refund_notice_days"]
+        )
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            start_time=self.future_time_at(1, 20),
+            end_time=self.future_time_at(1, 21),
+        )
+        self.create_transaction(
+            booking,
+            amount=Decimal("200.00"),
+            payment_method=Transaction.PaymentMethod.CASH,
+            created_by=self.owner,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        preview = self.client.post(
+            self.booking_lifecycle_url(
+                self.club,
+                booking,
+                "cancellation-preview",
+            ),
+            {},
+            format="json",
+        )
+        cancel = self.post_lifecycle(
+            self.club,
+            booking,
+            "cancel",
+            self.owner,
+            {
+                "reason": "Customer cancelled",
+                "refund_payment_method": Transaction.PaymentMethod.CASH,
+            },
+        )
+
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(preview.data["paid_amount"], "200.00")
+        self.assertEqual(preview.data["refund_amount"], "150.00")
+        self.assertEqual(preview.data["retained_amount"], "50.00")
+        self.assertEqual(cancel.status_code, status.HTTP_200_OK)
+        refund = Transaction.objects.get(
+            booking=booking,
+            transaction_type=Transaction.Type.REFUND,
+        )
+        self.assertEqual(refund.amount, Decimal("-150.00"))
+        self.assertFalse(refund.is_cancelled)
 
     def test_manager_can_complete_confirmed(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
@@ -1178,8 +1243,16 @@ class BookingLifecycleActionTests(BookingAPITestCase):
                 booking = self.create_booking(
                     self.court,
                     status=source_status,
-                    start_time=self.time_at(phone_suffix),
-                    end_time=self.time_at(phone_suffix + 1),
+                    start_time=(
+                        self.future_time_at(phone_suffix, 20)
+                        if action_name == "cancel"
+                        else self.time_at(phone_suffix)
+                    ),
+                    end_time=(
+                        self.future_time_at(phone_suffix, 21)
+                        if action_name == "cancel"
+                        else self.time_at(phone_suffix + 1)
+                    ),
                     customer_phone=f"+2010000003{phone_suffix:02d}",
                 )
                 if action_name == "complete":

@@ -21,9 +21,18 @@ PAYMENT_SETTLED_CANNOT_BE_CANCELLED_MESSAGE = _("Settled payments cannot be canc
 PAYMENT_TERMINAL_BOOKING_CANNOT_BE_CANCELLED_MESSAGE = _(
     "Payments on terminal bookings cannot be cancelled."
 )
+REFUND_TRANSACTION_CANNOT_BE_CANCELLED_MESSAGE = _(
+    "Refund transactions cannot be cancelled."
+)
 TRANSACTION_BOOKING_NOT_IN_CLUB_MESSAGE = _("Booking must belong to the selected club.")
 TRANSACTION_BOOKING_LOCKED_MESSAGE = _(
     "Transactions can only be added to HOLD or CONFIRMED bookings."
+)
+FIRST_PAYMENT_MINIMUM_DEPOSIT_MESSAGE = _(
+    "The first payment must be at least the court minimum deposit."
+)
+TRANSACTION_AMOUNT_EXCEEDS_REMAINING_MESSAGE = _(
+    "Transaction amount cannot exceed remaining booking amount."
 )
 
 
@@ -32,10 +41,24 @@ def normalize_payment_reference(payment_reference):
 
 
 def get_booking_paid_amount(booking, *, include_cancelled=False) -> Decimal:
-    queryset = Transaction.objects.filter(booking=booking)
+    queryset = Transaction.objects.filter(
+        booking=booking,
+        transaction_type=Transaction.Type.PAYMENT,
+    )
     if not include_cancelled:
         queryset = queryset.filter(is_cancelled=False)
     return queryset.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+
+
+def get_booking_refunded_amount(booking, *, include_cancelled=False) -> Decimal:
+    queryset = Transaction.objects.filter(
+        booking=booking,
+        transaction_type=Transaction.Type.REFUND,
+    )
+    if not include_cancelled:
+        queryset = queryset.filter(is_cancelled=False)
+    total = queryset.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+    return abs(total)
 
 
 def get_booking_remaining_amount(booking) -> Decimal:
@@ -104,8 +127,14 @@ def validate_booking_transaction_data(
     paid_amount = get_booking_paid_amount(booking)
     if paid_amount + amount > booking.total_price:
         raise serializers.ValidationError(
-            {"amount": "Transaction amount cannot exceed remaining booking amount."}
+            {"amount": str(TRANSACTION_AMOUNT_EXCEEDS_REMAINING_MESSAGE)}
         )
+    if paid_amount == Decimal("0.00"):
+        required_deposit = min(booking.court.minimum_deposit, booking.total_price)
+        if amount < required_deposit:
+            raise serializers.ValidationError(
+                {"amount": str(FIRST_PAYMENT_MINIMUM_DEPOSIT_MESSAGE)}
+            )
 
     validate_duplicate_payment_reference(
         club=access.club,
@@ -143,6 +172,7 @@ def create_booking_transaction(
                 club=locked_booking.club,
                 court=locked_booking.court,
                 booking=locked_booking,
+                transaction_type=Transaction.Type.PAYMENT,
                 amount=amount,
                 payment_method=payment_method,
                 payment_reference=normalized_reference,
@@ -216,6 +246,12 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
                 status_code=status.HTTP_409_CONFLICT,
                 code="PAYMENT_ALREADY_CANCELLED",
                 message=PAYMENT_ALREADY_CANCELLED_MESSAGE,
+            )
+        if locked_transaction.transaction_type == Transaction.Type.REFUND:
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="REFUND_TRANSACTION_CANNOT_BE_CANCELLED",
+                message=REFUND_TRANSACTION_CANNOT_BE_CANCELLED_MESSAGE,
             )
         if Transaction.objects.filter(
             pk=locked_transaction.pk,

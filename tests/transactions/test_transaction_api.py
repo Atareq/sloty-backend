@@ -332,6 +332,61 @@ class TransactionAccessTests(TransactionAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
+class TransactionResponseContextTests(TransactionAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("response-admin")
+        self.club = self.create_club("Response Club", slug="response-club")
+        self.court = self.create_court(self.club, "Response Court")
+        self.booking = self.create_booking(self.court)
+        self.transaction_obj = self.create_transaction(
+            self.booking,
+            created_by=self.platform_admin,
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+    def assert_context_fields(self, payload, transaction_obj):
+        self.assertEqual(
+            payload["booking_start_time"],
+            self.booking.start_time.isoformat().replace("+00:00", "Z"),
+        )
+        self.assertEqual(
+            payload["booking_end_time"],
+            self.booking.end_time.isoformat().replace("+00:00", "Z"),
+        )
+        self.assertEqual(payload["court_name"], self.court.name)
+        self.assertEqual(payload["created_by_username"], self.platform_admin.username)
+        self.assertEqual(payload["booking"], self.booking.id)
+        self.assertEqual(payload["court"], self.court.id)
+        self.assertEqual(payload["created_by"], self.platform_admin.id)
+        self.assertEqual(payload["id"], transaction_obj.id)
+
+    def test_list_response_includes_booking_court_and_creator_context(self):
+        response = self.client.get(self.transaction_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assert_context_fields(response.data["results"][0], self.transaction_obj)
+
+    def test_detail_response_includes_booking_court_and_creator_context(self):
+        response = self.client.get(
+            self.transaction_detail_url(self.club, self.transaction_obj)
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assert_context_fields(response.data, self.transaction_obj)
+
+    def test_created_by_username_is_empty_when_created_by_is_null(self):
+        self.transaction_obj.created_by = None
+        self.transaction_obj.save(update_fields=["created_by"])
+
+        response = self.client.get(
+            self.transaction_detail_url(self.club, self.transaction_obj)
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["created_by"])
+        self.assertEqual(response.data["created_by_username"], "")
+
+
 class TransactionCreateTests(TransactionAPITestCase):
     def setUp(self):
         self.platform_admin = self.create_platform_admin("create-admin")
@@ -437,6 +492,17 @@ class TransactionCreateTests(TransactionAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["amount"], "100.00")
+
+    def test_first_payment_must_meet_court_minimum_deposit(self):
+        self.court.minimum_deposit = Decimal("75.00")
+        self.court.save(update_fields=["minimum_deposit"])
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.post_transaction(self.club, self.booking, amount="50.00")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "amount")
+        self.assertEqual(self.booking.transactions.count(), 0)
 
     def test_can_create_second_payment_up_to_remaining_amount(self):
         self.create_transaction(self.booking, amount=Decimal("100.00"))
@@ -707,6 +773,151 @@ class TransactionFilterTests(TransactionAPITestCase):
         self.assertIn(self.transaction_obj.id, self.list_ids(response))
         self.assertIn(self.same_club_other_transaction.id, self.list_ids(response))
         self.assertNotIn(self.other_transaction.id, self.list_ids(response))
+
+    def test_date_only_range_filters_transaction_created_calendar_day(self):
+        selected_start = timezone.datetime(
+            2026,
+            8,
+            17,
+            0,
+            1,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        selected_end = timezone.datetime(
+            2026,
+            8,
+            17,
+            23,
+            59,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        before = timezone.datetime(
+            2026,
+            8,
+            16,
+            23,
+            59,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        after = timezone.datetime(
+            2026,
+            8,
+            18,
+            0,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        created_in_range = self.create_transaction(self.booking)
+        created_late_in_range = self.create_transaction(
+            self.booking,
+            payment_reference="LATE-IN-RANGE",
+        )
+        created_before = self.create_transaction(
+            self.booking,
+            payment_reference="BEFORE-RANGE",
+        )
+        created_after = self.create_transaction(
+            self.booking,
+            payment_reference="AFTER-RANGE",
+        )
+        Transaction.objects.filter(pk=created_in_range.pk).update(
+            created=selected_start
+        )
+        Transaction.objects.filter(pk=created_late_in_range.pk).update(
+            created=selected_end
+        )
+        Transaction.objects.filter(pk=created_before.pk).update(created=before)
+        Transaction.objects.filter(pk=created_after.pk).update(created=after)
+
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"date_from": "2026-08-17", "date_to": "2026-08-17"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(created_in_range.id, self.list_ids(response))
+        self.assertIn(created_late_in_range.id, self.list_ids(response))
+        self.assertNotIn(created_before.id, self.list_ids(response))
+        self.assertNotIn(created_after.id, self.list_ids(response))
+
+    def test_transaction_date_filter_ignores_booking_start_date(self):
+        booking_in_range = self.create_booking(
+            self.court,
+            start_time=timezone.datetime(
+                2026,
+                8,
+                17,
+                20,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+            end_time=timezone.datetime(
+                2026,
+                8,
+                17,
+                21,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+            customer_phone="+201000001001",
+        )
+        booking_outside_range = self.create_booking(
+            self.court,
+            start_time=timezone.datetime(
+                2026,
+                8,
+                20,
+                20,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+            end_time=timezone.datetime(
+                2026,
+                8,
+                20,
+                21,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+            customer_phone="+201000001002",
+        )
+        transaction_before = self.create_transaction(
+            booking_in_range,
+            payment_reference="BOOKING-IN-TX-BEFORE",
+        )
+        transaction_in_range = self.create_transaction(
+            booking_outside_range,
+            payment_reference="BOOKING-OUT-TX-IN",
+        )
+        Transaction.objects.filter(pk=transaction_before.pk).update(
+            created=timezone.datetime(
+                2026,
+                8,
+                16,
+                14,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            )
+        )
+        Transaction.objects.filter(pk=transaction_in_range.pk).update(
+            created=timezone.datetime(
+                2026,
+                8,
+                17,
+                14,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            )
+        )
+
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"date_from": "2026-08-17", "date_to": "2026-08-17"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(transaction_in_range.id, self.list_ids(response))
+        self.assertNotIn(transaction_before.id, self.list_ids(response))
 
     def test_invalid_date_filter_returns_400(self):
         response = self.client.get(

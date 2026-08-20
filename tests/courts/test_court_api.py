@@ -160,8 +160,6 @@ class CourtAPITests(CourtAPITestCase):
         working_hour = CourtWorkingHour.objects.create(
             court=court,
             weekday=CourtWorkingHour.Weekday.MONDAY,
-            opens_at="08:00",
-            closes_at="12:00",
         )
         self.create_price_period(working_hour, "08:00", "10:00", "200.00")
         self.create_price_period(working_hour, "10:00", "12:00", "300.00")
@@ -385,9 +383,6 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         data = {
             "court": court.id,
             "weekday": CourtWorkingHour.Weekday.MONDAY,
-            "opens_at": "10:00:00",
-            "closes_at": "22:00:00",
-            "is_closed": False,
         }
         data.update(extra_fields)
         return self.client.post(
@@ -402,9 +397,6 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
     def open_row(self, weekday=CourtWorkingHour.Weekday.MONDAY, **extra_fields):
         data = {
             "weekday": weekday,
-            "opens_at": "10:00:00",
-            "closes_at": "22:00:00",
-            "is_closed": False,
             "pricing_periods": [
                 {
                     "starts_at": "10:00:00",
@@ -424,9 +416,7 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
     def closed_row(self, weekday=CourtWorkingHour.Weekday.TUESDAY, **extra_fields):
         data = {
             "weekday": weekday,
-            "opens_at": None,
-            "closes_at": None,
-            "is_closed": True,
+            "pricing_periods": [],
         }
         data.update(extra_fields)
         return data
@@ -443,8 +433,6 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         working_hour = CourtWorkingHour.objects.create(
             court=self.court,
             weekday=CourtWorkingHour.Weekday.MONDAY,
-            opens_at="10:00",
-            closes_at="22:00",
         )
         self.client.force_authenticate(user=self.owner)
 
@@ -468,30 +456,6 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_opens_at_must_be_before_closes_at(self):
-        self.client.force_authenticate(user=self.owner)
-
-        response = self.post_hours(
-            self.club,
-            self.court,
-            opens_at="22:00:00",
-            closes_at="10:00:00",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-
-    def test_open_day_requires_open_and_close_times(self):
-        self.client.force_authenticate(user=self.owner)
-
-        response = self.post_hours(
-            self.club,
-            self.court,
-            opens_at=None,
-            closes_at=None,
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-
     def test_owner_cannot_manage_unrelated_court_working_hours(self):
         self.client.force_authenticate(user=self.owner)
 
@@ -509,8 +473,6 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         working_hour = CourtWorkingHour.objects.create(
             court=self.court,
             weekday=CourtWorkingHour.Weekday.TUESDAY,
-            opens_at="10:00",
-            closes_at="22:00",
         )
         self.client.force_authenticate(user=self.staff)
 
@@ -529,14 +491,10 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         CourtWorkingHour.objects.create(
             court=self.court,
             weekday=CourtWorkingHour.Weekday.MONDAY,
-            opens_at="10:00",
-            closes_at="22:00",
         )
         CourtWorkingHour.objects.create(
             court=self.other_court,
             weekday=CourtWorkingHour.Weekday.MONDAY,
-            opens_at="09:00",
-            closes_at="21:00",
         )
         self.client.force_authenticate(user=self.owner)
 
@@ -551,7 +509,9 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
             for item in response.data["working_hours"]
             if item["weekday"] == CourtWorkingHour.Weekday.MONDAY
         )
-        self.assertEqual(monday["opens_at"], "10:00:00")
+        self.assertNotIn("opens_at", monday)
+        self.assertNotIn("closes_at", monday)
+        self.assertNotIn("is_closed", monday)
         self.assertEqual(monday["pricing_periods"], [])
 
     def test_nested_get_rejects_court_from_another_club(self):
@@ -586,8 +546,6 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         CourtWorkingHour.objects.create(
             court=self.court,
             weekday=CourtWorkingHour.Weekday.MONDAY,
-            opens_at="08:00",
-            closes_at="12:00",
         )
         self.client.force_authenticate(user=self.owner)
 
@@ -610,18 +568,13 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
             court=self.court,
             weekday=CourtWorkingHour.Weekday.TUESDAY,
         )
-        self.assertEqual(monday.opens_at.isoformat(), "10:00:00")
         self.assertEqual(monday.pricing_periods.count(), 2)
-        self.assertTrue(tuesday.is_closed)
-        self.assertIsNone(tuesday.opens_at)
-        self.assertIsNone(tuesday.closes_at)
+        self.assertEqual(tuesday.pricing_periods.count(), 0)
 
     def test_nested_get_returns_nested_pricing_periods_and_configured_flag(self):
         working_hour = CourtWorkingHour.objects.create(
             court=self.court,
             weekday=CourtWorkingHour.Weekday.MONDAY,
-            opens_at="10:00",
-            closes_at="22:00",
         )
         self.create_price_period(working_hour, "10:00", "22:00", "250.00")
         self.client.force_authenticate(user=self.owner)
@@ -637,7 +590,7 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         )
         self.assertEqual(monday["pricing_periods"][0]["price"], "250.00")
 
-    def test_nested_put_rejects_open_day_without_pricing(self):
+    def test_nested_put_accepts_weekday_with_empty_pricing_as_closed(self):
         self.client.force_authenticate(user=self.owner)
 
         response = self.client.put(
@@ -646,36 +599,29 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(
-            self.field_error_code(response, "pricing_periods"),
-            "WORKING_HOUR_PRICING_REQUIRED",
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        monday = CourtWorkingHour.objects.get(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.MONDAY,
         )
+        self.assertEqual(monday.pricing_periods.count(), 0)
 
-    def test_nested_put_rejects_closed_day_with_pricing(self):
+    def test_nested_put_rejects_removed_working_hour_fields(self):
         self.client.force_authenticate(user=self.owner)
 
         response = self.client.put(
             self.nested_working_hour_url(self.club, self.court),
             self.weekly_payload(
-                self.closed_row(
-                    pricing_periods=[
-                        {
-                            "starts_at": "10:00:00",
-                            "ends_at": "11:00:00",
-                            "price": "200.00",
-                        }
-                    ]
+                self.open_row(
+                    opens_at="10:00:00",
+                    closes_at="22:00:00",
+                    is_closed=False,
                 )
             ),
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(
-            self.field_error_code(response, "pricing_periods"),
-            "CLOSED_DAY_CANNOT_HAVE_PRICING",
-        )
 
     def test_nested_put_rejects_pricing_gap_overlap_outside_and_misalignment(self):
         scenarios = (
@@ -706,16 +652,6 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
                         "starts_at": "15:00:00",
                         "ends_at": "22:00:00",
                         "price": "300.00",
-                    },
-                ],
-            ),
-            (
-                "WORKING_HOUR_PRICING_OUTSIDE_HOURS",
-                [
-                    {
-                        "starts_at": "09:00:00",
-                        "ends_at": "22:00:00",
-                        "price": "200.00",
                     },
                 ],
             ),
@@ -776,26 +712,21 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_nested_put_rejects_open_day_without_times(self):
+    def test_nested_put_rejects_period_start_at_or_after_end(self):
         self.client.force_authenticate(user=self.owner)
 
         response = self.client.put(
             self.nested_working_hour_url(self.club, self.court),
             self.weekly_payload(
-                self.open_row(opens_at=None, closes_at=None),
-            ),
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-
-    def test_nested_put_rejects_opens_at_after_closes_at(self):
-        self.client.force_authenticate(user=self.owner)
-
-        response = self.client.put(
-            self.nested_working_hour_url(self.club, self.court),
-            self.weekly_payload(
-                self.open_row(opens_at="22:00:00", closes_at="10:00:00"),
+                self.open_row(
+                    pricing_periods=[
+                        {
+                            "starts_at": "22:00:00",
+                            "ends_at": "10:00:00",
+                            "price": "200.00",
+                        }
+                    ]
+                ),
             ),
             format="json",
         )
@@ -816,7 +747,7 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
             court=self.court,
             weekday=CourtWorkingHour.Weekday.FRIDAY,
         )
-        self.assertTrue(friday.is_closed)
+        self.assertEqual(friday.pricing_periods.count(), 0)
 
     def test_nested_put_rejects_court_from_another_club(self):
         self.client.force_authenticate(user=self.owner)

@@ -38,9 +38,6 @@ class CourtWorkingHourSerializer(serializers.ModelSerializer):
             "id",
             "court",
             "weekday",
-            "opens_at",
-            "closes_at",
-            "is_closed",
             "pricing_periods",
         )
         read_only_fields = ("id", "pricing_periods")
@@ -49,16 +46,6 @@ class CourtWorkingHourSerializer(serializers.ModelSerializer):
         access = self.context["club_access"]
         court = attrs.get("court", getattr(self.instance, "court", None))
         weekday = attrs.get("weekday", getattr(self.instance, "weekday", None))
-        opens_at = attrs.get("opens_at", getattr(self.instance, "opens_at", None))
-        closes_at = attrs.get(
-            "closes_at",
-            getattr(self.instance, "closes_at", None),
-        )
-        is_closed = attrs.get(
-            "is_closed",
-            getattr(self.instance, "is_closed", False),
-        )
-
         if (
             self.instance is not None
             and "court" in attrs
@@ -74,16 +61,6 @@ class CourtWorkingHourSerializer(serializers.ModelSerializer):
         if not access.can_manage_working_hours(court):
             raise PermissionDenied("You cannot manage working hours for this court.")
 
-        if not is_closed:
-            if opens_at is None or closes_at is None:
-                raise serializers.ValidationError(
-                    "Open working hours require both opens_at and closes_at."
-                )
-            if opens_at >= closes_at:
-                raise serializers.ValidationError(
-                    {"opens_at": "opens_at must be before closes_at."}
-                )
-
         duplicate = CourtWorkingHour.objects.filter(court=court, weekday=weekday)
         if self.instance is not None:
             duplicate = duplicate.exclude(pk=self.instance.pk)
@@ -98,32 +75,19 @@ class CourtWorkingHourSerializer(serializers.ModelSerializer):
 class CourtWorkingHourNestedRowSerializer(serializers.Serializer):
     id = serializers.IntegerField(read_only=True, allow_null=True)
     weekday = serializers.ChoiceField(choices=CourtWorkingHour.Weekday.choices)
-    opens_at = serializers.TimeField(required=False, allow_null=True)
-    closes_at = serializers.TimeField(required=False, allow_null=True)
-    is_closed = serializers.BooleanField(default=False)
     pricing_periods = CourtWorkingHourPricePeriodSerializer(many=True, required=False)
 
-    def validate(self, attrs):
-        is_closed = attrs.get("is_closed", False)
-        opens_at = attrs.get("opens_at")
-        closes_at = attrs.get("closes_at")
-
-        if is_closed:
-            if opens_at is not None or closes_at is not None:
-                raise serializers.ValidationError(
-                    "Closed working hours must not include opens_at or closes_at."
-                )
-            return attrs
-
-        if opens_at is None or closes_at is None:
+    def to_internal_value(self, data):
+        forbidden_fields = {"opens_at", "closes_at", "is_closed"}
+        submitted_fields = set(data or {})
+        if forbidden_fields & submitted_fields:
             raise serializers.ValidationError(
-                "Open working hours require both opens_at and closes_at."
+                {
+                    field: "This field is no longer accepted."
+                    for field in sorted(forbidden_fields & submitted_fields)
+                }
             )
-        if opens_at >= closes_at:
-            raise serializers.ValidationError(
-                {"opens_at": "opens_at must be before closes_at."}
-            )
-        return attrs
+        return super().to_internal_value(data)
 
 
 class CourtWeeklyWorkingHoursSerializer(serializers.Serializer):
@@ -154,8 +118,9 @@ class CourtListSerializer(serializers.ModelSerializer):
             "slot_duration_minutes",
             "is_active",
             "requires_digital_payment_reference",
+            "minimum_deposit",
             "internal_hold_expiry_hours",
-            "recurring_deposit_refund_notice_days",
+            "cancellation_refund_notice_days",
             "pricing_configured",
             "minimum_slot_price",
             "maximum_slot_price",
@@ -189,8 +154,9 @@ class CourtDetailSerializer(serializers.ModelSerializer):
             "slot_duration_minutes",
             "is_active",
             "requires_digital_payment_reference",
+            "minimum_deposit",
             "internal_hold_expiry_hours",
-            "recurring_deposit_refund_notice_days",
+            "cancellation_refund_notice_days",
             "pricing_configured",
             "minimum_slot_price",
             "maximum_slot_price",
@@ -222,8 +188,9 @@ class CourtCreateSerializer(serializers.ModelSerializer):
             "slot_duration_minutes",
             "is_active",
             "requires_digital_payment_reference",
+            "minimum_deposit",
             "internal_hold_expiry_hours",
-            "recurring_deposit_refund_notice_days",
+            "cancellation_refund_notice_days",
             "notes",
         )
         read_only_fields = ("id",)
@@ -262,8 +229,9 @@ class CourtUpdateSerializer(serializers.ModelSerializer):
             "slot_duration_minutes",
             "is_active",
             "requires_digital_payment_reference",
+            "minimum_deposit",
             "internal_hold_expiry_hours",
-            "recurring_deposit_refund_notice_days",
+            "cancellation_refund_notice_days",
             "notes",
         )
 

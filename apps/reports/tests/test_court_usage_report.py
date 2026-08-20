@@ -12,7 +12,7 @@ from rest_framework.test import APITestCase
 from apps.accounts.models import User
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
-from apps.courts.models import Court, CourtWorkingHour
+from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.transactions.models import Transaction
 
 
@@ -155,14 +155,17 @@ class CourtUsageReportTests(APITestCase):
 
     def create_working_hours(self, court, opens_at, closes_at):
         for weekday in CourtWorkingHour.Weekday.values:
-            CourtWorkingHour.objects.update_or_create(
+            working_hour, _created = CourtWorkingHour.objects.update_or_create(
                 court=court,
                 weekday=weekday,
-                defaults={
-                    "opens_at": opens_at,
-                    "closes_at": closes_at,
-                    "is_closed": False,
-                },
+                defaults={},
+            )
+            working_hour.pricing_periods.all().delete()
+            CourtWorkingHourPricePeriod.objects.create(
+                working_hour=working_hour,
+                starts_at=opens_at,
+                ends_at=closes_at,
+                price=court.default_price,
             )
 
     def time_at(self, hour=0, minute=0, day=6):

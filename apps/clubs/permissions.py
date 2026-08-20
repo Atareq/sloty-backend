@@ -119,6 +119,8 @@ class CanManageClubSettlements(BasePermission):
         access = view.get_access_context()
         if view.action in {"create", "preview"}:
             return access.has_any_club_access()
+        if request.method in SAFE_METHODS:
+            return access.can_manage_settlements() or access.can_view_own_settlements()
         return access.can_manage_settlements()
 
     def has_object_permission(self, request, view, obj) -> bool:

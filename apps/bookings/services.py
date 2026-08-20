@@ -17,8 +17,16 @@ from apps.courts.models import Court
 from apps.courts.pricing import (
     calculate_booking_price_from_schedule,
     slot_price_from_schedule,
+    working_hour_bounds,
 )
-from apps.transactions.services import get_booking_remaining_amount
+from apps.transactions.models import Transaction
+from apps.transactions.services import (
+    get_booking_paid_amount,
+    get_booking_refunded_amount,
+    get_booking_remaining_amount,
+    normalize_payment_reference,
+    validate_duplicate_payment_reference,
+)
 
 FREE_SLOT_STATUS = "FREE"
 UNAVAILABLE_SLOT_STATUS = "UNAVAILABLE"
@@ -51,12 +59,26 @@ BOOKING_ALREADY_CANCELLED_MESSAGE = _("This booking is already cancelled.")
 INVALID_BOOKING_STATUS_TRANSITION_MESSAGE = _(
     "This booking status transition is not allowed."
 )
+BOOKING_CANCELLATION_TIME_PASSED_MESSAGE = _(
+    "A booking cannot be cancelled after its start time."
+)
+BOOKING_CANCELLATION_POLICY_NOT_CONFIGURED_MESSAGE = _(
+    "Booking cancellation policy is not configured for this court."
+)
+REFUND_PAYMENT_METHOD_REQUIRED_MESSAGE = _("Refund payment method is required.")
+REFUND_REFERENCE_REQUIRED_MESSAGE = _("Payment reference is required for this court.")
 
 
 def booking_audit_snapshot(booking):
     return {
+        "booking_id": booking.id,
+        "customer_name": booking.customer_name,
+        "customer_phone": str(booking.customer_phone),
         "status": booking.status,
+        "source": booking.source,
+        "recurring_agreement_id": booking.recurring_agreement_id,
         "court_id": booking.court_id,
+        "court_name": booking.court.name if booking.court_id else "",
         "start_time": booking.start_time.isoformat(),
         "end_time": booking.end_time.isoformat(),
         "total_price": str(booking.total_price),
@@ -143,9 +165,13 @@ def booking_slot_payload(booking):
         "status": booking.status,
         "status_label": str(booking.get_status_display()),
         "customer_name": booking.customer_name,
+        "customer_phone": str(booking.customer_phone),
         "total_booking_value": f"{booking.total_price:.2f}",
         "total_paid_amount": f"{paid_amount:.2f}",
         "remaining_amount": f"{remaining_amount:.2f}",
+        "source": booking.source,
+        "is_recurring": booking.source == Booking.Source.RECURRING,
+        "recurring_agreement_id": booking.recurring_agreement_id,
     }
 
 
@@ -181,7 +207,10 @@ def generate_booking_slots(*, access, court, date_from, date_to):
             paid_amount=Coalesce(
                 Sum(
                     "transactions__amount",
-                    filter=Q(transactions__is_cancelled=False),
+                    filter=Q(
+                        transactions__is_cancelled=False,
+                        transactions__transaction_type=Transaction.Type.PAYMENT,
+                    ),
                 ),
                 Value(Decimal("0.00")),
                 output_field=DecimalField(max_digits=10, decimal_places=2),
@@ -195,18 +224,15 @@ def generate_booking_slots(*, access, court, date_from, date_to):
     has_closed_day = False
     while current_date <= date_to:
         working_hour = working_hours_by_weekday.get(current_date.weekday())
-        if (
-            working_hour is None
-            or working_hour.is_closed
-            or working_hour.opens_at is None
-            or working_hour.closes_at is None
-        ):
+        bounds = working_hour_bounds(working_hour) if working_hour is not None else None
+        if bounds is None:
             has_closed_day = True
             current_date += timedelta(days=1)
             continue
 
-        day_open = local_datetime_for_date(current_date, working_hour.opens_at)
-        day_close = local_datetime_for_date(current_date, working_hour.closes_at)
+        opens_at, closes_at, _pricing_periods = bounds
+        day_open = local_datetime_for_date(current_date, opens_at)
+        day_close = local_datetime_for_date(current_date, closes_at)
         slot_delta = timedelta(minutes=court.slot_duration_minutes)
         slot_start = day_open
         while slot_start + slot_delta <= day_close:
@@ -338,6 +364,147 @@ def actor_requires_staff_cancel_reason(access):
     )
 
 
+def calculate_cancellation_refund(*, booking, requested_at):
+    if requested_at >= booking.start_time:
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="BOOKING_CANCELLATION_TIME_PASSED",
+            message=BOOKING_CANCELLATION_TIME_PASSED_MESSAGE,
+        )
+    notice_days = booking.court.cancellation_refund_notice_days
+    if notice_days is None:
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="BOOKING_CANCELLATION_POLICY_NOT_CONFIGURED",
+            message=BOOKING_CANCELLATION_POLICY_NOT_CONFIGURED_MESSAGE,
+        )
+    paid_amount = get_booking_paid_amount(booking)
+    refund_deadline = (
+        booking.start_time
+        if notice_days == 0
+        else booking.start_time - timedelta(days=notice_days)
+    )
+    full_refund = requested_at <= refund_deadline
+    retained_amount = (
+        Decimal("0.00")
+        if full_refund
+        else min(paid_amount, booking.court.minimum_deposit)
+    )
+    refund_amount = max(paid_amount - retained_amount, Decimal("0.00"))
+    return {
+        "booking_id": booking.id,
+        "previewed_at": requested_at,
+        "booking_start": booking.start_time,
+        "paid_amount": paid_amount,
+        "minimum_deposit": booking.court.minimum_deposit,
+        "refund_notice_days": notice_days,
+        "refund_deadline": refund_deadline,
+        "full_refund": full_refund,
+        "refund_amount": refund_amount,
+        "retained_amount": retained_amount,
+        "can_cancel": True,
+    }
+
+
+def build_cancellation_preview(*, access, booking):
+    selected = Booking.objects.select_related("club", "court").get(pk=booking.pk)
+    validate_booking_for_lifecycle_action(access=access, booking=selected)
+    validate_allowed_status(
+        booking=selected,
+        allowed_statuses={Booking.Status.HOLD, Booking.Status.CONFIRMED},
+        action_label="cancel",
+    )
+    return calculate_cancellation_refund(
+        booking=selected,
+        requested_at=timezone.now(),
+    )
+
+
+def validate_refund_fields(*, booking, refund_amount, payment_method, reference):
+    normalized_reference = normalize_payment_reference(reference)
+    if refund_amount <= 0:
+        return normalized_reference
+    if not payment_method:
+        raise serializers.ValidationError(
+            {"refund_payment_method": str(REFUND_PAYMENT_METHOD_REQUIRED_MESSAGE)}
+        )
+    requires_reference = (
+        payment_method
+        in {
+            Transaction.PaymentMethod.DIGITAL_WALLET,
+            Transaction.PaymentMethod.BANK_TRANSFER,
+        }
+        and booking.court.requires_digital_payment_reference
+    )
+    if requires_reference and not normalized_reference:
+        raise serializers.ValidationError(
+            {"refund_reference": str(REFUND_REFERENCE_REQUIRED_MESSAGE)}
+        )
+    validate_duplicate_payment_reference(
+        club=booking.club,
+        payment_reference=normalized_reference,
+    )
+    return normalized_reference
+
+
+def create_booking_refund_transaction(
+    *,
+    booking,
+    refund_amount,
+    payment_method,
+    payment_reference,
+    notes,
+    actor,
+):
+    if refund_amount <= 0:
+        return None
+    if booking.status != Booking.Status.CANCELLED:
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="REFUND_REQUIRES_CANCELLED_BOOKING",
+            message=_("Refunds may only be created for cancelled bookings."),
+        )
+    active_refunded = get_booking_refunded_amount(booking)
+    active_paid = get_booking_paid_amount(booking)
+    if active_refunded + refund_amount > active_paid:
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="BOOKING_REFUND_EXCEEDS_PAID_AMOUNT",
+            message=_("Refund amount cannot exceed collected booking payments."),
+        )
+    refund_transaction = Transaction.objects.create(
+        club=booking.club,
+        court=booking.court,
+        booking=booking,
+        transaction_type=Transaction.Type.REFUND,
+        amount=-refund_amount,
+        payment_method=payment_method,
+        payment_reference=payment_reference,
+        notes=notes,
+        created_by=actor,
+    )
+    record_audit_log(
+        club=refund_transaction.club,
+        court=refund_transaction.court,
+        actor=actor,
+        action=AuditLog.Action.TRANSACTION_CREATED,
+        entity_type="Transaction",
+        entity_id=refund_transaction.id,
+        after_data={
+            "transaction_id": refund_transaction.id,
+            "transaction_type": refund_transaction.transaction_type,
+            "amount": str(refund_transaction.amount),
+            "payment_method": refund_transaction.payment_method,
+            "payment_reference": refund_transaction.payment_reference,
+            "booking_id": refund_transaction.booking_id,
+            "customer_name": booking.customer_name,
+            "court": {"id": booking.court_id, "name": booking.court.name},
+            "collector": actor.id if actor else None,
+        },
+    )
+    return refund_transaction
+
+
 def create_lifecycle_audit_log(
     *,
     booking,
@@ -360,7 +527,16 @@ def create_lifecycle_audit_log(
     )
 
 
-def cancel_booking(*, access, booking, actor, reason=""):
+def cancel_booking(
+    *,
+    access,
+    booking,
+    actor,
+    reason="",
+    refund_payment_method=None,
+    refund_reference="",
+    refund_notes="",
+):
     with transaction.atomic():
         locked_booking = (
             Booking.objects.select_for_update()
@@ -379,10 +555,21 @@ def cancel_booking(*, access, booking, actor, reason=""):
             raise serializers.ValidationError(
                 {"reason": "Staff must provide a cancellation reason."}
             )
+        now = timezone.now()
+        refund_data = calculate_cancellation_refund(
+            booking=locked_booking,
+            requested_at=now,
+        )
+        normalized_refund_reference = validate_refund_fields(
+            booking=locked_booking,
+            refund_amount=refund_data["refund_amount"],
+            payment_method=refund_payment_method,
+            reference=refund_reference,
+        )
 
         before_data = booking_audit_snapshot(locked_booking)
         locked_booking.status = Booking.Status.CANCELLED
-        locked_booking.cancelled_at = timezone.now()
+        locked_booking.cancelled_at = now
         locked_booking.cancellation_reason = reason
         locked_booking.save(
             update_fields=[
@@ -402,7 +589,21 @@ def cancel_booking(*, access, booking, actor, reason=""):
                 "cancelled_at": locked_booking.cancelled_at.isoformat(),
                 "cancellation_reason": locked_booking.cancellation_reason,
             },
-            metadata={"reason": reason} if reason else {},
+            metadata={
+                "reason": reason,
+                "refund_amount": str(refund_data["refund_amount"]),
+                "retained_amount": str(refund_data["retained_amount"]),
+                "refund_deadline": refund_data["refund_deadline"].isoformat(),
+                "full_refund": refund_data["full_refund"],
+            },
+        )
+        create_booking_refund_transaction(
+            booking=locked_booking,
+            refund_amount=refund_data["refund_amount"],
+            payment_method=refund_payment_method,
+            payment_reference=normalized_refund_reference,
+            notes=refund_notes or "",
+            actor=actor,
         )
         return locked_booking
 

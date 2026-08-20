@@ -16,6 +16,7 @@ booking_detail = BookingViewSet.as_view(
     }
 )
 booking_cancel = BookingViewSet.as_view({"post": "cancel"})
+booking_cancellation_preview = BookingViewSet.as_view({"post": "cancellation_preview"})
 booking_complete = BookingViewSet.as_view({"post": "complete"})
 booking_no_show = BookingViewSet.as_view({"post": "no_show"})
 booking_reschedule = BookingViewSet.as_view({"post": "reschedule"})
@@ -37,6 +38,11 @@ urlpatterns = [
         "clubs/<slug:club_slug>/bookings/<int:pk>/cancel/",
         booking_cancel,
         name="club-booking-cancel",
+    ),
+    path(
+        "clubs/<slug:club_slug>/bookings/<int:pk>/cancellation-preview/",
+        booking_cancellation_preview,
+        name="club-booking-cancellation-preview",
     ),
     path(
         "clubs/<slug:club_slug>/bookings/<int:pk>/complete/",

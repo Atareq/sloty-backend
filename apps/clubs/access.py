@@ -208,6 +208,9 @@ class ClubAccessContext:
             return True
         return self.manager_can_settle_transactions
 
+    def can_view_own_settlements(self):
+        return self.is_platform_admin or bool(self.active_memberships)
+
     def can_preview_settlement_for_user(self, user):
         if not self.has_any_club_access():
             return False
@@ -256,10 +259,13 @@ class ClubAccessContext:
         return self.can_manage_settlements()
 
     def can_access_settlement(self, settlement):
+        if settlement is None or settlement.club_id != self.club.id:
+            return False
+        if self.can_manage_settlements():
+            return True
         return (
-            settlement is not None
-            and settlement.club_id == self.club.id
-            and self.can_manage_settlements()
+            self.can_view_own_settlements()
+            and settlement.collected_by_id == self.user.id
         )
 
     def can_view_audit_logs(self):
@@ -354,6 +360,8 @@ class ClubAccessContext:
         queryset = Settlement.objects.filter(club=self.club)
         if self.can_manage_settlements():
             return queryset
+        if self.can_view_own_settlements():
+            return queryset.filter(collected_by=self.user)
         return queryset.none()
 
     def scoped_audit_logs_queryset(self):

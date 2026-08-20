@@ -32,11 +32,17 @@ def parse_query_datetime(value, *, field_name, date_is_end=False):
     if isinstance(value, datetime):
         return make_aware_if_needed(value)
 
-    parsed_datetime = parse_datetime(str(value))
+    raw_value = str(value)
+    parsed_date = parse_date(raw_value)
+    if parsed_date is not None and "T" not in raw_value and " " not in raw_value:
+        start, end = day_bounds(parsed_date)
+        return end if date_is_end else start
+
+    parsed_datetime = parse_datetime(raw_value)
     if parsed_datetime is not None:
         return make_aware_if_needed(parsed_datetime)
 
-    parsed_date = parse_date(str(value))
+    parsed_date = parse_date(raw_value)
     if parsed_date is not None:
         start, end = day_bounds(parsed_date)
         return end if date_is_end else start
@@ -427,6 +433,7 @@ class DashboardNeedsActionBreakdownSerializer(serializers.Serializer):
 
 class DashboardPaymentMethodTotalSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    refund = serializers.DecimalField(max_digits=12, decimal_places=2)
     count = serializers.IntegerField()
 
 
@@ -468,6 +475,16 @@ class DashboardSummaryMetricsSerializer(serializers.Serializer):
         allow_null=True,
     )
     transaction_count = serializers.IntegerField(allow_null=True)
+    booking_payment_total = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
+    booking_refund_total = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        allow_null=True,
+    )
     transaction_total = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,

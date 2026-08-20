@@ -284,16 +284,15 @@ class SeedDemoDataCommandTests(TestCase):
             court=court,
             weekday=CourtWorkingHour.Weekday.FRIDAY,
         )
-        self.assertTrue(friday.is_closed)
-        self.assertIsNone(friday.opens_at)
-        self.assertIsNone(friday.closes_at)
         self.assertFalse(friday.pricing_periods.exists())
 
-        open_days = CourtWorkingHour.objects.filter(court=court, is_closed=False)
-        self.assertEqual(open_days.count(), 6)
+        open_days = [
+            working_hour
+            for working_hour in CourtWorkingHour.objects.filter(court=court)
+            if working_hour.pricing_periods.exists()
+        ]
+        self.assertEqual(len(open_days), 6)
         for working_hour in open_days:
-            self.assertEqual(working_hour.opens_at, time(10, 0))
-            self.assertEqual(working_hour.closes_at, time(23, 0))
             periods = list(working_hour.pricing_periods.order_by("starts_at"))
             self.assertEqual(len(periods), 2)
             self.assertEqual(periods[0].starts_at, time(10, 0))

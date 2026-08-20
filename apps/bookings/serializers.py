@@ -17,6 +17,7 @@ from apps.bookings.services import (
 )
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
+from apps.transactions.models import Transaction
 from apps.transactions.services import get_booking_paid_amount
 
 
@@ -50,6 +51,7 @@ class BookingPaymentSummaryMixin(serializers.Serializer):
 
 class BookingListSerializer(BookingPaymentSummaryMixin, serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    court_name = serializers.CharField(source="court.name", read_only=True)
 
     class Meta:
         model = Booking
@@ -57,6 +59,7 @@ class BookingListSerializer(BookingPaymentSummaryMixin, serializers.ModelSeriali
             "id",
             "club",
             "court",
+            "court_name",
             "customer_name",
             "customer_phone",
             "start_time",
@@ -153,6 +156,10 @@ class BookingCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"source": "Only Platform Super Admin can use ADMIN_CORRECTION."}
             )
+        if source == Booking.Source.RECURRING:
+            raise serializers.ValidationError(
+                {"source": _("Recurring bookings must be created through agreements.")}
+            )
 
         validate_booking_duration(court, attrs["start_time"], attrs["end_time"])
         attrs["source"] = source
@@ -181,6 +188,37 @@ class BookingCancelSerializer(serializers.Serializer):
         allow_blank=True,
         trim_whitespace=True,
     )
+    refund_payment_method = serializers.ChoiceField(
+        choices=Transaction.PaymentMethod.choices,
+        required=False,
+        allow_null=True,
+    )
+    refund_reference = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default="",
+        trim_whitespace=True,
+    )
+    refund_notes = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default="",
+        trim_whitespace=True,
+    )
+
+
+class BookingCancellationPreviewResponseSerializer(serializers.Serializer):
+    booking_id = serializers.IntegerField()
+    previewed_at = serializers.DateTimeField()
+    booking_start = serializers.DateTimeField()
+    paid_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+    minimum_deposit = serializers.DecimalField(max_digits=10, decimal_places=2)
+    refund_notice_days = serializers.IntegerField(allow_null=True)
+    refund_deadline = serializers.DateTimeField()
+    full_refund = serializers.BooleanField()
+    refund_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+    retained_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+    can_cancel = serializers.BooleanField()
 
 
 class BookingNoShowSerializer(serializers.Serializer):
@@ -217,6 +255,7 @@ class BookingSlotQuerySerializer(serializers.Serializer):
     court = serializers.PrimaryKeyRelatedField(
         queryset=Court.objects.prefetch_related("working_hours__pricing_periods")
     )
+
     date = serializers.DateField(required=False)
     date_from = serializers.DateField(required=False)
     date_to = serializers.DateField(required=False)
@@ -266,6 +305,7 @@ class BookingSlotBookingSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=Booking.Status.choices)
     status_label = serializers.CharField()
     customer_name = serializers.CharField()
+    customer_phone = serializers.CharField()
     total_booking_value = serializers.CharField()
     total_paid_amount = serializers.CharField()
     remaining_amount = serializers.CharField()

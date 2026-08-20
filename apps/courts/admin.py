@@ -23,8 +23,8 @@ class CourtAdmin(admin.ModelAdmin):
 
 @admin.register(CourtWorkingHour)
 class CourtWorkingHourAdmin(admin.ModelAdmin):
-    list_display = ("court", "weekday", "opens_at", "closes_at", "is_closed")
-    list_filter = ("weekday", "is_closed")
+    list_display = ("court", "weekday")
+    list_filter = ("weekday",)
 
 
 @admin.register(CourtWorkingHourPricePeriod)

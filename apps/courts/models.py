@@ -44,17 +44,23 @@ class Court(models.Model):
     )
     is_active = models.BooleanField(default=True, db_index=True)
     requires_digital_payment_reference = models.BooleanField(default=False)
+    minimum_deposit = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
     internal_hold_expiry_hours = models.PositiveIntegerField(
         default=12,
         validators=[MinValueValidator(1)],
         help_text="OnHold period without payment",
     )
-    recurring_deposit_refund_notice_days = models.PositiveSmallIntegerField(
+    cancellation_refund_notice_days = models.PositiveSmallIntegerField(
         blank=True,
         null=True,
         validators=[MaxValueValidator(30)],
         help_text=(
-            "Null blocks recurring agreement creation. "
+            "Null means the cancellation refund policy is not configured. "
             "0 means refundable until the affected occurrence starts. "
             "1-30 is the required calendar-day notice."
         ),
@@ -82,7 +88,7 @@ class Court(models.Model):
 
 
 class CourtWorkingHour(models.Model):
-    # Every court can have a daily different working hours
+    # Every court can have weekday-specific pricing periods.
     class Weekday(models.IntegerChoices):
         MONDAY = 0, "Monday"
         TUESDAY = 1, "Tuesday"
@@ -98,9 +104,6 @@ class CourtWorkingHour(models.Model):
         related_name="working_hours",
     )
     weekday = models.PositiveSmallIntegerField(choices=Weekday.choices)
-    opens_at = models.TimeField(blank=True, null=True)
-    closes_at = models.TimeField(blank=True, null=True)
-    is_closed = models.BooleanField(default=False)
 
     class Meta:
         constraints = [
@@ -112,17 +115,6 @@ class CourtWorkingHour(models.Model):
         indexes = [
             models.Index(fields=["court", "weekday"]),
         ]
-
-    def clean(self):
-        super().clean()
-        if self.is_closed:
-            return
-        if self.opens_at is None or self.closes_at is None:
-            raise ValidationError(
-                "Open working hours require both opens_at and closes_at."
-            )
-        if self.opens_at >= self.closes_at:
-            raise ValidationError("opens_at must be before closes_at.")
 
     def __str__(self) -> str:
         return f"{self.court} - {self.get_weekday_display()}"

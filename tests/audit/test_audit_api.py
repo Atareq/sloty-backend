@@ -51,6 +51,7 @@ class AuditAPITestCase(APITestCase):
             "name": name,
             "default_price": Decimal("300.00"),
             "slot_duration_minutes": 60,
+            "cancellation_refund_notice_days": 0,
         }
         data.update(extra_fields)
         return Court.objects.create(**data)
@@ -83,9 +84,6 @@ class AuditAPITestCase(APITestCase):
         working_hour = CourtWorkingHour.objects.create(
             court=court,
             weekday=weekday,
-            opens_at=opens_at,
-            closes_at=closes_at,
-            is_closed=False,
         )
         CourtWorkingHourPricePeriod.objects.create(
             working_hour=working_hour,
@@ -648,8 +646,16 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             booking = self.create_booking(
                 self.court,
                 customer_phone=f"+20100000110{index}",
-                start_time=self.time_at(14 + index),
-                end_time=self.time_at(15 + index),
+                start_time=(
+                    timezone.now() + timedelta(days=1, hours=index)
+                    if action_name == "cancel"
+                    else self.time_at(14 + index)
+                ),
+                end_time=(
+                    timezone.now() + timedelta(days=1, hours=index + 1)
+                    if action_name == "cancel"
+                    else self.time_at(15 + index)
+                ),
                 status=initial_status,
             )
             if action_name == "complete":

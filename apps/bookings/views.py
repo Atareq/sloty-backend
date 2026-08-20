@@ -18,6 +18,7 @@ from rest_framework.viewsets import GenericViewSet
 from apps.bookings.filters import BookingFilter
 from apps.bookings.models import Booking
 from apps.bookings.serializers import (
+    BookingCancellationPreviewResponseSerializer,
     BookingCancelSerializer,
     BookingCompleteSerializer,
     BookingCreateSerializer,
@@ -31,6 +32,7 @@ from apps.bookings.serializers import (
     BookingUpdateSerializer,
 )
 from apps.bookings.services import (
+    build_cancellation_preview,
     cancel_booking,
     complete_booking,
     expire_booking,
@@ -40,6 +42,7 @@ from apps.bookings.services import (
 )
 from apps.clubs.mixins import ClubScopedAccessMixin
 from apps.clubs.permissions import CanManageClubBookings
+from apps.transactions.models import Transaction
 
 
 @extend_schema_view(
@@ -85,7 +88,10 @@ class BookingViewSet(
                 paid_amount=Coalesce(
                     Sum(
                         "transactions__amount",
-                        filter=Q(transactions__is_cancelled=False),
+                        filter=Q(
+                            transactions__is_cancelled=False,
+                            transactions__transaction_type=Transaction.Type.PAYMENT,
+                        ),
                     ),
                     Value(Decimal("0.00")),
                     output_field=DecimalField(max_digits=10, decimal_places=2),
@@ -104,6 +110,8 @@ class BookingViewSet(
         if self.action in {"partial_update", "update"}:
             return BookingUpdateSerializer
         if self.action == "cancel":
+            return BookingCancelSerializer
+        if self.action == "cancellation_preview":
             return BookingCancelSerializer
         if self.action == "complete":
             return BookingCompleteSerializer
@@ -164,8 +172,23 @@ class BookingViewSet(
             booking=booking,
             actor=request.user,
             reason=data.get("reason", ""),
+            refund_payment_method=data.get("refund_payment_method"),
+            refund_reference=data.get("refund_reference", ""),
+            refund_notes=data.get("refund_notes", ""),
         )
         return self.lifecycle_response(booking)
+
+    @extend_schema(
+        tags=["Bookings"],
+        request=None,
+        responses=BookingCancellationPreviewResponseSerializer,
+    )
+    @action(detail=True, methods=["post"], url_path="cancellation-preview")
+    def cancellation_preview(self, request, *args, **kwargs):
+        access, booking = self.get_lifecycle_context()
+        data = build_cancellation_preview(access=access, booking=booking)
+        serializer = BookingCancellationPreviewResponseSerializer(data)
+        return Response(serializer.data)
 
     @extend_schema(
         tags=["Bookings"],

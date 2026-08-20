@@ -171,8 +171,10 @@ Current implemented app:
   new booking creation, rescheduling, or slot availability prices.
 - Court working hours are court-scoped under
   `/api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`. They remain one
-  `CourtWorkingHour` row per court plus weekday; do not move working-hour fields
-  onto `Court` or convert them to one-to-one settings.
+  `CourtWorkingHour` row per court plus weekday; child pricing periods define
+  operating hours. A weekday with no pricing periods is closed. Do not add
+  replacement open/close/closed fields on `CourtWorkingHour`, move
+  working-hour fields onto `Court`, or convert them to one-to-one settings.
 - Club/court scope must come from active `ClubMembership` rows, not from direct
   club or court fields on `User`.
 - `apps/bookings/` contains booking creation, list/detail APIs, schedule-style
@@ -367,6 +369,10 @@ Rules for the flow:
 - The nested court working-hours endpoint is the primary API for frontend
   settings pages. The older `/court-working-hours/` route is read-compatible;
   POST/PATCH writes are rejected with `WORKING_HOURS_USE_WEEKLY_ENDPOINT`.
+- `Court.minimum_deposit` controls the first normal booking payment threshold
+  and late-cancellation retained amount. `Court.cancellation_refund_notice_days`
+  is the shared refund-notice policy for normal booking cancellation and
+  recurring agreement voluntary cancellation.
 - `CourtStaffAssignment` has been removed. Staff access is represented by
   `ClubMembership(role=STAFF, court=<court>)`.
 - Do not place booking, transaction, settlement, pricing, or audit behavior
@@ -402,7 +408,11 @@ Rules for the flow:
 - Terminal statuses `COMPLETED`, `CANCELLED`, `NO_SHOW`, and `EXPIRED` cannot
   transition further.
 - `cancel` accepts an optional reason for platform admins, owners, and managers;
-  staff must provide a non-empty cancellation reason.
+  staff must provide a non-empty cancellation reason. Normal bookings cannot be
+  cancelled after `start_time`; cancellation uses the current
+  `Court.cancellation_refund_notice_days` and `Court.minimum_deposit` to
+  calculate retained/refund amounts. Refunds are internal negative booking
+  `Transaction` rows with `transaction_type=REFUND`.
 - `no-show` is allowed only from `CONFIRMED` and stores an optional reason.
 - `reschedule` is allowed only from `HOLD` or `CONFIRMED`; the new court must
   belong to the selected club, pass `ClubAccessContext` access checks, match the
@@ -495,8 +505,9 @@ Court booking prices are configured through pricing periods attached to
 `Court.default_price` is legacy migration data and must not be used for new
 booking calculations.
 
-Every open working-hours row must have complete, gap-free, non-overlapping
-pricing coverage.
+Every configured open weekday must have complete, contiguous, non-overlapping
+pricing periods. A weekday with no pricing periods is closed and is not a
+pricing configuration error.
 
 Pricing-period boundaries and booking times must align with
 `Court.slot_duration_minutes`.
@@ -537,12 +548,23 @@ pricing periods.
   transaction-specific DRF permission class seems absolutely necessary, stop
   and explain why before adding it.
 - Transactions are immutable financial history through the API: no PATCH, PUT,
-  DELETE, refund, or reversal behavior exists. Corrections use
+  DELETE, or reversal behavior exists. Normal API creates are
+  `transaction_type=PAYMENT` with positive amounts. Booking cancellation
+  services may internally create `transaction_type=REFUND` rows with negative
+  amounts. Corrections use
   `POST .../transactions/{id}/cancel/` with a required reason, followed by normal
   transaction creation.
+- The first active PAYMENT for a normal booking must be at least
+  `min(booking.court.minimum_deposit, booking.total_price)`. Only active PAYMENT
+  rows count toward paid/remaining booking amounts. Active REFUND rows count as
+  signed negative settlement/revenue rows and cannot be cancelled through the
+  normal transaction correction flow.
 - Cancelled transactions remain visible and may be filtered with `is_cancelled`, but
-  only non-cancelled transactions count toward paid/remaining amounts, completion
-  collection, settlements, calendar summaries, and dashboard revenue.
+  only non-cancelled transactions count toward settlements, calendar summaries,
+  and dashboard revenue.
+- Transaction list date filters use `Transaction.created` as the date authority.
+  Date-only `date_from`/`date_to` values mean complete local calendar days with
+  an exclusive next-day upper bound.
 - Already cancelled or settled transactions and transactions attached to terminal
   bookings cannot be cancelled. If no valid payment remains on a confirmed
   booking, the cancel service returns the booking to `HOLD` in the same atomic,
@@ -579,8 +601,10 @@ pricing periods.
   flag can preview/create for active STAFF and MANAGER users in the selected
   club, but not OWNER users by default. Managers can preview their own
   transactions as a dry run but must not approve/create their own settlement.
-- Staff can preview only their own unsettled transactions and cannot create,
-  list, retrieve, or mark settlements.
+- Managers without settlement permission and Staff can preview their own
+  unsettled transactions and list/retrieve only their own settlements. They
+  cannot choose another employee, create/approve settlements, mark settlements
+  settled, or manage another user's financial data.
 - For settlement create/approval, platform admins and owners may approve their
   own collected transactions. Managers and staff must not approve their own
   settlement.
@@ -600,9 +624,9 @@ pricing periods.
 - `SettlementTransaction.transaction` is a `OneToOneField` to `Transaction`;
   this prevents one transaction from being included in more than one
   settlement while keeping transaction rows immutable.
-- Settlements include non-cancelled already-recorded transactions by club,
-  collected_by user, and unsettled state. Booking lifecycle status is not used
-  to decide settlement inclusion in Sprint 6.
+- Settlements include non-cancelled already-recorded signed booking
+  transactions by club, collected_by user, and unsettled state. Booking
+  lifecycle status is not used to decide settlement inclusion in Sprint 6.
 - Settlements do not implement refunds, reversals, corrections, commission,
   payout automation, dashboards, or automatic settlement jobs.
 - Settlement filters live in `apps/settlements/filters.py` and must follow the
@@ -672,9 +696,15 @@ pricing periods.
   financial dashboard transaction totals include non-cancelled transactions only.
 - Dashboard metric names must match their meaning. Do not put counts in fields
   named `amount`.
-- Dashboard transaction count and total metrics are period-scoped. Dashboard
-  unsettled money metrics represent current open balance by default and still
-  respect optional `court`, `collected_by`, and `payment_method` filters.
+- Dashboard booking metrics use booking occurrence dates (`Booking.start_time`).
+  Dashboard transaction count, total, payment-method, settled/unsettled, and
+  staff-unsettled-money metrics use `Transaction.created` as the date authority.
+  Date-only dashboard ranges mean complete local calendar days with an exclusive
+  next-day upper bound. Do not mix booking dates into transaction financial
+  filters.
+- Dashboard `payment_method_totals` returns every supported payment method with
+  signed net `amount`, positive absolute `refund`, and active financial row
+  `count`.
 - Dashboard settlement-related metrics are derived from eligible unsettled
   transactions, not from `Settlement.status=PENDING`. Use
   `staff_with_unsettled_transactions_count` for the distinct collector count;
@@ -737,13 +767,19 @@ Owning app: `apps/recurring/`. Locked contract:
   `RecurringDepositTransaction`; settlement deposit lines use
   `SettlementRecurringDepositTransaction`.
 - Settlement net =
-  booking payments + deposit collections − deposit refunds.
+  signed booking transactions + deposit collections − deposit refunds.
 - Forfeiture is deposit-status + audit only; no cash transaction.
 - No replace/pause/resume/skip endpoints. New period = cancel then create a
   separate agreement.
-- Court `recurring_deposit_refund_notice_days` max is 30; `null` blocks create.
-  Only platform admin/owner may change it. Agreements store
-  `refund_notice_days_snapshot`.
+- Court `cancellation_refund_notice_days` max is 30; `null` blocks recurring
+  create and normal booking cancellation. Only platform admin/owner may change
+  court policy fields. Agreements do not snapshot refund notice days; current
+  Court policy intentionally applies to active agreements.
+- Recurring maintenance uses `RECURRING_COMPLETION_GRACE_HOURS = 24`. If the
+  latest due occurrence is not `COMPLETED` after the grace period, the agreement
+  is automatically cancelled, its deposit is forfeited, unpaid future
+  occurrences are released, paid future occurrences are preserved, and
+  `RECURRING_AGREEMENT_AUTO_TERMINATED` is audited.
 - Access helpers live on `ClubAccessContext`:
   `can_view_recurring_agreement`, `can_create_recurring_agreement`,
   `can_cancel_recurring_agreement`, `can_refund_recurring_deposit`,

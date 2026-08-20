@@ -6,9 +6,11 @@ from django.db.models import (
     DurationField,
     ExpressionWrapper,
     F,
+    IntegerField,
     Q,
     Value,
 )
+from django.db.models.functions import Cast
 from django.utils import timezone
 
 from apps.bookings.models import Booking
@@ -70,7 +72,8 @@ class BookingFilter(django_filters.FilterSet):
 
     def with_hold_expiry(self, queryset):
         hold_expiry_duration = ExpressionWrapper(
-            F("court__internal_hold_expiry_hours") * Value(timedelta(hours=1)),
+            Cast("court__internal_hold_expiry_hours", IntegerField())
+            * Value(timedelta(hours=1)),
             output_field=DurationField(),
         )
         return queryset.annotate(

@@ -36,7 +36,6 @@ class RecurringAgreementAdmin(admin.ModelAdmin):
     readonly_fields = (
         "deposit_amount",
         "deposit_status",
-        "refund_notice_days_snapshot",
         "deposit_collected_at",
         "deposit_collected_by",
         "cancellation_requested_at",

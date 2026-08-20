@@ -53,6 +53,10 @@ class SettlementLineSerializer(serializers.ModelSerializer):
         source="transaction.payment_method",
         read_only=True,
     )
+    transaction_type = serializers.CharField(
+        source="transaction.transaction_type",
+        read_only=True,
+    )
     payment_reference = serializers.CharField(
         source="transaction.payment_reference",
         read_only=True,
@@ -70,6 +74,7 @@ class SettlementLineSerializer(serializers.ModelSerializer):
             "id",
             "kind",
             "transaction",
+            "transaction_type",
             "booking",
             "court",
             "court_name",
@@ -82,7 +87,7 @@ class SettlementLineSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_kind(self, obj):
-        return "BOOKING_PAYMENT"
+        return obj.transaction.transaction_type
 
 
 class SettlementDepositLineSerializer(serializers.ModelSerializer):
@@ -294,6 +299,7 @@ class SettlementPreviewResponseSerializer(serializers.Serializer):
     transaction_count = serializers.IntegerField()
     total_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
     booking_payments = serializers.DecimalField(max_digits=10, decimal_places=2)
+    booking_refunds = serializers.DecimalField(max_digits=10, decimal_places=2)
     deposit_collections = serializers.DecimalField(max_digits=10, decimal_places=2)
     deposit_refunds = serializers.DecimalField(max_digits=10, decimal_places=2)
     net_amount = serializers.DecimalField(max_digits=10, decimal_places=2)

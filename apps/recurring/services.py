@@ -17,13 +17,16 @@ from apps.bookings.services import (
 )
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
-from apps.recurring.constants import RECURRING_GENERATION_HORIZON_WEEKS
+from apps.recurring.constants import (
+    RECURRING_COMPLETION_GRACE_HOURS,
+    RECURRING_GENERATION_HORIZON_WEEKS,
+)
 from apps.recurring.models import RecurringAgreement, RecurringDepositTransaction
 from apps.transactions.models import Transaction
 from apps.transactions.services import get_booking_paid_amount
 
 RECURRING_POLICY_NOT_CONFIGURED_MESSAGE = _(
-    "Recurring deposit refund notice days must be configured on this court."
+    "Cancellation refund notice days must be configured on this court."
 )
 RECURRING_CANCELLATION_HAS_PAID_FUTURE_BOOKINGS_MESSAGE = _(
     "Cancel paid future bookings before cancelling this agreement."
@@ -42,6 +45,10 @@ RECURRING_START_DATE_WEEKDAY_MISMATCH_MESSAGE = _(
     "start_date must match the agreement weekday."
 )
 BOOKING_SLOT_UNAVAILABLE_MESSAGE = _("The selected booking slot is not available.")
+RECURRING_START_OCCURRENCE_IN_PAST_MESSAGE = _(
+    "The first recurring occurrence must be in the future."
+)
+PREVIOUS_OCCURRENCE_NOT_COMPLETED = "PREVIOUS_OCCURRENCE_NOT_COMPLETED"
 
 
 def combine_local_datetime(date_value, time_value):
@@ -117,7 +124,13 @@ def resolve_effective_occurrence_date(agreement, effective_date=None, *, now=Non
 
 
 def is_deposit_refundable(*, agreement, requested_at, effective_date):
-    notice_days = agreement.refund_notice_days_snapshot
+    notice_days = agreement.court.cancellation_refund_notice_days
+    if notice_days is None:
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="RECURRING_POLICY_NOT_CONFIGURED",
+            message=RECURRING_POLICY_NOT_CONFIGURED_MESSAGE,
+        )
     occurrence_start, _end = agreement_occurrence_datetimes(agreement, effective_date)
     if notice_days == 0:
         return requested_at <= occurrence_start
@@ -150,7 +163,7 @@ def is_duplicate_deposit_reference_integrity_error(exc):
 
 
 def validate_court_recurring_policy(court):
-    if court.recurring_deposit_refund_notice_days is None:
+    if court.cancellation_refund_notice_days is None:
         raise SlotyAPIException(
             status_code=status.HTTP_409_CONFLICT,
             code="RECURRING_POLICY_NOT_CONFIGURED",
@@ -276,7 +289,13 @@ def create_occurrence_booking(*, agreement, occurrence_date, created_by):
     return booking
 
 
-def generate_occurrences_for_agreement(*, agreement, created_by, stop_before=None):
+def generate_occurrences_for_agreement(
+    *,
+    agreement,
+    created_by,
+    stop_before=None,
+    start_date=None,
+):
     created = []
     existing_starts = set(
         Booking.objects.filter(recurring_agreement=agreement).values_list(
@@ -284,7 +303,7 @@ def generate_occurrences_for_agreement(*, agreement, created_by, stop_before=Non
         )
     )
     for occurrence_date in iter_occurrence_dates(
-        start_date=agreement.start_date,
+        start_date=start_date or agreement.start_date,
         weekday=agreement.weekday,
         count=RECURRING_GENERATION_HORIZON_WEEKS,
         stop_before=stop_before,
@@ -319,19 +338,143 @@ def generate_occurrences_for_agreement(*, agreement, created_by, stop_before=Non
 
 
 def maintain_rolling_horizon(*, agreement, actor=None):
-    if agreement.status != RecurringAgreement.Status.ACTIVE:
+    if agreement.status not in {
+        RecurringAgreement.Status.ACTIVE,
+        RecurringAgreement.Status.ACTION_REQUIRED,
+    }:
         return []
+    latest_start = (
+        Booking.objects.filter(recurring_agreement=agreement)
+        .order_by("-start_time")
+        .values_list("start_time", flat=True)
+        .first()
+    )
+    start_date = agreement.start_date
+    if latest_start is not None:
+        start_date = timezone.localtime(latest_start).date() + timedelta(days=7)
     stop_before = agreement.cancellation_effective_date
     return generate_occurrences_for_agreement(
         agreement=agreement,
         created_by=actor or agreement.created_by,
         stop_before=stop_before,
+        start_date=start_date,
     )
+
+
+def latest_due_occurrence_for_completion_check(*, agreement, now):
+    grace_delta = timedelta(hours=RECURRING_COMPLETION_GRACE_HOURS)
+    return (
+        Booking.objects.filter(
+            recurring_agreement=agreement,
+            end_time__lte=now - grace_delta,
+        )
+        .order_by("-end_time", "-id")
+        .first()
+    )
+
+
+def release_unpaid_future_occurrences_for_auto_termination(*, agreement, now):
+    released = []
+    future_bookings = Booking.objects.select_for_update().filter(
+        recurring_agreement=agreement,
+        start_time__gt=now,
+        status__in=Booking.BLOCKING_STATUSES,
+    )
+    for booking in future_bookings.order_by("start_time", "id"):
+        if get_booking_paid_amount(booking) > 0:
+            continue
+        booking.status = Booking.Status.CANCELLED
+        booking.cancelled_at = now
+        booking.cancellation_reason = PREVIOUS_OCCURRENCE_NOT_COMPLETED
+        booking.save(
+            update_fields=[
+                "status",
+                "cancelled_at",
+                "cancellation_reason",
+                "modified",
+            ]
+        )
+        record_audit_log(
+            club=booking.club,
+            court=booking.court,
+            actor=None,
+            action=AuditLog.Action.BOOKING_CANCELLED,
+            entity_type="Booking",
+            entity_id=booking.id,
+            after_data={"status": booking.status},
+            metadata={
+                "source": "recurring_auto_termination",
+                "agreement_id": agreement.id,
+                "reason": PREVIOUS_OCCURRENCE_NOT_COMPLETED,
+            },
+        )
+        released.append(booking)
+    return released
+
+
+def auto_terminate_if_previous_occurrence_not_completed(*, agreement, now=None):
+    now = now or timezone.now()
+    if agreement.status != RecurringAgreement.Status.ACTIVE:
+        return False
+    failed_booking = latest_due_occurrence_for_completion_check(
+        agreement=agreement,
+        now=now,
+    )
+    if failed_booking is None or failed_booking.status == Booking.Status.COMPLETED:
+        return False
+
+    grace_deadline = failed_booking.end_time + timedelta(
+        hours=RECURRING_COMPLETION_GRACE_HOURS
+    )
+    released = release_unpaid_future_occurrences_for_auto_termination(
+        agreement=agreement,
+        now=now,
+    )
+    agreement.status = RecurringAgreement.Status.CANCELLED
+    agreement.deposit_status = RecurringAgreement.DepositStatus.FORFEITED
+    agreement.cancellation_requested_at = now
+    agreement.cancellation_effective_date = timezone.localdate(now)
+    agreement.cancellation_reason = PREVIOUS_OCCURRENCE_NOT_COMPLETED
+    agreement.save(
+        update_fields=[
+            "status",
+            "deposit_status",
+            "cancellation_requested_at",
+            "cancellation_effective_date",
+            "cancellation_reason",
+            "modified",
+        ]
+    )
+    record_audit_log(
+        club=agreement.club,
+        court=agreement.court,
+        actor=None,
+        action=AuditLog.Action.RECURRING_AGREEMENT_AUTO_TERMINATED,
+        entity_type="RecurringAgreement",
+        entity_id=agreement.id,
+        after_data={
+            "agreement_id": agreement.id,
+            "status": agreement.status,
+            "deposit_status": agreement.deposit_status,
+            "released_booking_ids": [booking.id for booking in released],
+        },
+        metadata={
+            "agreement_id": agreement.id,
+            "failed_booking_id": failed_booking.id,
+            "failed_booking_status": failed_booking.status,
+            "occurrence_end": failed_booking.end_time.isoformat(),
+            "grace_deadline": grace_deadline.isoformat(),
+            "reason": PREVIOUS_OCCURRENCE_NOT_COMPLETED,
+            "deposit_status": agreement.deposit_status,
+        },
+    )
+    return True
 
 
 def maintain_all_rolling_horizons():
     maintained = 0
     failures = 0
+    terminated = 0
     for agreement in RecurringAgreement.objects.filter(
         status=RecurringAgreement.Status.ACTIVE
     ).select_related("club", "court"):
@@ -344,11 +487,16 @@ def maintain_all_rolling_horizons():
                     .get(pk=agreement.pk)
                 )
                 Court.objects.select_for_update().get(pk=locked.court_id)
+                if auto_terminate_if_previous_occurrence_not_completed(
+                    agreement=locked
+                ):
+                    terminated += 1
+                    continue
                 maintain_rolling_horizon(agreement=locked)
                 maintained += 1
         except SlotyAPIException:
             failures += 1
-    return {"maintained": maintained, "failures": failures}
+    return {"maintained": maintained, "failures": failures, "terminated": terminated}
 
 
 def preview_recurring_availability(
@@ -488,6 +636,12 @@ def create_recurring_agreement(
                     )
 
             now = timezone.now()
+            if sample_start <= now:
+                raise SlotyAPIException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    code="RECURRING_START_OCCURRENCE_IN_PAST",
+                    message=RECURRING_START_OCCURRENCE_IN_PAST_MESSAGE,
+                )
             agreement = RecurringAgreement.objects.create(
                 club=locked_court.club,
                 court=locked_court,
@@ -500,9 +654,6 @@ def create_recurring_agreement(
                 status=RecurringAgreement.Status.ACTIVE,
                 deposit_amount=deposit_amount,
                 deposit_status=RecurringAgreement.DepositStatus.HELD,
-                refund_notice_days_snapshot=(
-                    locked_court.recurring_deposit_refund_notice_days
-                ),
                 deposit_collected_at=now,
                 deposit_collected_by=created_by,
                 notes=notes or "",
@@ -611,7 +762,7 @@ def build_cancellation_preview(*, access, agreement, effective_date=None):
         ),
         "deposit_refundable": refundable,
         "deposit_amount": agreement.deposit_amount,
-        "refund_notice_days_snapshot": agreement.refund_notice_days_snapshot,
+        "refund_notice_days": agreement.court.cancellation_refund_notice_days,
         "paid_future_bookings": len(paid_bookings),
         "paid_future_booking_ids": [booking.id for booking in paid_bookings],
         "total_paid_amount": total_paid,
@@ -705,7 +856,10 @@ def cancel_recurring_agreement(
             .get(pk=agreement.pk)
         )
         Court.objects.select_for_update().get(pk=locked.court_id)
-        if locked.status != RecurringAgreement.Status.ACTIVE:
+        if locked.status not in {
+            RecurringAgreement.Status.ACTIVE,
+            RecurringAgreement.Status.ACTION_REQUIRED,
+        }:
             raise SlotyAPIException(
                 status_code=status.HTTP_409_CONFLICT,
                 code="RECURRING_AGREEMENT_NOT_ACTIVE",

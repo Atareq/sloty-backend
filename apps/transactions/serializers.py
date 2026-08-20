@@ -13,18 +13,37 @@ from apps.transactions.services import (
 class TransactionListSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     cancelled_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    booking_start_time = serializers.DateTimeField(
+        source="booking.start_time",
+        read_only=True,
+    )
+    booking_end_time = serializers.DateTimeField(
+        source="booking.end_time",
+        read_only=True,
+    )
+    court_name = serializers.CharField(source="court.name", read_only=True)
+    created_by_username = serializers.CharField(
+        source="created_by.username",
+        read_only=True,
+        default="",
+    )
 
     class Meta:
         model = Transaction
         fields = (
             "id",
             "booking",
+            "booking_start_time",
+            "booking_end_time",
             "club",
             "court",
+            "court_name",
+            "transaction_type",
             "amount",
             "payment_method",
             "payment_reference",
             "created_by",
+            "created_by_username",
             "is_cancelled",
             "cancelled_by",
             "cancelled_at",
@@ -37,19 +56,38 @@ class TransactionListSerializer(serializers.ModelSerializer):
 class TransactionDetailSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     cancelled_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    booking_start_time = serializers.DateTimeField(
+        source="booking.start_time",
+        read_only=True,
+    )
+    booking_end_time = serializers.DateTimeField(
+        source="booking.end_time",
+        read_only=True,
+    )
+    court_name = serializers.CharField(source="court.name", read_only=True)
+    created_by_username = serializers.CharField(
+        source="created_by.username",
+        read_only=True,
+        default="",
+    )
 
     class Meta:
         model = Transaction
         fields = (
             "id",
             "booking",
+            "booking_start_time",
+            "booking_end_time",
             "club",
             "court",
+            "court_name",
+            "transaction_type",
             "amount",
             "payment_method",
             "payment_reference",
             "notes",
             "created_by",
+            "created_by_username",
             "is_cancelled",
             "cancelled_by",
             "cancelled_at",

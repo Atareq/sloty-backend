@@ -320,21 +320,21 @@ class SettlementAccessTests(SettlementAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-    def test_manager_cannot_access_settlements_when_flag_disabled(self):
+    def test_manager_without_flag_can_view_own_settlements_only(self):
         self.manager_membership.manager_can_settle_transactions = False
         self.manager_membership.save(update_fields=["manager_can_settle_transactions"])
         self.client.force_authenticate(user=self.manager)
 
         response = self.client.get(self.settlement_list_url(self.club))
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-    def test_staff_cannot_access_settlements(self):
+    def test_staff_can_view_own_settlements_only(self):
         self.client.force_authenticate(user=self.staff)
 
         response = self.client.get(self.settlement_list_url(self.club))
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_unrelated_club_member_cannot_access_selected_club_settlements(self):
         self.client.force_authenticate(user=self.other_user)
@@ -794,6 +794,29 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.assertEqual(response.data["total_amount"], "125.00")
         self.assertEqual(Settlement.objects.count(), before_settlements)
         self.assertEqual(SettlementTransaction.objects.count(), before_lines)
+
+    def test_preview_uses_signed_booking_refund_amounts(self):
+        self.create_transaction(
+            self.second_booking,
+            transaction_type=Transaction.Type.REFUND,
+            amount=Decimal("-25.00"),
+            created=self.time_at(13),
+            payment_reference="PREVIEW-REFUND",
+            created_by=self.staff,
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(self.settlement_preview_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["transaction_count"], 3)
+        self.assertEqual(response.data["booking_payments"], "125.00")
+        self.assertEqual(response.data["booking_refunds"], "-25.00")
+        self.assertEqual(response.data["total_amount"], "100.00")
+        refund_item = next(
+            item for item in response.data["transactions"] if item["kind"] == "REFUND"
+        )
+        self.assertEqual(refund_item["amount"], "-25.00")
 
     def test_staff_cannot_preview_another_user(self):
         self.client.force_authenticate(user=self.staff)
@@ -1448,12 +1471,13 @@ class SettlementImmutabilityFilterPatternTests(SettlementAPITestCase):
         self.assertEqual(self.list_ids(response), {self.pending.id, self.settled.id})
         self.assertNotIn(self.other_settlement.id, self.list_ids(response))
 
-    def test_staff_filter_request_is_forbidden(self):
+    def test_staff_filter_request_returns_own_settlements(self):
         self.client.force_authenticate(user=self.staff)
 
         response = self.client.get(self.settlement_list_url(self.club))
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {self.pending.id})
 
     def test_settlement_route_resolves_to_viewset(self):
         match = resolve("/api/v1/clubs/example-club/settlements/")

@@ -309,9 +309,6 @@ class Command(BaseCommand):
                 rows.append(
                     {
                         "weekday": weekday,
-                        "opens_at": None,
-                        "closes_at": None,
-                        "is_closed": True,
                         "pricing_periods": [],
                     }
                 )
@@ -319,9 +316,6 @@ class Command(BaseCommand):
             rows.append(
                 {
                     "weekday": weekday,
-                    "opens_at": time(10, 0),
-                    "closes_at": time(23, 0),
-                    "is_closed": False,
                     "pricing_periods": [
                         {
                             "starts_at": time(10, 0),
@@ -416,11 +410,7 @@ class Command(BaseCommand):
                     working_hour, _ = CourtWorkingHour.objects.update_or_create(
                         court=court,
                         weekday=weekday,
-                        defaults={
-                            "opens_at": time(8, 0),
-                            "closes_at": time(23, 0),
-                            "is_closed": False,
-                        },
+                        defaults={},
                     )
                     CourtWorkingHourPricePeriod.objects.update_or_create(
                         working_hour=working_hour,

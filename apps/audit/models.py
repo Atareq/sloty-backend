@@ -30,6 +30,10 @@ class AuditLog(models.Model):
             "RECURRING_AGREEMENT_CANCELLED",
             _("Recurring agreement cancelled"),
         )
+        RECURRING_AGREEMENT_AUTO_TERMINATED = (
+            "RECURRING_AGREEMENT_AUTO_TERMINATED",
+            _("Recurring agreement automatically terminated"),
+        )
         RECURRING_DEPOSIT_COLLECTED = (
             "RECURRING_DEPOSIT_COLLECTED",
             _("Recurring deposit collected"),

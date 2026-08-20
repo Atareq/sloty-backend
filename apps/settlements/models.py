@@ -119,15 +119,14 @@ class SettlementTransaction(models.Model):
     amount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        validators=[MinValueValidator(Decimal("0.01"))],
     )
     created = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [
             models.CheckConstraint(
-                check=Q(amount__gt=0),
-                name="settlement_transaction_amount_gt_zero",
+                check=~Q(amount=0),
+                name="settlement_transaction_amount_non_zero",
             ),
         ]
 
@@ -136,8 +135,8 @@ class SettlementTransaction(models.Model):
 
     def clean(self):
         super().clean()
-        if self.amount is not None and self.amount <= 0:
-            raise ValidationError({"amount": "Amount must be greater than 0."})
+        if self.amount is not None and self.amount == 0:
+            raise ValidationError({"amount": "Amount must not be zero."})
 
 
 class SettlementRecurringDepositTransaction(models.Model):

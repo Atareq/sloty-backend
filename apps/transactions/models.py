@@ -1,10 +1,8 @@
-from decimal import Decimal
-
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
 from django.db import models
 from django.db.models import Q
+from django.utils.translation import gettext_lazy as _
 
 from apps.bookings.models import Booking
 from apps.clubs.models import Club
@@ -12,6 +10,10 @@ from apps.courts.models import Court
 
 
 class Transaction(models.Model):
+    class Type(models.TextChoices):
+        PAYMENT = "PAYMENT", _("Payment")
+        REFUND = "REFUND", _("Refund")
+
     class PaymentMethod(models.TextChoices):
         CASH = "CASH", "Cash"
         DIGITAL_WALLET = "DIGITAL_WALLET", "Digital wallet"
@@ -36,7 +38,12 @@ class Transaction(models.Model):
     amount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        validators=[MinValueValidator(Decimal("0.01"))],
+    )
+    transaction_type = models.CharField(
+        max_length=20,
+        choices=Type.choices,
+        default=Type.PAYMENT,
+        db_index=True,
     )
     payment_method = models.CharField(
         max_length=32,
@@ -68,8 +75,11 @@ class Transaction(models.Model):
     class Meta:
         constraints = [
             models.CheckConstraint(
-                check=Q(amount__gt=0),
-                name="transaction_amount_gt_zero",
+                check=(
+                    Q(transaction_type="PAYMENT", amount__gt=0)
+                    | Q(transaction_type="REFUND", amount__lt=0)
+                ),
+                name="transaction_amount_matches_type",
             ),
             models.UniqueConstraint(
                 fields=["club", "payment_reference"],
@@ -84,7 +94,9 @@ class Transaction(models.Model):
             models.Index(fields=["created_by", "created"]),
             models.Index(fields=["club", "is_cancelled", "created"]),
             models.Index(fields=["booking", "is_cancelled"]),
+            models.Index(fields=["booking", "transaction_type", "is_cancelled"]),
             models.Index(fields=["created_by", "is_cancelled", "created"]),
+            models.Index(fields=["transaction_type", "created"]),
             models.Index(fields=["payment_method"]),
             models.Index(fields=["payment_reference"]),
         ]
@@ -95,8 +107,11 @@ class Transaction(models.Model):
     def clean(self):
         super().clean()
         errors = {}
-        if self.amount is not None and self.amount <= 0:
-            errors["amount"] = "Amount must be greater than 0."
+        if self.amount is not None:
+            if self.transaction_type == self.Type.PAYMENT and self.amount <= 0:
+                errors["amount"] = "Payment amount must be greater than 0."
+            if self.transaction_type == self.Type.REFUND and self.amount >= 0:
+                errors["amount"] = "Refund amount must be less than 0."
         if self.booking_id:
             if self.club_id and self.booking.club_id != self.club_id:
                 errors["club"] = "Transaction club must match the booking club."

@@ -8,6 +8,7 @@ from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.clubs.models import ClubMembership
 from apps.settlements.models import Settlement, SettlementTransaction
+from apps.transactions.models import Transaction
 from apps.transactions.services import get_booking_paid_amount
 from tests.transactions.test_transaction_api import TransactionAPITestCase
 
@@ -217,6 +218,21 @@ class TransactionCancelAPITests(TransactionAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assert_api_error(response, "PAYMENT_SETTLED_CANNOT_BE_CANCELLED")
         self.assertNotIn("transaction", response.data)
+        transaction_obj.refresh_from_db()
+        self.assertFalse(transaction_obj.is_cancelled)
+
+    def test_refund_transaction_cannot_be_cancelled_through_correction_flow(self):
+        transaction_obj = self.create_transaction(
+            self.booking,
+            transaction_type=Transaction.Type.REFUND,
+            amount=Decimal("-50.00"),
+            created_by=self.owner,
+        )
+
+        response = self.post_cancel(self.club, transaction_obj, self.owner)
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "REFUND_TRANSACTION_CANNOT_BE_CANCELLED")
         transaction_obj.refresh_from_db()
         self.assertFalse(transaction_obj.is_cancelled)
 

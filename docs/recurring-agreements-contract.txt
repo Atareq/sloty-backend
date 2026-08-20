@@ -33,4 +33,4 @@ POST     /api/v1/clubs/{club_slug}/recurring-agreements/{id}/cancellation-previe
 POST     /api/v1/clubs/{club_slug}/recurring-agreements/{id}/cancel/
 POST     /api/v1/clubs/{club_slug}/recurring-agreements/{id}/refund-deposit/
 
-Court policy field: recurring_deposit_refund_notice_days (null|0..30)
+Court policy field: cancellation_refund_notice_days (null|0..30)

@@ -57,11 +57,7 @@ class RecurringAPITestCase(APITestCase):
         working_hour, _ = CourtWorkingHour.objects.update_or_create(
             court=court,
             weekday=weekday,
-            defaults={
-                "opens_at": opens_at if not is_closed else None,
-                "closes_at": closes_at if not is_closed else None,
-                "is_closed": is_closed,
-            },
+            defaults={},
         )
         working_hour.pricing_periods.all().delete()
         if not is_closed:
@@ -79,7 +75,7 @@ class RecurringAPITestCase(APITestCase):
             "name": name,
             "default_price": Decimal("300.00"),
             "slot_duration_minutes": 60,
-            "recurring_deposit_refund_notice_days": 1,
+            "cancellation_refund_notice_days": 1,
         }
         data.update(extra_fields)
         court = Court.objects.create(**data)
@@ -210,13 +206,13 @@ class RecurringPolicyTests(RecurringAPITestCase):
         )
 
     def test_court_refund_policy_maximum_is_30(self):
-        self.court.recurring_deposit_refund_notice_days = 31
+        self.court.cancellation_refund_notice_days = 31
         with self.assertRaises(DjangoValidationError):
             self.court.full_clean()
 
     def test_null_court_policy_blocks_recurring_creation(self):
-        self.court.recurring_deposit_refund_notice_days = None
-        self.court.save(update_fields=["recurring_deposit_refund_notice_days"])
+        self.court.cancellation_refund_notice_days = None
+        self.court.save(update_fields=["cancellation_refund_notice_days"])
         self.client.force_authenticate(user=self.owner)
         response = self.post_agreement(self.club, self.court)
         self.assert_api_error(response, "RECURRING_POLICY_NOT_CONFIGURED")
@@ -225,21 +221,20 @@ class RecurringPolicyTests(RecurringAPITestCase):
         self.client.force_authenticate(user=self.staff)
         response = self.client.patch(
             self.court_detail_url(self.club, self.court),
-            {"recurring_deposit_refund_notice_days": 2},
+            {"cancellation_refund_notice_days": 2},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_policy_is_snapshotted_on_agreement_creation(self):
+    def test_policy_uses_current_court_value(self):
         self.client.force_authenticate(user=self.owner)
         response = self.post_agreement(self.club, self.court)
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         agreement = RecurringAgreement.objects.get(pk=response.data["id"])
-        self.assertEqual(agreement.refund_notice_days_snapshot, 1)
-        self.court.recurring_deposit_refund_notice_days = 5
-        self.court.save(update_fields=["recurring_deposit_refund_notice_days"])
+        self.court.cancellation_refund_notice_days = 5
+        self.court.save(update_fields=["cancellation_refund_notice_days"])
         agreement.refresh_from_db()
-        self.assertEqual(agreement.refund_notice_days_snapshot, 1)
+        self.assertEqual(agreement.court.cancellation_refund_notice_days, 5)
 
 
 class RecurringCreateAccessTests(RecurringAPITestCase):
@@ -297,7 +292,7 @@ class RecurringCancellationTests(RecurringAPITestCase):
         self.court = self.create_court(
             self.club,
             "Cancel Court",
-            recurring_deposit_refund_notice_days=1,
+            cancellation_refund_notice_days=1,
         )
         self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
         self.client.force_authenticate(user=self.owner)
@@ -334,8 +329,8 @@ class RecurringCancellationTests(RecurringAPITestCase):
         # notice_days=1 → deadline is occurrence_start - 1 day.
         # Cancel at exactly that deadline via free-running clock is hard;
         # use notice_days=0 and cancel at start boundary through service path.
-        self.agreement.refund_notice_days_snapshot = 0
-        self.agreement.save(update_fields=["refund_notice_days_snapshot"])
+        self.court.cancellation_refund_notice_days = 0
+        self.court.save(update_fields=["cancellation_refund_notice_days"])
         from apps.recurring.services import is_deposit_refundable
 
         occurrence_start = timezone.make_aware(
@@ -353,8 +348,8 @@ class RecurringCancellationTests(RecurringAPITestCase):
         )
 
     def test_cancellation_after_deadline_gives_forfeited(self):
-        self.agreement.refund_notice_days_snapshot = 30
-        self.agreement.save(update_fields=["refund_notice_days_snapshot"])
+        self.court.cancellation_refund_notice_days = 30
+        self.court.save(update_fields=["cancellation_refund_notice_days"])
         response = self.client.post(
             self.agreement_cancel_url(self.club, self.agreement),
             {
