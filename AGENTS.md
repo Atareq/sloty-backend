@@ -1376,6 +1376,9 @@ Notes:
 - Seed data is for local/manual testing only and must not create production
   side effects.
 - Use predictable usernames, slugs, dates, and references.
+- Default demo seed data uses marketing-friendly football club and stadium
+  labels such as Barcelona FC, Real Madrid CF, Liverpool FC, Spotify Camp Nou,
+  Santiago Bernabeu, and Anfield while keeping internal A/B/C seed keys stable.
 - Maintain role-specific and club-specific demo users for multi-club testing.
 - Do not reuse active manager or staff demo users across clubs because current
   membership constraints allow only one active manager or staff assignment per

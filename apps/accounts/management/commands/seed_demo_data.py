@@ -52,46 +52,50 @@ ALBALADYA_USER_SPECS = (
 )
 
 USER_SPECS = (
-    ("platform_admin", "Platform", "Admin", True, True, True),
-    ("owner_a", "Demo A", "Owner", False, False, False),
-    ("manager_a", "Demo A", "Manager", False, False, False),
-    ("staff_a", "Demo A", "Staff", False, False, False),
-    ("owner_b", "Demo B", "Owner", False, False, False),
-    ("manager_b", "Demo B", "Manager", False, False, False),
-    ("staff_b", "Demo B", "Staff", False, False, False),
-    ("owner_c", "Demo C", "Owner", False, False, False),
-    ("manager_c", "Demo C", "Manager", False, False, False),
-    ("staff_c", "Demo C", "Staff", False, False, False),
+    ("platform_admin", "Tarek", "Platform Admin", True, True, True),
+    ("hossam_admin", "Hossam", "Platform Admin", True, True, True),
+    ("owner_a", "Owner", "Tarek", False, False, False),
+    ("manager_a", "Manager", "Tarek", False, False, False),
+    ("staff_a", "Staff", "Tarek", False, False, False),
+    ("owner_b", "Owner", "Hossam", False, False, False),
+    ("manager_b", "Manager", "Hossam", False, False, False),
+    ("staff_b", "Staff", "Hossam", False, False, False),
+    ("owner_c", "Owner", "Tarek", False, False, False),
+    ("manager_c", "Manager", "Tarek", False, False, False),
+    ("staff_c", "Staff", "Tarek", False, False, False),
 )
 
 CLUB_SPECS = (
     {
         "key": "A",
-        "slug": "demo-football-club",
-        "name": "Demo Football Club",
+        "slug": "barcelona-fc",
+        "name": "Barcelona FC",
         "governorate": "ASSIUT",
         "city": "ASSIUT_MARKAZ",
-        "address": "Demo detailed address, Assiut",
+        "address": "Barcelona FC demo club, Assiut",
+        "court_names": ("Spotify Camp Nou", "La Masia Training Court"),
         "manager_can_settle_transactions": True,
         "manager_can_change_pricing": True,
     },
     {
         "key": "B",
-        "slug": "demo-restricted-club",
-        "name": "Demo Restricted Club",
+        "slug": "real-madrid-cf",
+        "name": "Real Madrid CF",
         "governorate": "SOHAG",
         "city": "SOHAG_MARKAZ",
-        "address": "Restricted demo detailed address, Sohag",
+        "address": "Real Madrid CF demo club, Sohag",
+        "court_names": ("Santiago Bernabeu", "Valdebebas Training Court"),
         "manager_can_settle_transactions": False,
         "manager_can_change_pricing": False,
     },
     {
         "key": "C",
-        "slug": "demo-other-club",
-        "name": "Demo Other Club",
+        "slug": "liverpool-fc",
+        "name": "Liverpool FC",
         "governorate": "MINYA",
         "city": "MINYA_MARKAZ",
-        "address": "Other demo detailed address, Minya",
+        "address": "Liverpool FC demo club, Minya",
+        "court_names": ("Anfield", "Kirkby Academy Court"),
         "manager_can_settle_transactions": True,
         "manager_can_change_pricing": False,
     },
@@ -386,10 +390,11 @@ class Command(BaseCommand):
         courts = {}
         for club_key, club in clubs.items():
             courts[club_key] = {}
+            club_spec = CLUB_SPECS_BY_KEY[club_key]
             for index, price in ((1, Decimal("300.00")), (2, Decimal("400.00"))):
                 court, _ = Court.objects.update_or_create(
                     club=club,
-                    name=f"Demo {club_key} Court {index}",
+                    name=club_spec["court_names"][index - 1],
                     defaults={
                         "sport_type": Court.SportType.FOOTBALL,
                         "default_price": price,
@@ -768,20 +773,20 @@ class Command(BaseCommand):
             self.stdout.write(f"- {club.slug}")
         self.stdout.write("")
         self.stdout.write("Useful checks:")
-        self.stdout.write("- manager_a can settle in demo-football-club")
-        self.stdout.write("- manager_b cannot settle in demo-restricted-club")
-        self.stdout.write("- staff_a can access only Demo A Court 1")
-        self.stdout.write("- staff_a cannot access Demo A Court 2")
-        self.stdout.write("- staff_a cannot access Club B or Club C data")
+        self.stdout.write("- manager_a can settle in barcelona-fc")
+        self.stdout.write("- manager_b cannot settle in real-madrid-cf")
+        self.stdout.write("- staff_a can access only Spotify Camp Nou")
+        self.stdout.write("- staff_a cannot access La Masia Training Court")
+        self.stdout.write("- staff_a cannot access Real Madrid CF or Liverpool FC data")
         self.stdout.write("")
         self.stdout.write("Endpoints:")
         self.stdout.write("- /api/v1/auth/token/")
         self.stdout.write("- /api/v1/me/")
         self.stdout.write("- /api/v1/clubs/")
-        self.stdout.write("- /api/v1/clubs/demo-football-club/bookings/")
-        self.stdout.write("- /api/v1/clubs/demo-football-club/transactions/")
-        self.stdout.write("- /api/v1/clubs/demo-football-club/settlements/preview/")
-        self.stdout.write("- /api/v1/clubs/demo-football-club/audit-logs/")
+        self.stdout.write("- /api/v1/clubs/barcelona-fc/bookings/")
+        self.stdout.write("- /api/v1/clubs/barcelona-fc/transactions/")
+        self.stdout.write("- /api/v1/clubs/barcelona-fc/settlements/preview/")
+        self.stdout.write("- /api/v1/clubs/barcelona-fc/audit-logs/")
         self.stdout.write("")
         self.stdout.write(
             "Counts: "

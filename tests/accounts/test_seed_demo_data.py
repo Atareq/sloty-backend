@@ -16,9 +16,9 @@ from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
 DEMO_CLUB_SLUGS = (
-    "demo-football-club",
-    "demo-restricted-club",
-    "demo-other-club",
+    "barcelona-fc",
+    "real-madrid-cf",
+    "liverpool-fc",
 )
 
 
@@ -36,6 +36,13 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertTrue(platform_admin.is_platform_admin)
         self.assertTrue(platform_admin.is_staff)
         self.assertTrue(platform_admin.is_superuser)
+        self.assertEqual(platform_admin.get_full_name(), "Tarek Platform Admin")
+
+        hossam_admin = User.objects.get(username="hossam_admin")
+        self.assertTrue(hossam_admin.is_platform_admin)
+        self.assertTrue(hossam_admin.is_staff)
+        self.assertTrue(hossam_admin.is_superuser)
+        self.assertEqual(hossam_admin.get_full_name(), "Hossam Platform Admin")
 
         self.assertEqual(Club.objects.filter(slug__in=DEMO_CLUB_SLUGS).count(), 3)
         self.assertEqual(
@@ -58,8 +65,12 @@ class SeedDemoDataCommandTests(TestCase):
                 },
             )
 
-        club_a = Club.objects.get(slug="demo-football-club")
-        club_b = Club.objects.get(slug="demo-restricted-club")
+        club_a = Club.objects.get(slug="barcelona-fc")
+        club_b = Club.objects.get(slug="real-madrid-cf")
+        club_c = Club.objects.get(slug="liverpool-fc")
+        self.assertEqual(club_a.name, "Barcelona FC")
+        self.assertEqual(club_b.name, "Real Madrid CF")
+        self.assertEqual(club_c.name, "Liverpool FC")
         manager_a = ClubMembership.objects.get(
             club=club_a,
             role=ClubMembership.Role.MANAGER,
@@ -124,7 +135,7 @@ class SeedDemoDataCommandTests(TestCase):
                 club=club_a,
                 payment_reference="A-DIGITAL-COURT2-001",
                 payment_method=Transaction.PaymentMethod.DIGITAL_WALLET,
-                court__name="Demo A Court 2",
+                court__name="La Masia Training Court",
             ).exists()
         )
 
@@ -167,11 +178,11 @@ class SeedDemoDataCommandTests(TestCase):
             role=ClubMembership.Role.STAFF,
             is_active=True,
         )
-        self.assertEqual(staff_a_membership.court.name, "Demo A Court 1")
+        self.assertEqual(staff_a_membership.court.name, "Spotify Camp Nou")
         self.assertTrue(
             Booking.objects.filter(
                 club=club_a,
-                court__name="Demo A Court 2",
+                court__name="La Masia Training Court",
             ).exists()
         )
 
