@@ -354,6 +354,158 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assert_api_error(response, "BOOKING_OUTSIDE_WORKING_HOURS")
 
+    def test_recurring_booking_create_uses_booking_native_anchor_only(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            is_recurring=True,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        booking = Booking.objects.get(id=response.data["id"])
+        self.assertEqual(Booking.objects.count(), 1)
+        self.assertEqual(booking.source, Booking.Source.RECURRING)
+        self.assertEqual(
+            booking.recurrence_status,
+            Booking.RecurrenceStatus.ACTIVE,
+        )
+        self.assertEqual(booking.status, Booking.Status.HOLD)
+        self.assertIsNone(booking.previous_recurring_booking)
+        self.assertTrue(response.data["is_recurring"])
+        self.assertEqual(response.data["recurrence_status"], "ACTIVE")
+
+    def test_direct_recurring_source_is_rejected(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            source=Booking.Source.RECURRING,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "source")
+
+    def test_admin_correction_cannot_be_recurring(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            source=Booking.Source.ADMIN_CORRECTION,
+            is_recurring=True,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "is_recurring")
+
+    def test_future_virtual_recurring_conflict_blocks_normal_booking(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        anchor = self.create_booking(
+            self.court,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+        )
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=(anchor.start_time + timedelta(weeks=8)).isoformat(),
+            end_time=(anchor.end_time + timedelta(weeks=8, hours=1)).isoformat(),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_SLOT_UNAVAILABLE")
+        self.assertEqual(response.data["details"]["conflict_type"], "RECURRING_PATTERN")
+        self.assertEqual(
+            response.data["details"]["conflicting_booking_id"],
+            anchor.id,
+        )
+
+    def test_active_recurrence_does_not_block_before_or_non_overlapping_candidate(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        anchor_start = self.time_at(20)
+        self.create_booking(
+            self.court,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            start_time=anchor_start,
+            end_time=self.time_at(21),
+        )
+
+        before = self.post_booking(
+            self.club,
+            self.court,
+            start_time=(anchor_start - timedelta(weeks=1)).isoformat(),
+            end_time=(
+                anchor_start - timedelta(weeks=1) + timedelta(hours=1)
+            ).isoformat(),
+            customer_phone="+201000000051",
+        )
+        non_overlap = self.post_booking(
+            self.club,
+            self.court,
+            start_time=(anchor_start + timedelta(weeks=1, hours=1)).isoformat(),
+            end_time=(anchor_start + timedelta(weeks=1, hours=2)).isoformat(),
+            customer_phone="+201000000052",
+        )
+
+        self.assertEqual(before.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(non_overlap.status_code, status.HTTP_201_CREATED)
+
+    def test_future_concrete_booking_blocks_new_recurrence(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        future_start = self.time_at(20) + timedelta(weeks=10, minutes=30)
+        blocker = self.create_booking(
+            self.court,
+            start_time=future_start,
+            end_time=future_start + timedelta(hours=1),
+            status=Booking.Status.CONFIRMED,
+        )
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            is_recurring=True,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_SLOT_UNAVAILABLE")
+        self.assertEqual(response.data["details"]["conflict_type"], "FUTURE_CONFLICT")
+        self.assertEqual(
+            response.data["details"]["conflicting_booking_id"],
+            blocker.id,
+        )
+
+    def test_existing_active_recurrence_blocks_new_overlapping_recurrence(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        anchor = self.create_booking(
+            self.court,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+        )
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            is_recurring=True,
+            start_time=(self.time_at(20) + timedelta(weeks=1)).isoformat(),
+            end_time=(self.time_at(22) + timedelta(weeks=1)).isoformat(),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_SLOT_UNAVAILABLE")
+        self.assertEqual(
+            response.data["details"]["conflicting_booking_id"],
+            anchor.id,
+        )
+
 
 class BookingSlotAvailabilityTests(BookingAPITestCase):
     def setUp(self):
@@ -368,9 +520,17 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         data.update(params)
         return self.client.get(self.booking_slots_url(self.club), data)
 
-    def slot_by_hour(self, response, hour):
-        start_time_prefix = self.time_at(hour).strftime("%Y-%m-%dT%H:%M:%S")
+    def slot_by_hour(self, response, hour, date=None):
         expected_datetime = self.time_at(hour)
+        if date is not None:
+            expected_datetime = timezone.datetime(
+                date.year,
+                date.month,
+                date.day,
+                hour,
+                tzinfo=timezone.get_current_timezone(),
+            )
+        start_time_prefix = expected_datetime.strftime("%Y-%m-%dT%H:%M:%S")
         return next(
             slot
             for slot in response.data["slots"]
@@ -445,6 +605,73 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertEqual(completed_slot["is_available"], False)
         self.assertEqual(completed_slot["booking"]["id"], completed.id)
         self.assertEqual(completed_slot["booking"]["remaining_amount"], "0.00")
+
+    def test_future_matching_recurrence_returns_virtual_reserved_slot(self):
+        anchor = self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            status=Booking.Status.CONFIRMED,
+        )
+
+        response = self.get_slots(date="2026-06-03")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slot = self.slot_by_hour(response, 9, date=timezone.datetime(2026, 6, 3).date())
+        self.assertEqual(slot["slot_status"], "RECURRING_RESERVED")
+        self.assertEqual(slot["is_available"], False)
+        self.assertIsNone(slot["booking"])
+        self.assertEqual(slot["recurring_anchor_booking_id"], anchor.id)
+
+    def test_current_actual_recurring_slot_returns_booking_payload(self):
+        booking = self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            status=Booking.Status.CONFIRMED,
+        )
+
+        response = self.get_slots()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slot = self.slot_by_hour(response, 9)
+        self.assertEqual(slot["slot_status"], "CONFIRMED")
+        self.assertEqual(slot["booking"]["id"], booking.id)
+        self.assertEqual(slot["booking"]["source"], "RECURRING")
+        self.assertEqual(slot["booking"]["is_recurring"], True)
+        self.assertEqual(slot["booking"]["recurrence_status"], "ACTIVE")
+
+    def test_free_slot_reports_can_start_recurring(self):
+        response = self.get_slots()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slot = self.slot_by_hour(response, 9)
+        self.assertEqual(slot["slot_status"], "FREE")
+        self.assertEqual(slot["can_start_recurring"], True)
+        self.assertIsNone(slot["recurring_blocked_reason"])
+        self.assertIsNone(slot["first_recurring_conflict_start"])
+
+    def test_free_slot_reports_future_recurring_conflict(self):
+        future_start = self.time_at(9) + timedelta(weeks=4)
+        self.create_booking(
+            self.court,
+            start_time=future_start,
+            end_time=future_start + timedelta(hours=1),
+            status=Booking.Status.CONFIRMED,
+        )
+
+        response = self.get_slots()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slot = self.slot_by_hour(response, 9)
+        self.assertEqual(slot["slot_status"], "FREE")
+        self.assertEqual(slot["can_start_recurring"], False)
+        self.assertEqual(slot["recurring_blocked_reason"], "FUTURE_CONFLICT")
+        self.assertIn("2026-06-17", str(slot["first_recurring_conflict_start"]))
 
     def test_slot_price_changes_do_not_change_occupied_booking_snapshot(self):
         booking = self.create_booking(
@@ -554,7 +781,7 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             closes_at=time(23, 0),
         )
 
-        with self.assertNumQueries(5):
+        with self.assertNumQueries(7):
             response = self.get_slots()
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -1013,6 +1240,10 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         "is_fully_paid",
         "status",
         "source",
+        "is_recurring",
+        "recurrence_status",
+        "previous_recurring_booking_id",
+        "next_recurring_booking_id",
         "notes",
         "cancellation_reason",
         "no_show_reason",
@@ -1411,6 +1642,176 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.COMPLETED)
         self.assertEqual(booking.transactions.count(), 1)
+
+    def test_active_recurring_completion_requires_continue_decision(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+        )
+        self.create_transaction(booking, amount=booking.total_price)
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "complete",
+            self.platform_admin,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "RECURRENCE_CONTINUATION_DECISION_REQUIRED")
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+        self.assertEqual(booking.recurrence_status, Booking.RecurrenceStatus.ACTIVE)
+
+    def test_active_recurring_completion_can_end_recurrence(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+        )
+        self.create_transaction(booking, amount=booking.total_price)
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "complete",
+            self.platform_admin,
+            {"continue_recurring": False},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.COMPLETED)
+        self.assertEqual(booking.recurrence_status, Booking.RecurrenceStatus.ENDED)
+        self.assertFalse(hasattr(booking, "next_recurring_booking"))
+
+    def test_active_recurring_completion_renews_next_week_with_normal_payment(self):
+        self.court.minimum_deposit = Decimal("50.00")
+        self.court.save(update_fields=["minimum_deposit"])
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+        )
+        self.create_transaction(booking, amount=booking.total_price)
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "complete",
+            self.platform_admin,
+            {
+                "continue_recurring": True,
+                "next_deposit_payment_method": Transaction.PaymentMethod.CASH,
+                "next_deposit_notes": "Next week deposit",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        next_booking = booking.next_recurring_booking
+        self.assertEqual(booking.status, Booking.Status.COMPLETED)
+        self.assertEqual(booking.recurrence_status, Booking.RecurrenceStatus.RENEWED)
+        self.assertEqual(next_booking.status, Booking.Status.CONFIRMED)
+        self.assertEqual(next_booking.source, Booking.Source.RECURRING)
+        self.assertEqual(
+            next_booking.recurrence_status,
+            Booking.RecurrenceStatus.ACTIVE,
+        )
+        self.assertEqual(next_booking.previous_recurring_booking, booking)
+        self.assertEqual(
+            next_booking.start_time, booking.start_time + timedelta(days=7)
+        )
+        next_payment = Transaction.objects.get(booking=next_booking)
+        self.assertEqual(next_payment.transaction_type, Transaction.Type.PAYMENT)
+        self.assertEqual(next_payment.amount, Decimal("50.00"))
+
+    def test_end_recurrence_keeps_booking_status_and_transactions(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+        )
+        self.create_transaction(booking, amount=Decimal("50.00"))
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "end-recurrence",
+            self.platform_admin,
+            {"reason": "Customer stopped weekly reservation"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+        self.assertEqual(booking.recurrence_status, Booking.RecurrenceStatus.ENDED)
+        self.assertEqual(booking.transactions.count(), 1)
+
+    def test_active_recurring_cancel_no_show_and_expire_end_recurrence(self):
+        cases = (
+            ("cancel", Booking.Status.HOLD, Booking.Status.CANCELLED, 31),
+            ("no-show", Booking.Status.CONFIRMED, Booking.Status.NO_SHOW, 32),
+            ("expire", Booking.Status.HOLD, Booking.Status.EXPIRED, 33),
+        )
+        for action_name, source_status, target_status, hour in cases:
+            with self.subTest(action_name=action_name):
+                booking = self.create_booking(
+                    self.court,
+                    status=source_status,
+                    source=Booking.Source.RECURRING,
+                    recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+                    start_time=self.future_time_at(1, hour % 24),
+                    end_time=self.future_time_at(1, (hour + 1) % 24),
+                    customer_phone=f"+2010000008{hour}",
+                )
+                payload = (
+                    {"reason": "Lifecycle reason"} if action_name != "expire" else {}
+                )
+
+                response = self.post_lifecycle(
+                    self.club,
+                    booking,
+                    action_name,
+                    self.platform_admin,
+                    payload,
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                booking.refresh_from_db()
+                self.assertEqual(booking.status, target_status)
+                self.assertEqual(
+                    booking.recurrence_status,
+                    Booking.RecurrenceStatus.ENDED,
+                )
+
+    def test_active_recurring_reschedule_is_rejected(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+        )
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "reschedule",
+            self.platform_admin,
+            {
+                "court": self.court.id,
+                "start_time": self.time_at(22).isoformat(),
+                "end_time": self.time_at(23).isoformat(),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "RECURRING_BOOKING_RESCHEDULE_NOT_SUPPORTED")
 
     def test_complete_with_remaining_amount_returns_domain_conflict(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
@@ -1816,6 +2217,18 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             ),
             hours=13,
         )
+        recurring_due_hold = self.age_booking(
+            self.create_booking(
+                self.court,
+                status=Booking.Status.HOLD,
+                source=Booking.Source.RECURRING,
+                recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+                start_time=self.time_at(12),
+                end_time=self.time_at(13),
+                customer_phone="+201000001005",
+            ),
+            hours=13,
+        )
 
         call_command("expire_hold_bookings", verbosity=0)
         call_command("expire_hold_bookings", verbosity=0)
@@ -1824,8 +2237,14 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
         not_due_hold.refresh_from_db()
         confirmed.refresh_from_db()
         terminal.refresh_from_db()
+        recurring_due_hold.refresh_from_db()
         self.assertEqual(due_hold.status, Booking.Status.EXPIRED)
         self.assertIsNotNone(due_hold.expired_at)
+        self.assertEqual(recurring_due_hold.status, Booking.Status.EXPIRED)
+        self.assertEqual(
+            recurring_due_hold.recurrence_status,
+            Booking.RecurrenceStatus.ENDED,
+        )
         self.assertEqual(not_due_hold.status, Booking.Status.HOLD)
         self.assertEqual(confirmed.status, Booking.Status.CONFIRMED)
         self.assertEqual(terminal.status, Booking.Status.CANCELLED)
@@ -1838,7 +2257,7 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
         self.assertIsNone(audit_logs.get().actor)
         self.assertEqual(
             audit_logs.get().metadata,
-            {"source": "automatic_hold_expiry"},
+            {"source": "automatic_hold_expiry", "recurrence_ended": False},
         )
 
 

@@ -12,11 +12,6 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RenameField(
-            model_name="court",
-            old_name="recurring_deposit_refund_notice_days",
-            new_name="cancellation_refund_notice_days",
-        ),
         migrations.AlterField(
             model_name="court",
             name="cancellation_refund_notice_days",

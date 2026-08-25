@@ -1544,13 +1544,13 @@ class SettlementSeedSchemaTests(SettlementAPITestCase):
         )
         self.assertTrue(
             Settlement.objects.filter(
-                club__slug="demo-football-club",
+                club__slug="barcelona-fc",
                 status=Settlement.Status.PENDING,
             ).exists()
         )
         self.assertTrue(
             Transaction.objects.filter(
-                club__slug="demo-football-club",
+                club__slug="barcelona-fc",
                 settlement_line__isnull=True,
                 payment_reference__in=["A-UNSETTLED-001", "A-UNSETTLED-002"],
             ).exists()

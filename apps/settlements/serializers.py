@@ -3,11 +3,7 @@ from rest_framework import serializers
 
 from apps.accounts.models import User
 from apps.courts.models import Court
-from apps.settlements.models import (
-    Settlement,
-    SettlementRecurringDepositTransaction,
-    SettlementTransaction,
-)
+from apps.settlements.models import Settlement, SettlementTransaction
 from apps.settlements.services import preview_settlement, process_settlement_request
 
 
@@ -90,62 +86,12 @@ class SettlementLineSerializer(serializers.ModelSerializer):
         return obj.transaction.transaction_type
 
 
-class SettlementDepositLineSerializer(serializers.ModelSerializer):
-    recurring_deposit_transaction = serializers.PrimaryKeyRelatedField(read_only=True)
-    agreement = serializers.IntegerField(
-        source="recurring_deposit_transaction.agreement_id",
-        read_only=True,
-    )
-    court = serializers.IntegerField(
-        source="recurring_deposit_transaction.court_id",
-        read_only=True,
-    )
-    court_name = serializers.CharField(
-        source="recurring_deposit_transaction.court.name",
-        read_only=True,
-    )
-    payment_method = serializers.CharField(
-        source="recurring_deposit_transaction.payment_method",
-        read_only=True,
-    )
-    payment_reference = serializers.CharField(
-        source="recurring_deposit_transaction.reference",
-        read_only=True,
-    )
-    kind = serializers.CharField(
-        source="recurring_deposit_transaction.transaction_type",
-        read_only=True,
-    )
-    transaction_created = serializers.DateTimeField(
-        source="recurring_deposit_transaction.created",
-        read_only=True,
-    )
-
-    class Meta:
-        model = SettlementRecurringDepositTransaction
-        fields = (
-            "id",
-            "kind",
-            "recurring_deposit_transaction",
-            "agreement",
-            "court",
-            "court_name",
-            "amount",
-            "payment_method",
-            "payment_reference",
-            "transaction_created",
-            "created",
-        )
-        read_only_fields = fields
-
-
 class SettlementDetailSerializer(serializers.ModelSerializer):
     collected_by = serializers.PrimaryKeyRelatedField(read_only=True)
     collected_by_name = serializers.SerializerMethodField()
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     settled_by = serializers.PrimaryKeyRelatedField(read_only=True)
     lines = SettlementLineSerializer(many=True, read_only=True)
-    deposit_lines = SettlementDepositLineSerializer(many=True, read_only=True)
     transactions = SettlementLineSerializer(source="lines", many=True, read_only=True)
 
     class Meta:
@@ -168,7 +114,6 @@ class SettlementDetailSerializer(serializers.ModelSerializer):
             "created",
             "modified",
             "lines",
-            "deposit_lines",
             "transactions",
         )
         read_only_fields = fields
@@ -276,7 +221,6 @@ class SettlementPreviewTransactionSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     kind = serializers.CharField()
     booking = serializers.IntegerField(allow_null=True)
-    agreement = serializers.IntegerField(allow_null=True)
     court = serializers.IntegerField()
     court_name = serializers.CharField()
     amount = serializers.DecimalField(max_digits=10, decimal_places=2)
@@ -300,8 +244,6 @@ class SettlementPreviewResponseSerializer(serializers.Serializer):
     total_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
     booking_payments = serializers.DecimalField(max_digits=10, decimal_places=2)
     booking_refunds = serializers.DecimalField(max_digits=10, decimal_places=2)
-    deposit_collections = serializers.DecimalField(max_digits=10, decimal_places=2)
-    deposit_refunds = serializers.DecimalField(max_digits=10, decimal_places=2)
     net_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
     totals_by_payment_method = serializers.DictField(
         child=serializers.DecimalField(max_digits=10, decimal_places=2)

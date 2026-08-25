@@ -378,27 +378,20 @@ Useful settlement list filters:
 - `created_by`
 - `settled_by`
 
-Settlement preview/create also include recurring deposit collections and
-refunds. Net amount is booking payments + deposit collections − deposit
-refunds.
+Settlement preview/create include ordinary signed booking transactions only.
+Net amount is booking payments plus signed booking refunds.
 
-## Recurring Agreement Endpoints
+## Booking Recurrence
 
-- `GET /api/v1/clubs/{club_slug}/recurring-agreements/`
-- `POST /api/v1/clubs/{club_slug}/recurring-agreements/`
-- `GET /api/v1/clubs/{club_slug}/recurring-agreements/{id}/`
-- `GET /api/v1/clubs/{club_slug}/recurring-agreements/availability/`
-- `POST /api/v1/clubs/{club_slug}/recurring-agreements/{id}/cancellation-preview/`
-- `POST /api/v1/clubs/{club_slug}/recurring-agreements/{id}/cancel/`
-- `POST /api/v1/clubs/{club_slug}/recurring-agreements/{id}/refund-deposit/`
+Create a weekly recurrence through the normal booking endpoint with
+`is_recurring=true`. The response uses `source=RECURRING` and
+`recurrence_status=ACTIVE`; no future booking rows are generated.
 
-Create is atomic: agreement + full deposit collection + initial occurrences.
-Deposits use `RecurringDepositTransaction`, not booking `Transaction`.
-There is no replace/pause/resume/skip endpoint; start a new agreement after
-cancel when the schedule changes.
-
-Court field `recurring_deposit_refund_notice_days` (`null` or `0`–`30`) is
-required for create. Only platform admins and owners may change it.
+Future schedule slots blocked only by an active weekly recurrence return
+`slot_status=RECURRING_RESERVED`, `booking=null`, and the active anchor booking
+id. Completing an active recurring booking requires a `continue_recurring`
+decision; continuation creates next week's booking and records any required
+deposit as a normal booking payment transaction.
 
 ## Sprint 7 Audit Log Endpoints
 

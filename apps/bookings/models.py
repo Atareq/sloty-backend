@@ -26,6 +26,11 @@ class Booking(models.Model):
         ADMIN_CORRECTION = "ADMIN_CORRECTION", _("Admin correction")
         RECURRING = "RECURRING", _("Recurring")
 
+    class RecurrenceStatus(models.TextChoices):
+        ACTIVE = "ACTIVE", _("Active")
+        RENEWED = "RENEWED", _("Renewed")
+        ENDED = "ENDED", _("Ended")
+
     BLOCKING_STATUSES = (
         Status.HOLD,
         Status.CONFIRMED,
@@ -70,12 +75,19 @@ class Booking(models.Model):
         default=Source.MANUAL,
         db_index=True,
     )
-    recurring_agreement = models.ForeignKey(
-        "recurring.RecurringAgreement",
+    recurrence_status = models.CharField(
+        max_length=32,
+        choices=RecurrenceStatus.choices,
+        blank=True,
+        null=True,
+        db_index=True,
+    )
+    previous_recurring_booking = models.OneToOneField(
+        "self",
         blank=True,
         null=True,
         on_delete=models.SET_NULL,
-        related_name="bookings",
+        related_name="next_recurring_booking",
     )
     notes = models.TextField(blank=True)
     cancellation_reason = models.TextField(blank=True)
@@ -97,10 +109,19 @@ class Booking(models.Model):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(
-                fields=["recurring_agreement", "start_time"],
-                condition=Q(recurring_agreement__isnull=False),
-                name="unique_recurring_agreement_occurrence_start",
+            models.CheckConstraint(
+                check=(~Q(source="RECURRING") | Q(recurrence_status__isnull=False)),
+                name="booking_recurring_source_requires_status",
+            ),
+            models.CheckConstraint(
+                check=(Q(source="RECURRING") | Q(recurrence_status__isnull=True)),
+                name="booking_non_recurring_status_null",
+            ),
+            models.CheckConstraint(
+                check=(
+                    Q(source="RECURRING") | Q(previous_recurring_booking__isnull=True)
+                ),
+                name="booking_non_recurring_previous_null",
             ),
         ]
         indexes = [
@@ -108,7 +129,10 @@ class Booking(models.Model):
             models.Index(fields=["club", "start_time"]),
             models.Index(fields=["status"]),
             models.Index(fields=["source"]),
-            models.Index(fields=["recurring_agreement", "start_time"]),
+            models.Index(
+                fields=["court", "source", "recurrence_status"],
+                name="bookings_bo_court_i_d3b92f_idx",
+            ),
             models.Index(fields=["created_by"]),
             models.Index(fields=["created"]),
             models.Index(fields=["completed_at"]),
@@ -127,5 +151,46 @@ class Booking(models.Model):
             errors["end_time"] = "end_time must be after start_time."
         if self.court_id and self.club_id and self.court.club_id != self.club_id:
             errors["club"] = "Booking club must match the court club."
+        if self.source != self.Source.RECURRING:
+            if self.recurrence_status is not None:
+                errors["recurrence_status"] = (
+                    "Non-recurring bookings must not have recurrence status."
+                )
+            if self.previous_recurring_booking_id is not None:
+                errors["previous_recurring_booking"] = (
+                    "Non-recurring bookings must not have a previous recurring booking."
+                )
+        else:
+            if self.recurrence_status is None:
+                errors["recurrence_status"] = (
+                    "Recurring bookings must have recurrence status."
+                )
+            if (
+                self.recurrence_status == self.RecurrenceStatus.ACTIVE
+                and self.status not in {self.Status.HOLD, self.Status.CONFIRMED}
+            ):
+                errors["recurrence_status"] = (
+                    "Active recurrence is valid only for hold or confirmed bookings."
+                )
+            if (
+                self.recurrence_status == self.RecurrenceStatus.RENEWED
+                and self.status != self.Status.COMPLETED
+            ):
+                errors["recurrence_status"] = (
+                    "Renewed recurrence is valid only for completed bookings."
+                )
+            if (
+                self.previous_recurring_booking_id is not None
+                and self.previous_recurring_booking
+                and (
+                    self.previous_recurring_booking.source != self.Source.RECURRING
+                    or self.previous_recurring_booking.club_id != self.club_id
+                    or self.previous_recurring_booking.court_id != self.court_id
+                )
+            ):
+                errors["previous_recurring_booking"] = (
+                    "Previous recurring booking must be "
+                    "recurring in the same club and court."
+                )
         if errors:
             raise ValidationError(errors)

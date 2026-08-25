@@ -1,23 +1,12 @@
 from django.contrib import admin
 
-from apps.settlements.models import (
-    Settlement,
-    SettlementRecurringDepositTransaction,
-    SettlementTransaction,
-)
+from apps.settlements.models import Settlement, SettlementTransaction
 
 
 class SettlementTransactionInline(admin.TabularInline):
     model = SettlementTransaction
     extra = 0
     readonly_fields = ("transaction", "amount", "created")
-    can_delete = False
-
-
-class SettlementRecurringDepositTransactionInline(admin.TabularInline):
-    model = SettlementRecurringDepositTransaction
-    extra = 0
-    readonly_fields = ("recurring_deposit_transaction", "amount", "created")
     can_delete = False
 
 
@@ -56,10 +45,7 @@ class SettlementAdmin(admin.ModelAdmin):
         "created",
         "modified",
     )
-    inlines = (
-        SettlementTransactionInline,
-        SettlementRecurringDepositTransactionInline,
-    )
+    inlines = (SettlementTransactionInline,)
 
 
 @admin.register(SettlementTransaction)

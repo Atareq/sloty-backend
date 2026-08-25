@@ -1,0 +1,30 @@
+Sloty Backend - Booking-Native Recurrence Contract
+
+Status: Implemented as the active recurrence contract.
+
+## Locked Decisions
+
+1. There is no RecurringAgreement, RecurringSeries, recurring app, rolling
+   horizon, ACTION_REQUIRED state, recurring maintenance command, or dedicated
+   recurring deposit model.
+2. A recurring reservation is represented by `Booking` with
+   `source=RECURRING`.
+3. `Booking.recurrence_status` uses `ACTIVE`, `RENEWED`, and `ENDED`.
+   Non-recurring bookings keep it null.
+4. Only ACTIVE recurring bookings virtually reserve future weekly slots.
+5. `previous_recurring_booking` links a renewed booking to the previous
+   occurrence; it is not a root or series model.
+6. Create recurrence through `POST /api/v1/clubs/{club_slug}/bookings/` with
+   `is_recurring=true`. Direct client `source=RECURRING` is rejected.
+7. Weekly matching uses local date delta modulo 7 plus interval overlap.
+   Future booking rows are not generated.
+8. Existing future concrete blocking bookings take priority over starting a new
+   recurrence.
+9. Completing an ACTIVE recurring booking requires `continue_recurring`.
+   `false` ends recurrence; `true` creates next week's booking and records the
+   required next deposit as an ordinary booking PAYMENT transaction.
+10. Cancelling, no-showing, or expiring an ACTIVE recurring booking sets
+    recurrence status to ENDED.
+11. Active recurring bookings cannot be rescheduled. End/cancel as appropriate
+    and create a new recurrence.
+12. Settlements include ordinary signed booking Transaction rows only.

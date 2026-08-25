@@ -8,12 +8,7 @@ from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
 from apps.common.exceptions import SlotyAPIException
-from apps.recurring.models import RecurringDepositTransaction
-from apps.settlements.models import (
-    Settlement,
-    SettlementRecurringDepositTransaction,
-    SettlementTransaction,
-)
+from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
 NO_UNSETTLED_TRANSACTIONS_MESSAGE = _(
@@ -103,21 +98,6 @@ def get_settlement_candidate_transactions(*, access, collected_by, lock=False):
     )
 
 
-def get_settlement_candidate_deposit_transactions(*, access, collected_by, lock=False):
-    queryset = RecurringDepositTransaction.objects.filter(
-        club=access.club,
-        court__in=access.scoped_courts_queryset(),
-        created_by=collected_by,
-        amount__gt=0,
-        settlement_deposit_line__isnull=True,
-    )
-    if lock:
-        queryset = queryset.select_for_update(of=("self",))
-    return queryset.select_related("agreement", "club", "court", "created_by").order_by(
-        "created", "id"
-    )
-
-
 def get_filtered_settlement_candidate_transactions(
     *,
     access,
@@ -128,25 +108,6 @@ def get_filtered_settlement_candidate_transactions(
     if court is not None and not access.can_access_court(court):
         raise PermissionDenied("You cannot access this court.")
     queryset = get_settlement_candidate_transactions(
-        access=access,
-        collected_by=collected_by,
-        lock=lock,
-    )
-    if court is not None:
-        queryset = queryset.filter(court=court)
-    return queryset
-
-
-def get_filtered_settlement_candidate_deposit_transactions(
-    *,
-    access,
-    collected_by,
-    court=None,
-    lock=False,
-):
-    if court is not None and not access.can_access_court(court):
-        raise PermissionDenied("You cannot access this court.")
-    queryset = get_settlement_candidate_deposit_transactions(
         access=access,
         collected_by=collected_by,
         lock=lock,
@@ -168,21 +129,6 @@ def build_totals_by_payment_method(queryset):
     return totals
 
 
-def build_deposit_totals_by_payment_method(queryset):
-    totals = {
-        str(payment_method): Decimal("0.00")
-        for payment_method, _label in Transaction.PaymentMethod.choices
-    }
-    for tx in queryset:
-        signed_amount = tx.amount
-        if tx.transaction_type == RecurringDepositTransaction.Type.REFUND:
-            signed_amount = -signed_amount
-        totals[str(tx.payment_method)] = (
-            totals.get(str(tx.payment_method), Decimal("0.00")) + signed_amount
-        )
-    return totals
-
-
 def merge_payment_method_totals(*totals_maps):
     merged = {
         str(payment_method): Decimal("0.00")
@@ -200,7 +146,6 @@ def serialize_preview_transactions(transactions):
             "id": transaction_obj.id,
             "kind": transaction_obj.transaction_type,
             "booking": transaction_obj.booking_id,
-            "agreement": None,
             "court": transaction_obj.court_id,
             "court_name": transaction_obj.court.name,
             "amount": transaction_obj.amount,
@@ -212,25 +157,7 @@ def serialize_preview_transactions(transactions):
     ]
 
 
-def serialize_preview_deposit_transactions(deposit_transactions):
-    return [
-        {
-            "id": deposit_tx.id,
-            "kind": deposit_tx.transaction_type,
-            "booking": None,
-            "agreement": deposit_tx.agreement_id,
-            "court": deposit_tx.court_id,
-            "court_name": deposit_tx.court.name,
-            "amount": deposit_tx.amount,
-            "payment_method": deposit_tx.payment_method,
-            "payment_reference": deposit_tx.reference,
-            "created": deposit_tx.created,
-        }
-        for deposit_tx in deposit_transactions
-    ]
-
-
-def compute_settlement_breakdown(transactions, deposit_transactions):
+def compute_settlement_breakdown(transactions):
     booking_payments = sum(
         (
             tx.amount
@@ -247,30 +174,10 @@ def compute_settlement_breakdown(transactions, deposit_transactions):
         ),
         Decimal("0.00"),
     )
-    deposit_collections = sum(
-        (
-            tx.amount
-            for tx in deposit_transactions
-            if tx.transaction_type == RecurringDepositTransaction.Type.COLLECTION
-        ),
-        Decimal("0.00"),
-    )
-    deposit_refunds = sum(
-        (
-            tx.amount
-            for tx in deposit_transactions
-            if tx.transaction_type == RecurringDepositTransaction.Type.REFUND
-        ),
-        Decimal("0.00"),
-    )
     return {
         "booking_payments": booking_payments,
         "booking_refunds": booking_refunds,
-        "deposit_collections": deposit_collections,
-        "deposit_refunds": deposit_refunds,
-        "net_amount": (
-            booking_payments + booking_refunds + deposit_collections - deposit_refunds
-        ),
+        "net_amount": booking_payments + booking_refunds,
     }
 
 
@@ -282,12 +189,10 @@ def build_settlement_summary(
     period_start,
     period_end,
     queryset,
-    deposit_queryset,
     court=None,
 ):
     transactions = list(queryset)
-    deposit_transactions = list(deposit_queryset)
-    breakdown = compute_settlement_breakdown(transactions, deposit_transactions)
+    breakdown = compute_settlement_breakdown(transactions)
     can_approve = access.can_approve_settlement_for_user(collected_by)
     return {
         "club": access.club.id,
@@ -300,21 +205,15 @@ def build_settlement_summary(
         "approval_required": not can_approve,
         "period_start": period_start,
         "period_end": period_end,
-        "transaction_count": len(transactions) + len(deposit_transactions),
+        "transaction_count": len(transactions),
         "total_amount": breakdown["net_amount"],
         "booking_payments": breakdown["booking_payments"],
         "booking_refunds": breakdown["booking_refunds"],
-        "deposit_collections": breakdown["deposit_collections"],
-        "deposit_refunds": breakdown["deposit_refunds"],
         "net_amount": breakdown["net_amount"],
         "totals_by_payment_method": merge_payment_method_totals(
             build_totals_by_payment_method(queryset),
-            build_deposit_totals_by_payment_method(deposit_transactions),
         ),
-        "transactions": (
-            serialize_preview_transactions(transactions)
-            + serialize_preview_deposit_transactions(deposit_transactions)
-        ),
+        "transactions": serialize_preview_transactions(transactions),
     }
 
 
@@ -330,24 +229,14 @@ def build_settlement_preview(*, access, collected_by, actor, court=None):
         court=court,
         lock=False,
     )
-    deposit_queryset = get_filtered_settlement_candidate_deposit_transactions(
-        access=access,
-        collected_by=collected_by,
-        court=court,
-        lock=False,
-    )
     first_transaction = queryset.first()
-    first_deposit = deposit_queryset.first()
-    if first_transaction is None and first_deposit is None:
+    if first_transaction is None:
         raise SlotyAPIException(
             status_code=status.HTTP_409_CONFLICT,
             code="NO_UNSETTLED_TRANSACTIONS",
             message=NO_UNSETTLED_TRANSACTIONS_MESSAGE,
         )
-    candidates_created = [
-        item.created for item in (first_transaction, first_deposit) if item is not None
-    ]
-    period_start = min(candidates_created)
+    period_start = first_transaction.created
     period_end = timezone.now()
     return build_settlement_summary(
         access=access,
@@ -356,7 +245,6 @@ def build_settlement_preview(*, access, collected_by, actor, court=None):
         period_start=period_start,
         period_end=period_end,
         queryset=queryset,
-        deposit_queryset=deposit_queryset,
         court=court,
     )
 
@@ -387,26 +275,18 @@ def create_approved_settlement(*, access, collected_by, notes="", actor, court=N
                     lock=True,
                 ).order_by("created", "id")
             )
-            deposit_candidates = list(
-                get_filtered_settlement_candidate_deposit_transactions(
-                    access=access,
-                    collected_by=collected_by,
-                    court=court,
-                    lock=True,
-                ).order_by("created", "id")
-            )
-            if not candidates and not deposit_candidates:
+            if not candidates:
                 raise SlotyAPIException(
                     status_code=status.HTTP_409_CONFLICT,
                     code="NO_UNSETTLED_TRANSACTIONS",
                     message=NO_UNSETTLED_TRANSACTIONS_MESSAGE,
                 )
 
-            created_times = [item.created for item in candidates + deposit_candidates]
+            created_times = [item.created for item in candidates]
             period_start = min(created_times)
             period_end = timezone.now()
             settled_at = timezone.now()
-            breakdown = compute_settlement_breakdown(candidates, deposit_candidates)
+            breakdown = compute_settlement_breakdown(candidates)
             created_settlement = Settlement.objects.create(
                 club=access.club,
                 court=court,
@@ -415,7 +295,7 @@ def create_approved_settlement(*, access, collected_by, notes="", actor, court=N
                 period_end=period_end,
                 status=Settlement.Status.SETTLED,
                 total_amount=breakdown["net_amount"],
-                transaction_count=len(candidates) + len(deposit_candidates),
+                transaction_count=len(candidates),
                 notes=notes,
                 created_by=actor,
                 settled_by=actor,
@@ -429,16 +309,6 @@ def create_approved_settlement(*, access, collected_by, notes="", actor, court=N
                         amount=transaction_obj.amount,
                     )
                     for transaction_obj in candidates
-                ]
-            )
-            SettlementRecurringDepositTransaction.objects.bulk_create(
-                [
-                    SettlementRecurringDepositTransaction(
-                        settlement=created_settlement,
-                        recurring_deposit_transaction=deposit_tx,
-                        amount=deposit_tx.amount,
-                    )
-                    for deposit_tx in deposit_candidates
                 ]
             )
             from apps.audit.models import AuditLog
@@ -464,13 +334,8 @@ def create_approved_settlement(*, access, collected_by, notes="", actor, court=N
                     "transaction_count": created_settlement.transaction_count,
                     "booking_payments": str(breakdown["booking_payments"]),
                     "booking_refunds": str(breakdown["booking_refunds"]),
-                    "deposit_collections": str(breakdown["deposit_collections"]),
-                    "deposit_refunds": str(breakdown["deposit_refunds"]),
                     "transaction_ids": [
                         transaction_obj.id for transaction_obj in candidates
-                    ],
-                    "deposit_transaction_ids": [
-                        deposit_tx.id for deposit_tx in deposit_candidates
                     ],
                 },
             )

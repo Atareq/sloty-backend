@@ -23,6 +23,7 @@ from apps.bookings.serializers import (
     BookingCompleteSerializer,
     BookingCreateSerializer,
     BookingDetailSerializer,
+    BookingEndRecurrenceSerializer,
     BookingExpireSerializer,
     BookingListSerializer,
     BookingNoShowSerializer,
@@ -35,6 +36,7 @@ from apps.bookings.services import (
     build_cancellation_preview,
     cancel_booking,
     complete_booking,
+    end_booking_recurrence,
     expire_booking,
     generate_booking_slots,
     no_show_booking,
@@ -83,7 +85,13 @@ class BookingViewSet(
         return (
             self.get_access_context()
             .scoped_bookings_queryset()
-            .select_related("club", "court", "created_by")
+            .select_related(
+                "club",
+                "court",
+                "created_by",
+                "previous_recurring_booking",
+                "next_recurring_booking",
+            )
             .annotate(
                 paid_amount=Coalesce(
                     Sum(
@@ -121,11 +129,18 @@ class BookingViewSet(
             return BookingRescheduleSerializer
         if self.action == "expire":
             return BookingExpireSerializer
+        if self.action == "end_recurrence":
+            return BookingEndRecurrenceSerializer
         return BookingDetailSerializer
 
     def get_lifecycle_booking(self, access):
         return get_object_or_404(
-            Booking.objects.select_related("club", "court"),
+            Booking.objects.select_related(
+                "club",
+                "court",
+                "previous_recurring_booking",
+                "next_recurring_booking",
+            ),
             pk=self.kwargs[self.lookup_url_kwarg or self.lookup_field],
             club=access.club,
         )
@@ -204,6 +219,12 @@ class BookingViewSet(
             booking=booking,
             actor=request.user,
             confirm_collect_remaining_cash=data["confirm_collect_remaining_cash"],
+            continue_recurring=data.get("continue_recurring"),
+            next_deposit_payment_method=data.get("next_deposit_payment_method"),
+            next_deposit_payment_reference=data.get(
+                "next_deposit_payment_reference", ""
+            ),
+            next_deposit_notes=data.get("next_deposit_notes", ""),
         )
         return self.lifecycle_response(booking)
 
@@ -254,4 +275,21 @@ class BookingViewSet(
         self.validate_action_payload()
         access, booking = self.get_lifecycle_context()
         booking = expire_booking(access=access, booking=booking, actor=request.user)
+        return self.lifecycle_response(booking)
+
+    @extend_schema(
+        tags=["Bookings"],
+        request=BookingEndRecurrenceSerializer,
+        responses=BookingDetailSerializer,
+    )
+    @action(detail=True, methods=["post"], url_path="end-recurrence")
+    def end_recurrence(self, request, *args, **kwargs):
+        data = self.validate_action_payload()
+        access, booking = self.get_lifecycle_context()
+        booking = end_booking_recurrence(
+            access=access,
+            booking=booking,
+            actor=request.user,
+            reason=data.get("reason", ""),
+        )
         return self.lifecycle_response(booking)

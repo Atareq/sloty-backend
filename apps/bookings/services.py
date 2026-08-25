@@ -30,6 +30,7 @@ from apps.transactions.services import (
 
 FREE_SLOT_STATUS = "FREE"
 UNAVAILABLE_SLOT_STATUS = "UNAVAILABLE"
+RECURRING_RESERVED_SLOT_STATUS = "RECURRING_RESERVED"
 MAX_SLOT_PERIOD_DAYS = 31
 BOOKING_STATUS_TRANSITIONS = {
     Booking.Status.HOLD: {
@@ -67,6 +68,13 @@ BOOKING_CANCELLATION_POLICY_NOT_CONFIGURED_MESSAGE = _(
 )
 REFUND_PAYMENT_METHOD_REQUIRED_MESSAGE = _("Refund payment method is required.")
 REFUND_REFERENCE_REQUIRED_MESSAGE = _("Payment reference is required for this court.")
+RECURRENCE_CONTINUATION_DECISION_REQUIRED_MESSAGE = _(
+    "Choose whether this recurring booking should continue."
+)
+BOOKING_RECURRENCE_NOT_ACTIVE_MESSAGE = _("This booking has no active recurrence.")
+RECURRING_BOOKING_RESCHEDULE_NOT_SUPPORTED_MESSAGE = _(
+    "Active recurring bookings cannot be rescheduled."
+)
 
 
 def booking_audit_snapshot(booking):
@@ -76,7 +84,8 @@ def booking_audit_snapshot(booking):
         "customer_phone": str(booking.customer_phone),
         "status": booking.status,
         "source": booking.source,
-        "recurring_agreement_id": booking.recurring_agreement_id,
+        "recurrence_status": booking.recurrence_status,
+        "previous_recurring_booking_id": booking.previous_recurring_booking_id,
         "court_id": booking.court_id,
         "court_name": booking.court.name if booking.court_id else "",
         "start_time": booking.start_time.isoformat(),
@@ -142,6 +151,252 @@ def validate_no_booking_overlap(court, start_time, end_time, *, exclude_booking=
         )
 
 
+def localized_interval(start_time, end_time):
+    return timezone.localtime(start_time), timezone.localtime(end_time)
+
+
+def weekly_pattern_matches(*, anchor_booking, candidate_start, candidate_end):
+    if (
+        anchor_booking.source != Booking.Source.RECURRING
+        or anchor_booking.recurrence_status != Booking.RecurrenceStatus.ACTIVE
+        or candidate_end <= anchor_booking.start_time
+    ):
+        return False
+
+    anchor_start, anchor_end = localized_interval(
+        anchor_booking.start_time,
+        anchor_booking.end_time,
+    )
+    candidate_local_start, candidate_local_end = localized_interval(
+        candidate_start,
+        candidate_end,
+    )
+    day_delta = candidate_local_start.date() - anchor_start.date()
+    if day_delta.days < 0 or day_delta.days % 7 != 0:
+        return False
+
+    projected_start = anchor_start + timedelta(days=day_delta.days)
+    projected_end = anchor_end + timedelta(days=day_delta.days)
+    return (
+        projected_start < candidate_local_end and projected_end > candidate_local_start
+    )
+
+
+def active_recurring_anchor_queryset(court, *, exclude_booking=None):
+    queryset = Booking.objects.filter(
+        court=court,
+        source=Booking.Source.RECURRING,
+        recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+    ).select_related("club", "court")
+    if exclude_booking is not None:
+        queryset = queryset.exclude(pk=exclude_booking.pk)
+    return queryset.order_by("start_time", "id")
+
+
+def find_active_recurrence_conflict(
+    *,
+    court,
+    start_time,
+    end_time,
+    exclude_booking=None,
+    anchors=None,
+):
+    candidates = anchors
+    if candidates is None:
+        candidates = list(
+            active_recurring_anchor_queryset(court, exclude_booking=exclude_booking)
+        )
+    for anchor in candidates:
+        if exclude_booking is not None and anchor.pk == exclude_booking.pk:
+            continue
+        if weekly_pattern_matches(
+            anchor_booking=anchor,
+            candidate_start=start_time,
+            candidate_end=end_time,
+        ):
+            return anchor
+    return None
+
+
+def recurrence_conflict_details(*, conflict_type, start_time, booking=None):
+    details = {
+        "conflict_type": conflict_type,
+        "first_conflict_start": start_time.isoformat() if start_time else None,
+    }
+    if booking is not None:
+        details["conflicting_booking_id"] = booking.id
+    return details
+
+
+def raise_slot_unavailable(*, details=None):
+    raise SlotyAPIException(
+        status_code=status.HTTP_409_CONFLICT,
+        code="BOOKING_SLOT_UNAVAILABLE",
+        message=BOOKING_SLOT_UNAVAILABLE_MESSAGE,
+        details=details or {},
+    )
+
+
+def validate_no_active_recurrence_overlap(
+    court,
+    start_time,
+    end_time,
+    *,
+    exclude_booking=None,
+    anchors=None,
+):
+    conflict = find_active_recurrence_conflict(
+        court=court,
+        start_time=start_time,
+        end_time=end_time,
+        exclude_booking=exclude_booking,
+        anchors=anchors,
+    )
+    if conflict is not None:
+        raise_slot_unavailable(
+            details=recurrence_conflict_details(
+                conflict_type="RECURRING_PATTERN",
+                start_time=start_time,
+                booking=conflict,
+            )
+        )
+
+
+def validate_no_availability_conflict(
+    court,
+    start_time,
+    end_time,
+    *,
+    exclude_booking=None,
+):
+    validate_no_booking_overlap(
+        court,
+        start_time,
+        end_time,
+        exclude_booking=exclude_booking,
+    )
+    validate_no_active_recurrence_overlap(
+        court,
+        start_time,
+        end_time,
+        exclude_booking=exclude_booking,
+    )
+
+
+def recurring_time_intervals_overlap(start_a, end_a, start_b, end_b):
+    local_start_a, local_end_a = localized_interval(start_a, end_a)
+    local_start_b, local_end_b = localized_interval(start_b, end_b)
+    if (local_start_b.date() - local_start_a.date()).days % 7 != 0:
+        return False
+    a_start = datetime.combine(local_start_a.date(), local_start_a.time())
+    a_end = datetime.combine(local_start_a.date(), local_end_a.time())
+    b_start = datetime.combine(local_start_a.date(), local_start_b.time())
+    b_end = datetime.combine(local_start_a.date(), local_end_b.time())
+    return a_start < b_end and a_end > b_start
+
+
+def find_new_recurrence_conflict(
+    *,
+    court,
+    start_time,
+    end_time,
+    exclude_booking=None,
+    active_anchors=None,
+    future_blockers=None,
+):
+    anchors = active_anchors
+    if anchors is None:
+        anchors = list(
+            active_recurring_anchor_queryset(court, exclude_booking=exclude_booking)
+        )
+    for anchor in anchors:
+        if exclude_booking is not None and anchor.pk == exclude_booking.pk:
+            continue
+        if recurring_time_intervals_overlap(
+            start_time,
+            end_time,
+            anchor.start_time,
+            anchor.end_time,
+        ):
+            later_start = max(
+                timezone.localtime(start_time), timezone.localtime(anchor.start_time)
+            )
+            return {
+                "blocked_reason": "ACTIVE_RECURRENCE",
+                "first_conflict_start": later_start,
+                "booking": anchor,
+            }
+
+    blockers = future_blockers
+    if blockers is None:
+        blockers = list(
+            Booking.objects.filter(
+                court=court,
+                status__in=Booking.BLOCKING_STATUSES,
+                end_time__gt=start_time,
+            )
+            .exclude(pk=exclude_booking.pk if exclude_booking is not None else None)
+            .select_related("club", "court")
+            .order_by("start_time", "id")
+        )
+    earliest = None
+    for blocker in blockers:
+        if exclude_booking is not None and blocker.pk == exclude_booking.pk:
+            continue
+        pseudo_anchor = type(
+            "RecurrenceCandidate",
+            (),
+            {
+                "source": Booking.Source.RECURRING,
+                "recurrence_status": Booking.RecurrenceStatus.ACTIVE,
+                "start_time": start_time,
+                "end_time": end_time,
+            },
+        )()
+        if weekly_pattern_matches(
+            anchor_booking=pseudo_anchor,
+            candidate_start=blocker.start_time,
+            candidate_end=blocker.end_time,
+        ):
+            if (
+                earliest is None
+                or blocker.start_time < earliest["first_conflict_start"]
+            ):
+                earliest = {
+                    "blocked_reason": "FUTURE_CONFLICT",
+                    "first_conflict_start": blocker.start_time,
+                    "booking": blocker,
+                }
+    return earliest
+
+
+def validate_can_start_recurrence(
+    *,
+    court,
+    start_time,
+    end_time,
+    exclude_booking=None,
+    active_anchors=None,
+    future_blockers=None,
+):
+    conflict = find_new_recurrence_conflict(
+        court=court,
+        start_time=start_time,
+        end_time=end_time,
+        exclude_booking=exclude_booking,
+        active_anchors=active_anchors,
+        future_blockers=future_blockers,
+    )
+    if conflict is not None:
+        raise_slot_unavailable(
+            details=recurrence_conflict_details(
+                conflict_type=conflict["blocked_reason"],
+                start_time=conflict["first_conflict_start"],
+                booking=conflict["booking"],
+            )
+        )
+
+
 def local_datetime_for_date(value, value_time):
     naive_value = datetime.combine(value, value_time)
     if timezone.is_naive(naive_value):
@@ -154,6 +409,8 @@ def format_slot_label(slot_status):
         return str(_("Available"))
     if slot_status == UNAVAILABLE_SLOT_STATUS:
         return str(PRICING_NOT_CONFIGURED_LABEL)
+    if slot_status == RECURRING_RESERVED_SLOT_STATUS:
+        return str(_("Recurring reserved"))
     return str(Booking.Status(slot_status).label)
 
 
@@ -171,7 +428,7 @@ def booking_slot_payload(booking):
         "remaining_amount": f"{remaining_amount:.2f}",
         "source": booking.source,
         "is_recurring": booking.source == Booking.Source.RECURRING,
-        "recurring_agreement_id": booking.recurring_agreement_id,
+        "recurrence_status": booking.recurrence_status,
     }
 
 
@@ -218,6 +475,17 @@ def generate_booking_slots(*, access, court, date_from, date_to):
         )
         .order_by("start_time", "id")
     )
+    active_recurring_anchors = list(active_recurring_anchor_queryset(court))
+    future_blockers = list(
+        Booking.objects.filter(
+            club=access.club,
+            court=court,
+            status__in=Booking.BLOCKING_STATUSES,
+            end_time__gt=range_start,
+        )
+        .select_related("club", "court")
+        .order_by("start_time", "id")
+    )
 
     slots = []
     current_date = date_from
@@ -254,12 +522,53 @@ def generate_booking_slots(*, access, court, date_from, date_to):
             if booking is not None:
                 slot_status = booking.status
                 is_available = False
+                recurring_anchor_booking_id = None
+                can_start_recurring = None
+                recurring_blocked_reason = None
+                first_recurring_conflict_start = None
             elif slot_price is None:
                 slot_status = UNAVAILABLE_SLOT_STATUS
                 is_available = False
+                recurring_anchor_booking_id = None
+                can_start_recurring = None
+                recurring_blocked_reason = None
+                first_recurring_conflict_start = None
+            elif (
+                recurring_anchor := find_active_recurrence_conflict(
+                    court=court,
+                    start_time=slot_start,
+                    end_time=slot_end,
+                    anchors=active_recurring_anchors,
+                )
+            ) is not None:
+                slot_status = RECURRING_RESERVED_SLOT_STATUS
+                is_available = False
+                recurring_anchor_booking_id = recurring_anchor.id
+                can_start_recurring = None
+                recurring_blocked_reason = None
+                first_recurring_conflict_start = None
             else:
                 slot_status = FREE_SLOT_STATUS
                 is_available = True
+                recurrence_conflict = find_new_recurrence_conflict(
+                    court=court,
+                    start_time=slot_start,
+                    end_time=slot_end,
+                    active_anchors=active_recurring_anchors,
+                    future_blockers=future_blockers,
+                )
+                can_start_recurring = recurrence_conflict is None
+                recurring_blocked_reason = (
+                    None
+                    if recurrence_conflict is None
+                    else recurrence_conflict["blocked_reason"]
+                )
+                first_recurring_conflict_start = (
+                    None
+                    if recurrence_conflict is None
+                    else recurrence_conflict["first_conflict_start"]
+                )
+                recurring_anchor_booking_id = None
             slots.append(
                 {
                     "date": current_date.isoformat(),
@@ -273,6 +582,10 @@ def generate_booking_slots(*, access, court, date_from, date_to):
                     "booking": (
                         booking_slot_payload(booking) if booking is not None else None
                     ),
+                    "recurring_anchor_booking_id": recurring_anchor_booking_id,
+                    "can_start_recurring": can_start_recurring,
+                    "recurring_blocked_reason": recurring_blocked_reason,
+                    "first_recurring_conflict_start": first_recurring_conflict_start,
                     "label": format_slot_label(slot_status),
                 }
             )
@@ -306,7 +619,16 @@ def create_booking(*, created_by, court, start_time, end_time, **booking_data):
             start_time,
             end_time,
         )
-        validate_no_booking_overlap(locked_court, start_time, end_time)
+        if booking_data.get("source") == Booking.Source.RECURRING:
+            validate_no_availability_conflict(locked_court, start_time, end_time)
+            validate_can_start_recurrence(
+                court=locked_court,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            booking_data["recurrence_status"] = Booking.RecurrenceStatus.ACTIVE
+        else:
+            validate_no_availability_conflict(locked_court, start_time, end_time)
 
         created_booking = Booking.objects.create(
             club=locked_court.club,
@@ -505,6 +827,16 @@ def create_booking_refund_transaction(
     return refund_transaction
 
 
+def end_active_recurrence(*, locked_booking):
+    if (
+        locked_booking.source == Booking.Source.RECURRING
+        and locked_booking.recurrence_status == Booking.RecurrenceStatus.ACTIVE
+    ):
+        locked_booking.recurrence_status = Booking.RecurrenceStatus.ENDED
+        return True
+    return False
+
+
 def create_lifecycle_audit_log(
     *,
     booking,
@@ -571,14 +903,16 @@ def cancel_booking(
         locked_booking.status = Booking.Status.CANCELLED
         locked_booking.cancelled_at = now
         locked_booking.cancellation_reason = reason
-        locked_booking.save(
-            update_fields=[
-                "status",
-                "cancelled_at",
-                "cancellation_reason",
-                "modified",
-            ]
-        )
+        recurrence_ended = end_active_recurrence(locked_booking=locked_booking)
+        update_fields = [
+            "status",
+            "cancelled_at",
+            "cancellation_reason",
+            "modified",
+        ]
+        if recurrence_ended:
+            update_fields.append("recurrence_status")
+        locked_booking.save(update_fields=update_fields)
         create_lifecycle_audit_log(
             booking=locked_booking,
             actor=actor,
@@ -595,6 +929,7 @@ def cancel_booking(
                 "retained_amount": str(refund_data["retained_amount"]),
                 "refund_deadline": refund_data["refund_deadline"].isoformat(),
                 "full_refund": refund_data["full_refund"],
+                "recurrence_ended": recurrence_ended,
             },
         )
         create_booking_refund_transaction(
@@ -626,9 +961,11 @@ def no_show_booking(*, access, booking, actor, reason=""):
         locked_booking.status = Booking.Status.NO_SHOW
         locked_booking.no_show_at = timezone.now()
         locked_booking.no_show_reason = (reason or "").strip()
-        locked_booking.save(
-            update_fields=["status", "no_show_at", "no_show_reason", "modified"]
-        )
+        recurrence_ended = end_active_recurrence(locked_booking=locked_booking)
+        update_fields = ["status", "no_show_at", "no_show_reason", "modified"]
+        if recurrence_ended:
+            update_fields.append("recurrence_status")
+        locked_booking.save(update_fields=update_fields)
         create_lifecycle_audit_log(
             booking=locked_booking,
             actor=actor,
@@ -639,11 +976,14 @@ def no_show_booking(*, access, booking, actor, reason=""):
                 "no_show_at": locked_booking.no_show_at.isoformat(),
                 "no_show_reason": locked_booking.no_show_reason,
             },
-            metadata=(
-                {"reason": locked_booking.no_show_reason}
-                if locked_booking.no_show_reason
-                else {}
-            ),
+            metadata={
+                **(
+                    {"reason": locked_booking.no_show_reason}
+                    if locked_booking.no_show_reason
+                    else {}
+                ),
+                "recurrence_ended": recurrence_ended,
+            },
         )
         return locked_booking
 
@@ -670,6 +1010,15 @@ def reschedule_booking(
             allowed_statuses={Booking.Status.HOLD, Booking.Status.CONFIRMED},
             action_label="reschedule",
         )
+        if (
+            locked_booking.source == Booking.Source.RECURRING
+            and locked_booking.recurrence_status == Booking.RecurrenceStatus.ACTIVE
+        ):
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="RECURRING_BOOKING_RESCHEDULE_NOT_SUPPORTED",
+                message=RECURRING_BOOKING_RESCHEDULE_NOT_SUPPORTED_MESSAGE,
+            )
 
         locked_court = (
             Court.objects.select_for_update()
@@ -686,7 +1035,7 @@ def reschedule_booking(
 
         validate_booking_duration(locked_court, start_time, end_time)
         new_price = calculate_booking_price(locked_court, start_time, end_time)
-        validate_no_booking_overlap(
+        validate_no_availability_conflict(
             locked_court,
             start_time,
             end_time,
@@ -751,6 +1100,10 @@ def complete_booking(
     booking,
     actor,
     confirm_collect_remaining_cash=False,
+    continue_recurring=None,
+    next_deposit_payment_method=None,
+    next_deposit_payment_reference="",
+    next_deposit_notes="",
 ):
     with transaction.atomic():
         locked_booking = (
@@ -767,10 +1120,142 @@ def complete_booking(
 
         ensure_booking_can_be_completed(locked_booking)
 
+        is_active_recurrence = (
+            locked_booking.source == Booking.Source.RECURRING
+            and locked_booking.recurrence_status == Booking.RecurrenceStatus.ACTIVE
+        )
+        if is_active_recurrence and continue_recurring is None:
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="RECURRENCE_CONTINUATION_DECISION_REQUIRED",
+                message=RECURRENCE_CONTINUATION_DECISION_REQUIRED_MESSAGE,
+            )
+
         before_data = booking_audit_snapshot(locked_booking)
+        next_booking = None
+        required_next_deposit = Decimal("0.00")
+        if is_active_recurrence and continue_recurring:
+            locked_court = (
+                Court.objects.select_for_update()
+                .select_related("club")
+                .prefetch_related("working_hours__pricing_periods")
+                .get(pk=locked_booking.court_id)
+            )
+            if not locked_court.is_active or not locked_court.club.is_active:
+                raise serializers.ValidationError(
+                    {"court": _("Cannot continue recurrence on an inactive court.")}
+                )
+            next_start = locked_booking.start_time + timedelta(days=7)
+            next_end = locked_booking.end_time + timedelta(days=7)
+            validate_booking_duration(locked_court, next_start, next_end)
+            next_price = calculate_booking_price(locked_court, next_start, next_end)
+            validate_no_availability_conflict(
+                locked_court,
+                next_start,
+                next_end,
+                exclude_booking=locked_booking,
+            )
+            next_booking = Booking.objects.create(
+                club=locked_booking.club,
+                court=locked_court,
+                customer_name=locked_booking.customer_name,
+                customer_phone=locked_booking.customer_phone,
+                start_time=next_start,
+                end_time=next_end,
+                total_price=next_price,
+                status=Booking.Status.HOLD,
+                source=Booking.Source.RECURRING,
+                recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+                previous_recurring_booking=locked_booking,
+                created_by=actor,
+            )
+            required_next_deposit = min(locked_court.minimum_deposit, next_price)
+            if required_next_deposit > 0:
+                if not next_deposit_payment_method:
+                    raise serializers.ValidationError(
+                        {
+                            "next_deposit_payment_method": _(
+                                "Next deposit payment method is required."
+                            )
+                        }
+                    )
+                normalized_reference = normalize_payment_reference(
+                    next_deposit_payment_reference
+                )
+                requires_reference = (
+                    next_deposit_payment_method
+                    in {
+                        Transaction.PaymentMethod.DIGITAL_WALLET,
+                        Transaction.PaymentMethod.BANK_TRANSFER,
+                    }
+                    and locked_court.requires_digital_payment_reference
+                )
+                if requires_reference and not normalized_reference:
+                    raise serializers.ValidationError(
+                        {
+                            "next_deposit_payment_reference": str(
+                                REFUND_REFERENCE_REQUIRED_MESSAGE
+                            )
+                        }
+                    )
+                validate_duplicate_payment_reference(
+                    club=locked_booking.club,
+                    payment_reference=normalized_reference,
+                )
+                next_payment = Transaction.objects.create(
+                    club=locked_booking.club,
+                    court=locked_court,
+                    booking=next_booking,
+                    transaction_type=Transaction.Type.PAYMENT,
+                    amount=required_next_deposit,
+                    payment_method=next_deposit_payment_method,
+                    payment_reference=normalized_reference,
+                    notes=next_deposit_notes or "",
+                    created_by=actor,
+                )
+                next_booking.status = Booking.Status.CONFIRMED
+                next_booking.save(update_fields=["status", "modified"])
+                record_audit_log(
+                    club=next_payment.club,
+                    court=next_payment.court,
+                    actor=actor,
+                    action=AuditLog.Action.TRANSACTION_CREATED,
+                    entity_type="Transaction",
+                    entity_id=next_payment.id,
+                    after_data={
+                        "transaction_id": next_payment.id,
+                        "booking_id": next_payment.booking_id,
+                        "amount": str(next_payment.amount),
+                        "payment_method": next_payment.payment_method,
+                        "payment_reference": next_payment.payment_reference,
+                    },
+                    metadata={"source": "recurrence_renewal"},
+                )
+            else:
+                next_booking.status = Booking.Status.CONFIRMED
+                next_booking.save(update_fields=["status", "modified"])
+            record_audit_log(
+                club=next_booking.club,
+                court=next_booking.court,
+                actor=actor,
+                action=AuditLog.Action.BOOKING_CREATED,
+                entity_type="Booking",
+                entity_id=next_booking.id,
+                after_data=booking_audit_snapshot(next_booking),
+                metadata={"source": "recurrence_renewal"},
+            )
+
         locked_booking.status = Booking.Status.COMPLETED
         locked_booking.completed_at = timezone.now()
-        locked_booking.save(update_fields=["status", "completed_at", "modified"])
+        update_fields = ["status", "completed_at", "modified"]
+        if is_active_recurrence:
+            locked_booking.recurrence_status = (
+                Booking.RecurrenceStatus.RENEWED
+                if continue_recurring
+                else Booking.RecurrenceStatus.ENDED
+            )
+            update_fields.append("recurrence_status")
+        locked_booking.save(update_fields=update_fields)
         create_lifecycle_audit_log(
             booking=locked_booking,
             actor=actor,
@@ -778,6 +1263,19 @@ def complete_booking(
             before_data=before_data,
             after_data=booking_audit_snapshot(locked_booking)
             | {"completed_at": locked_booking.completed_at.isoformat()},
+            metadata=(
+                {
+                    "source": "recurrence_renewal",
+                    "previous_booking_id": locked_booking.id,
+                    "next_booking_id": next_booking.id if next_booking else None,
+                    "required_next_deposit": str(required_next_deposit),
+                    "next_booking_price": (
+                        str(next_booking.total_price) if next_booking else None
+                    ),
+                }
+                if is_active_recurrence and continue_recurring
+                else ({"source": "recurrence_end"} if is_active_recurrence else {})
+            ),
         )
         return locked_booking
 
@@ -802,7 +1300,11 @@ def expire_locked_booking(*, locked_booking, actor, metadata=None):
     before_data = booking_audit_snapshot(locked_booking)
     locked_booking.status = Booking.Status.EXPIRED
     locked_booking.expired_at = timezone.now()
-    locked_booking.save(update_fields=["status", "expired_at", "modified"])
+    recurrence_ended = end_active_recurrence(locked_booking=locked_booking)
+    update_fields = ["status", "expired_at", "modified"]
+    if recurrence_ended:
+        update_fields.append("recurrence_status")
+    locked_booking.save(update_fields=update_fields)
     create_lifecycle_audit_log(
         booking=locked_booking,
         actor=actor,
@@ -810,9 +1312,45 @@ def expire_locked_booking(*, locked_booking, actor, metadata=None):
         before_data=before_data,
         after_data=booking_audit_snapshot(locked_booking)
         | {"expired_at": locked_booking.expired_at.isoformat()},
-        metadata=metadata or {},
+        metadata={**(metadata or {}), "recurrence_ended": recurrence_ended},
     )
     return locked_booking
+
+
+def end_booking_recurrence(*, access, booking, actor, reason=""):
+    with transaction.atomic():
+        locked_booking = (
+            Booking.objects.select_for_update()
+            .select_related("club", "court")
+            .get(pk=booking.pk)
+        )
+        validate_booking_for_lifecycle_action(access=access, booking=locked_booking)
+        if (
+            locked_booking.source != Booking.Source.RECURRING
+            or locked_booking.recurrence_status != Booking.RecurrenceStatus.ACTIVE
+            or locked_booking.status
+            not in {Booking.Status.HOLD, Booking.Status.CONFIRMED}
+        ):
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="BOOKING_RECURRENCE_NOT_ACTIVE",
+                message=BOOKING_RECURRENCE_NOT_ACTIVE_MESSAGE,
+            )
+        before_data = booking_audit_snapshot(locked_booking)
+        locked_booking.recurrence_status = Booking.RecurrenceStatus.ENDED
+        locked_booking.save(update_fields=["recurrence_status", "modified"])
+        create_lifecycle_audit_log(
+            booking=locked_booking,
+            actor=actor,
+            action=AuditLog.Action.BOOKING_UPDATED,
+            before_data=before_data,
+            after_data=booking_audit_snapshot(locked_booking),
+            metadata={
+                "source": "recurrence_end",
+                "reason": (reason or "").strip(),
+            },
+        )
+        return locked_booking
 
 
 def expire_due_hold_bookings(*, now=None):

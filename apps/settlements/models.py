@@ -1,8 +1,5 @@
-from decimal import Decimal
-
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
 from django.db import models
 from django.db.models import Q
 
@@ -137,41 +134,3 @@ class SettlementTransaction(models.Model):
         super().clean()
         if self.amount is not None and self.amount == 0:
             raise ValidationError({"amount": "Amount must not be zero."})
-
-
-class SettlementRecurringDepositTransaction(models.Model):
-    settlement = models.ForeignKey(
-        Settlement,
-        on_delete=models.CASCADE,
-        related_name="deposit_lines",
-    )
-    recurring_deposit_transaction = models.OneToOneField(
-        "recurring.RecurringDepositTransaction",
-        on_delete=models.CASCADE,
-        related_name="settlement_deposit_line",
-    )
-    amount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        validators=[MinValueValidator(Decimal("0.01"))],
-    )
-    created = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        constraints = [
-            models.CheckConstraint(
-                check=Q(amount__gt=0),
-                name="settlement_recurring_deposit_amount_gt_zero",
-            ),
-        ]
-
-    def __str__(self) -> str:
-        return (
-            f"{self.settlement_id} - deposit "
-            f"{self.recurring_deposit_transaction_id}"
-        )
-
-    def clean(self):
-        super().clean()
-        if self.amount is not None and self.amount <= 0:
-            raise ValidationError({"amount": "Amount must be greater than 0."})

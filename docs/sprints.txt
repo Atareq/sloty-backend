@@ -683,11 +683,12 @@ Do not build settlement before transactions.
 Do not build bookings before courts.
 Do not build dashboards before core data is stable.
 
-Sprint note — Recurring Agreements
+Sprint note — Booking-Native Recurrence
 
-Implemented in apps/recurring/ with dedicated RecurringDepositTransaction
-rows. Booking Transaction remains booking-specific. No replace/pause/skip.
-See docs/recurring-agreements-contract.txt.
+Recurring reservations are owned by Booking with `source=RECURRING` and
+`recurrence_status`. Deposits are ordinary booking payment transactions. No
+replace/pause/skip/series/agreement app exists.
+See docs/recurring-bookings-contract.txt.
 
 Overall MVP Definition of Done
 

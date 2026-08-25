@@ -67,7 +67,6 @@ APPS = [
     "apps.audit.apps.AuditConfig",
     "apps.dashboard.apps.DashboardConfig",
     "apps.reports.apps.ReportsConfig",
-    "apps.recurring.apps.RecurringConfig",
 ]
 
 DEBUG_APPS = []

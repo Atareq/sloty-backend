@@ -123,6 +123,26 @@ class TransactionCancelAPITests(TransactionAPITestCase):
                 transaction_obj.refresh_from_db()
                 self.assertTrue(transaction_obj.is_cancelled)
 
+    def test_cancel_only_payment_on_recurring_booking_demotes_to_hold(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+        )
+        transaction_obj = self.create_transaction(
+            booking,
+            amount=booking.total_price,
+            created_by=self.owner,
+        )
+
+        response = self.post_cancel(self.club, transaction_obj, self.owner)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.HOLD)
+        self.assertEqual(booking.recurrence_status, Booking.RecurrenceStatus.ACTIVE)
+
     def test_non_platform_users_cannot_cancel_another_users_transaction(self):
         transaction_obj = self.create_transaction(
             self.booking,
