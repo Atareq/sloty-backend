@@ -3,6 +3,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from django.core.management import call_command
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -1301,3 +1303,28 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
             ).exists()
         )
         self.assertTrue(AuditLog.objects.filter(club__slug="barcelona-fc").exists())
+
+
+class DashboardQueryScalingTests(DashboardDataMixin, DashboardAPITestCase):
+    def test_summary_query_count_does_not_grow_with_extra_bookings(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        params = self.range_params()
+
+        with CaptureQueriesContext(connection) as first:
+            first_response = self.client.get(self.summary_url(self.club), params)
+
+        for hour in range(13, 21):
+            self.create_booking(
+                self.court,
+                customer_phone=f"+2010000080{hour}",
+                start_time=self.time_at(hour % 24),
+                end_time=self.time_at((hour % 24) + 1 if hour % 24 < 23 else 23),
+                status=Booking.Status.CONFIRMED,
+            )
+
+        with CaptureQueriesContext(connection) as second:
+            second_response = self.client.get(self.summary_url(self.club), params)
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(first), len(second))

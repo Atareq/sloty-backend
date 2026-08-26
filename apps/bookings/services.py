@@ -1,9 +1,9 @@
+from collections import defaultdict
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import DecimalField, Q, Sum, Value, prefetch_related_objects
-from django.db.models.functions import Coalesce
+from django.db.models import prefetch_related_objects
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers, status
@@ -11,6 +11,7 @@ from rest_framework.exceptions import PermissionDenied
 
 from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log
+from apps.bookings.filters import annotate_booking_hold_expires_at
 from apps.bookings.models import Booking
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
@@ -21,6 +22,7 @@ from apps.courts.pricing import (
 )
 from apps.transactions.models import Transaction
 from apps.transactions.services import (
+    annotate_booking_paid_amount,
     get_booking_paid_amount,
     get_booking_refunded_amount,
     get_booking_remaining_amount,
@@ -42,12 +44,6 @@ BOOKING_STATUS_TRANSITIONS = {
         Booking.Status.COMPLETED,
         Booking.Status.NO_SHOW,
     },
-}
-BOOKING_AUDIT_ACTIONS = {
-    Booking.Status.CANCELLED: "BOOKING_CANCELLED",
-    Booking.Status.COMPLETED: "BOOKING_COMPLETED",
-    Booking.Status.NO_SHOW: "BOOKING_NO_SHOW",
-    Booking.Status.EXPIRED: "BOOKING_EXPIRED",
 }
 BOOKING_SLOT_UNAVAILABLE_MESSAGE = _("The selected booking slot is not available.")
 BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT_MESSAGE = _(
@@ -339,20 +335,20 @@ def find_new_recurrence_conflict(
             .select_related("club", "court")
             .order_by("start_time", "id")
         )
+    pseudo_anchor = type(
+        "RecurrenceCandidate",
+        (),
+        {
+            "source": Booking.Source.RECURRING,
+            "recurrence_status": Booking.RecurrenceStatus.ACTIVE,
+            "start_time": start_time,
+            "end_time": end_time,
+        },
+    )()
     earliest = None
     for blocker in blockers:
         if exclude_booking is not None and blocker.pk == exclude_booking.pk:
             continue
-        pseudo_anchor = type(
-            "RecurrenceCandidate",
-            (),
-            {
-                "source": Booking.Source.RECURRING,
-                "recurrence_status": Booking.RecurrenceStatus.ACTIVE,
-                "start_time": start_time,
-                "end_time": end_time,
-            },
-        )()
         if weekly_pattern_matches(
             anchor_booking=pseudo_anchor,
             candidate_start=blocker.start_time,
@@ -432,8 +428,41 @@ def booking_slot_payload(booking):
     }
 
 
+def recurring_slot_context_payload(anchor):
+    return {
+        "anchor_booking_id": anchor.id,
+        "customer_name": anchor.customer_name,
+        "customer_phone": str(anchor.customer_phone),
+        "recurrence_status": anchor.recurrence_status,
+    }
+
+
 def booking_overlaps_slot(booking, slot_start, slot_end):
     return booking.start_time < slot_end and booking.end_time > slot_start
+
+
+def index_bookings_by_local_date(bookings):
+    index = defaultdict(list)
+    for booking in bookings:
+        start_local = timezone.localtime(booking.start_time)
+        end_local = timezone.localtime(booking.end_time)
+        current = start_local.date()
+        last = end_local.date()
+        if end_local.time() == time.min:
+            last = last - timedelta(days=1)
+        if last < current:
+            last = current
+        while current <= last:
+            index[current].append(booking)
+            current += timedelta(days=1)
+    return index
+
+
+def index_bookings_by_local_weekday(bookings):
+    index = defaultdict(list)
+    for booking in bookings:
+        index[timezone.localtime(booking.start_time).weekday()].append(booking)
+    return index
 
 
 def generate_booking_slots(*, access, court, date_from, date_to):
@@ -452,40 +481,24 @@ def generate_booking_slots(*, access, court, date_from, date_to):
         prefetch_related_objects([court], "working_hours__pricing_periods")
     working_hours = list(court.working_hours.all())
     working_hours_by_weekday = {row.weekday: row for row in working_hours}
-    blocking_bookings = list(
-        Booking.objects.filter(
-            club=access.club,
-            court=court,
-            status__in=Booking.BLOCKING_STATUSES,
-            start_time__lt=range_end,
-            end_time__gt=range_start,
-        )
-        .annotate(
-            paid_amount=Coalesce(
-                Sum(
-                    "transactions__amount",
-                    filter=Q(
-                        transactions__is_cancelled=False,
-                        transactions__transaction_type=Transaction.Type.PAYMENT,
-                    ),
-                ),
-                Value(Decimal("0.00")),
-                output_field=DecimalField(max_digits=10, decimal_places=2),
-            )
-        )
-        .order_by("start_time", "id")
-    )
-    active_recurring_anchors = list(active_recurring_anchor_queryset(court))
     future_blockers = list(
-        Booking.objects.filter(
-            club=access.club,
-            court=court,
-            status__in=Booking.BLOCKING_STATUSES,
-            end_time__gt=range_start,
-        )
-        .select_related("club", "court")
-        .order_by("start_time", "id")
+        annotate_booking_paid_amount(
+            Booking.objects.filter(
+                club=access.club,
+                court=court,
+                status__in=Booking.BLOCKING_STATUSES,
+                end_time__gt=range_start,
+            )
+        ).order_by("start_time", "id")
     )
+    blocking_bookings = [
+        booking for booking in future_blockers if booking.start_time < range_end
+    ]
+    active_recurring_anchors = list(active_recurring_anchor_queryset(court))
+    blocking_by_date = index_bookings_by_local_date(blocking_bookings)
+    anchors_by_weekday = index_bookings_by_local_weekday(active_recurring_anchors)
+    blockers_by_weekday = index_bookings_by_local_weekday(future_blockers)
+    slot_price_cache = {}
 
     slots = []
     current_date = date_from
@@ -503,22 +516,32 @@ def generate_booking_slots(*, access, court, date_from, date_to):
         day_close = local_datetime_for_date(current_date, closes_at)
         slot_delta = timedelta(minutes=court.slot_duration_minutes)
         slot_start = day_open
+        weekday = current_date.weekday()
+        day_bookings = blocking_by_date.get(current_date, ())
+        day_anchors = anchors_by_weekday.get(weekday, ())
+        day_blockers = blockers_by_weekday.get(weekday, ())
         while slot_start + slot_delta <= day_close:
             slot_end = slot_start + slot_delta
             booking = next(
                 (
                     candidate
-                    for candidate in blocking_bookings
+                    for candidate in day_bookings
                     if booking_overlaps_slot(candidate, slot_start, slot_end)
                 ),
                 None,
             )
-            slot_price = slot_price_from_schedule(
-                court=court,
-                start_time=slot_start,
-                end_time=slot_end,
-                working_hours=working_hours,
-            )
+            price_key = (weekday, slot_start.time(), slot_end.time())
+            if price_key in slot_price_cache:
+                slot_price = slot_price_cache[price_key]
+            else:
+                slot_price = slot_price_from_schedule(
+                    court=court,
+                    start_time=slot_start,
+                    end_time=slot_end,
+                    working_hours=working_hours,
+                )
+                slot_price_cache[price_key] = slot_price
+            recurring_context = None
             if booking is not None:
                 slot_status = booking.status
                 is_available = False
@@ -538,12 +561,13 @@ def generate_booking_slots(*, access, court, date_from, date_to):
                     court=court,
                     start_time=slot_start,
                     end_time=slot_end,
-                    anchors=active_recurring_anchors,
+                    anchors=day_anchors,
                 )
             ) is not None:
                 slot_status = RECURRING_RESERVED_SLOT_STATUS
                 is_available = False
                 recurring_anchor_booking_id = recurring_anchor.id
+                recurring_context = recurring_slot_context_payload(recurring_anchor)
                 can_start_recurring = None
                 recurring_blocked_reason = None
                 first_recurring_conflict_start = None
@@ -554,8 +578,8 @@ def generate_booking_slots(*, access, court, date_from, date_to):
                     court=court,
                     start_time=slot_start,
                     end_time=slot_end,
-                    active_anchors=active_recurring_anchors,
-                    future_blockers=future_blockers,
+                    active_anchors=day_anchors,
+                    future_blockers=day_blockers,
                 )
                 can_start_recurring = recurrence_conflict is None
                 recurring_blocked_reason = (
@@ -583,6 +607,7 @@ def generate_booking_slots(*, access, court, date_from, date_to):
                         booking_slot_payload(booking) if booking is not None else None
                     ),
                     "recurring_anchor_booking_id": recurring_anchor_booking_id,
+                    "recurring_context": recurring_context,
                     "can_start_recurring": can_start_recurring,
                     "recurring_blocked_reason": recurring_blocked_reason,
                     "first_recurring_conflict_start": first_recurring_conflict_start,
@@ -1353,18 +1378,18 @@ def end_booking_recurrence(*, access, booking, actor, reason=""):
         return locked_booking
 
 
-def expire_due_hold_bookings(*, now=None):
-    now = now or timezone.now()
-    due_ids = []
-    for booking in (
-        Booking.objects.filter(status=Booking.Status.HOLD)
-        .select_related("court")
-        .only("id", "created", "status", "court__internal_hold_expiry_hours")
-    ):
-        expiry_cutoff = now - timedelta(hours=booking.court.internal_hold_expiry_hours)
-        if booking.created <= expiry_cutoff:
-            due_ids.append(booking.id)
+def due_hold_booking_candidate_ids(*, now):
+    return list(
+        annotate_booking_hold_expires_at(
+            Booking.objects.filter(status=Booking.Status.HOLD)
+        )
+        .filter(hold_expires_at__lte=now)
+        .order_by("id")
+        .values_list("id", flat=True)
+    )
 
+
+def expire_locked_due_hold_bookings(*, due_ids, now):
     expired_bookings = []
     with transaction.atomic():
         locked_bookings = (
@@ -1387,3 +1412,9 @@ def expire_due_hold_bookings(*, now=None):
                 )
             )
     return expired_bookings
+
+
+def expire_due_hold_bookings(*, now=None):
+    now = now or timezone.now()
+    due_ids = due_hold_booking_candidate_ids(now=now)
+    return expire_locked_due_hold_bookings(due_ids=due_ids, now=now)

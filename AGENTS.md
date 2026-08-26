@@ -3,10 +3,24 @@
 ## 1. Purpose
 
 This file is the living guide for AI coding agents working in this repository.
-Always read it before planning commands or code changes. Also read
-`docs/business-analysis.txt` and `docs/documentation.txt`, when present, for
-project and product context before planning changes. For booking-native
-recurrence work, also read the locked contract in
+Always read it before planning commands or code changes.
+
+### Source of truth
+
+Use documents in this order. A lower document must not override a higher one
+when they conflict.
+
+1. `AGENTS.md` — current engineering architecture, coding conventions, and
+   repository workflow.
+2. Locked contracts under `docs/` that describe implemented behavior, currently
+   `docs/recurring-bookings-contract.txt`.
+3. `README.md` — current setup and API/operator guidance.
+4. Historical planning documents such as `docs/business-analysis.txt`,
+   `docs/documentation.txt`, and `docs/sprints.txt` — product/planning context
+   only. They may describe an earlier implementation state and must not be used
+   as the current backend source of truth.
+
+For booking-native recurrence work, also read the locked contract in
 `docs/recurring-bookings-contract.txt`. Update this file whenever the
 repository's backend structure, conventions, or workflow changes.
 
@@ -47,9 +61,12 @@ Current repo reality:
 - Current account endpoints include `/api/v1/me/` and platform-admin-only
   `/api/v1/users/`
 - Current club users endpoint is `/api/v1/clubs/{club_slug}/users/`
-- Optional local SQL request summaries are controlled by
-  `SQL_QUERY_STATS_ENABLED`, `SQL_QUERY_STATS_VERBOSE`, and
-  `SQL_QUERY_STATS_SLOW_QUERY_MS`
+- Optional SQL request performance logs are controlled by
+  `SQL_QUERY_STATS_ENABLED`, `SQL_QUERY_STATS_VERBOSE`,
+  `SQL_QUERY_STATS_WARN_QUERY_COUNT`, `SQL_QUERY_STATS_SLOW_QUERY_MS`,
+  `SQL_QUERY_STATS_SLOW_REQUEST_MS`, `SQL_QUERY_STATS_MAX_QUERY_SAMPLES`,
+  and `SQL_QUERY_STATS_MAX_SQL_LENGTH`. Monitoring is independent of
+  `DEBUG` and is disabled by default.
 - Project docs live under `docs/`
 - Requirements are split into `requirements/base.txt` and `requirements/dev.txt`
 - Style tooling exists through `.pre-commit-config.yaml`, `pyproject.toml`, and
@@ -72,8 +89,8 @@ Current repo reality:
 - Sprint 8 implements read-only club operations dashboard, calendar, revenue,
   utilization, and court availability APIs
 - Sprint 9 completes MVP booking lifecycle behavior with reason capture,
-  rescheduling, remaining-cash completion confirmation, automatic hold-expiry
-  command support, and lifecycle audit logs
+  rescheduling, completion that requires remaining amount already paid,
+  automatic hold-expiry command support, and lifecycle audit logs
 - Sprint 10 adds logged transaction cancelling for safe corrections, excludes
   cancelled transactions from financial totals and settlements, and recalculates
   booking payment status from valid transactions
@@ -158,8 +175,10 @@ Current implemented app:
   `slot_duration_minutes`,
   `requires_digital_payment_reference`, and `internal_hold_expiry_hours`.
   Sprint 4 transactions use `requires_digital_payment_reference` for manual
-  payment-reference validation. Hold-expiry behavior remains future lifecycle
-  work and must not be implemented in Sprint 4.
+  payment-reference validation. Automatic hold expiry is implemented through
+  `python manage.py expire_hold_bookings` and `expire_due_hold_bookings()`.
+  The command filters likely-due HOLD rows in the database, then re-checks
+  expiry under `select_for_update()`. Do not add a Celery scheduler.
 - Working-hour pricing uses child pricing periods tied explicitly to
   `CourtWorkingHour`, not one global morning/night price on `Court` and not one
   price field on `CourtWorkingHour`. `Court.default_price` must not be used for
@@ -174,13 +193,17 @@ Current implemented app:
   club or court fields on `User`.
 - `apps/bookings/` contains booking creation, list/detail APIs, schedule-style
   filters, price snapshot calculation, and active booking overlap protection.
-- Current booking source values are `MANUAL` and `ADMIN_CORRECTION`; only a
-  Platform Super Admin may create an `ADMIN_CORRECTION` booking.
+- Current booking source values are `MANUAL`, `ADMIN_CORRECTION`, and
+  `RECURRING`. Clients must not post `source=RECURRING`; they start a
+  recurrence with write-only `is_recurring=true`. Only a Platform Super Admin
+  may create an `ADMIN_CORRECTION` booking.
 - Sprint 3 booking PATCH only changes `customer_name`, `customer_phone`, and
   `notes` on non-locked bookings. It must not change court, start/end time,
   status, source, or price.
 - Booking list filters currently supported by the API are `court`, `status`,
-  `source`, `date`, `date_from`, and `date_to`.
+  `source`, `date`, `date_from`, `date_to`, `needs_action`, `overdue`,
+  `has_remaining_amount`, deprecated `remaining_amount_gt`, `ended`, and
+  `hold_expiring`.
 - New booking creation and rescheduling must be inside configured court working
   hours and fully covered by pricing periods. No `outside_working_hours` flag is
   stored.
@@ -209,8 +232,10 @@ Current implemented app:
   transactions are club-scoped under `/api/v1/clubs/{club_slug}/...`.
 - Club user listing is club-scoped under
   `/api/v1/clubs/{club_slug}/users/`, is read-only, and returns users through
-  `ClubMembership` rows. It is limited to platform admins and club owners and
-  must not add `User.role`, `User.club`, or `User.court`.
+  `ClubMembership` rows. Platform admins and owners see all selected-club
+  memberships. Managers can list active MANAGER/STAFF employees read-only.
+  Staff cannot list club users. Do not add `User.role`, `User.club`, or
+  `User.court`.
 - Login remains global. The frontend logs in, calls `/api/v1/me/` to read active
   memberships and club slugs, then sends selected-club requests to
   `/api/v1/clubs/{club_slug}/...`. Never trust frontend-selected club context
@@ -286,9 +311,12 @@ Rules for the flow:
 `docs/`
 
 - Product and planning documentation.
-- `docs/business-analysis.txt` and `docs/documentation.txt` are required
-  overview references before planning code changes when they exist.
-- `docs/sprints.txt` tracks sprint planning context.
+- Locked implemented contracts such as `docs/recurring-bookings-contract.txt`
+  are current business/API authority after `AGENTS.md`.
+- `docs/business-analysis.txt`, `docs/documentation.txt`, and
+  `docs/sprints.txt` are historical planning documents. Read them for product
+  context only. Do not implement or restore architecture from them when they
+  conflict with this file or current locked contracts.
 
 `locale/`
 
@@ -354,8 +382,10 @@ Rules for the flow:
 - Court setup app.
 - Contains `Court`, `CourtWorkingHour`, and `CourtWorkingHourPricePeriod`.
 - Platform admins and club owners can create and update courts. Managers can
-  list/retrieve courts but cannot update court fields in the current pricing
-  release. Staff can list/retrieve only their assigned court and cannot update
+  list/retrieve courts but cannot update court fields. Court PATCH/PUT object
+  permission uses `ClubAccessContext.can_update_court()`; managers and staff
+  receive 403. `manager_can_change_pricing` does not grant Court model field
+  updates. Staff can list/retrieve only their assigned court and cannot update
   courts.
 - Platform admins, owners, and managers with membership-level
   `manager_can_change_pricing=True` can manage working hours and pricing for
@@ -420,6 +450,8 @@ Rules for the flow:
   exists, completion is rejected with
   `BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT` and 409 Conflict. The backend must
   not auto-create a remaining CASH transaction during completion.
+  `confirm_collect_remaining_cash` is a deprecated no-op request field kept for
+  compatibility; it does not collect cash.
 - Manual `expire` is allowed only from `HOLD`. Automatic due-hold expiry uses
   `python manage.py expire_hold_bookings`, sets `EXPIRED`, records
   `expired_at`, and audits with actor `None`.
@@ -754,7 +786,7 @@ Owning app: `apps/bookings/`. Locked contract:
 - `Booking.Source.RECURRING` marks a recurring reservation. There is no
   recurring agreement, recurring series, recurring app, rolling-horizon
   generation, action-required state, maintenance command, or dedicated deposit
-  ledger.
+  ledger. Do not add `apps.recurring` to `INSTALLED_APPS` or URL routing.
 - `Booking.recurrence_status` is nullable and uses `ACTIVE`, `RENEWED`, and
   `ENDED`. Non-recurring bookings must keep it null. Only `ACTIVE` recurring
   bookings virtually reserve future weekly slots.
@@ -765,8 +797,12 @@ Owning app: `apps/bookings/`. Locked contract:
 - ACTIVE recurrence availability is arithmetic weekly matching by local date
   delta modulo 7 plus interval overlap. Do not generate future booking rows.
 - Schedule slots blocked only by a virtual recurrence return
-  `slot_status=RECURRING_RESERVED`, `booking=null`, and
-  `recurring_anchor_booking_id`.
+  `slot_status=RECURRING_RESERVED`, `booking=null`,
+  `recurring_anchor_booking_id`, and nullable `recurring_context` with
+  `anchor_booking_id`, `customer_name`, `customer_phone`, and
+  `recurrence_status` from the ACTIVE anchor. Selected slot date/time and
+  `slot_price` remain authoritative for the future occurrence; do not treat
+  anchor lifecycle or financial fields as the virtual occurrence state.
 - Completing an ACTIVE recurring booking requires `continue_recurring`. False
   completes the booking and sets `ENDED`; true atomically creates next week's
   booking, records the next deposit as an ordinary booking `Transaction` when
@@ -920,10 +956,15 @@ Examples:
 transactions?settlement_status=unsettled
 bookings?needs_action=true
 bookings?overdue=true
-bookings?remaining_amount_gt=0&ended=true
+bookings?has_remaining_amount=true&status=CONFIRMED&ended=true
 bookings?hold_expiring=true
 settlements/preview?collected_by=<user_id>
 ```
+
+`has_remaining_amount=true` means paid amount is less than `total_price`.
+`has_remaining_amount=false` means the booking is fully paid. Deprecated
+`remaining_amount_gt` remains for compatibility and still returns CONFIRMED
+bookings with remaining amount greater than zero.
 
 The same backend logic must be used for dashboard counts and the clicked
 filtered lists.
@@ -933,9 +974,15 @@ filtered lists.
 - Shared app for reusable infrastructure that is not owned by one business
   domain.
 - `apps/common/middleware.py` contains `SQLQueryStatsMiddleware`, a
-  development-only SQL request summary logger. It uses Django's
-  `connection.execute_wrapper()` and must stay disabled by default in
-  production and tests.
+  production-safe SQL request performance logger. It uses Django's
+  `connection.execute_wrapper()` and does not depend on `DEBUG` or
+  `connection.queries`. Keep it disabled by default in production and
+  tests. When enabled it logs query count, DB time, request time,
+  exact duplicate queries, repeated SQL shapes, and a potential N+1
+  heuristic logged as `[PERF:N+1?]`. Transaction-control SQL is counted
+  but excluded from duplicate/N+1 heuristics. Logs must never include
+  SQL parameters, request bodies, or Authorization headers. Verbose
+  mode may include truncated SQL structure only.
 - Egypt location constants live in `apps/common/egypt_locations.py`.
 - `get_governorate_choices()`, `get_all_city_choices()`,
   `get_city_choices(governorate_code)`, and validation helpers are the source
@@ -1307,6 +1354,11 @@ Notes:
   `config.settings.local`.
 - Pytest is configured through `pyproject.toml` to use `config.settings.test`.
 - `SECRET_KEY` must be provided through the environment or local `.env`.
+- JWT access and refresh lifetimes are environment-driven through
+  `JWT_ACCESS_TOKEN_MINUTES` (default 60) and `JWT_REFRESH_TOKEN_DAYS`
+  (default 7). Custom JWT claims are unchanged.
+- Business calendar rules use Django `TIME_ZONE = "Africa/Cairo"` with
+  `USE_TZ = True`. Datetimes remain timezone-aware UTC in the database.
 - SQLite is the default local database. Set `DB_ENGINE=postgresql` plus the
   `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_PORT` variables when
   using PostgreSQL.

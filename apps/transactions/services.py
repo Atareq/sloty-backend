@@ -1,7 +1,8 @@
 from decimal import Decimal
 
 from django.db import IntegrityError, transaction
-from django.db.models import Sum
+from django.db.models import DecimalField, Q, Sum, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers, status
@@ -38,6 +39,26 @@ TRANSACTION_AMOUNT_EXCEEDS_REMAINING_MESSAGE = _(
 
 def normalize_payment_reference(payment_reference):
     return (payment_reference or "").strip()
+
+
+def paid_amount_annotation(relation="transactions"):
+    return Coalesce(
+        Sum(
+            f"{relation}__amount",
+            filter=Q(
+                **{
+                    f"{relation}__is_cancelled": False,
+                    f"{relation}__transaction_type": Transaction.Type.PAYMENT,
+                }
+            ),
+        ),
+        Value(Decimal("0.00")),
+        output_field=DecimalField(max_digits=12, decimal_places=2),
+    )
+
+
+def annotate_booking_paid_amount(queryset, *, relation="transactions"):
+    return queryset.annotate(paid_amount=paid_amount_annotation(relation))
 
 
 def get_booking_paid_amount(booking, *, include_cancelled=False) -> Decimal:

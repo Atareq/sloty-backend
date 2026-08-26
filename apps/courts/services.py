@@ -156,15 +156,20 @@ def pricing_configured_for_court(court):
 
 
 def get_court_pricing_summary(court):
+    cached = getattr(court, "_sloty_pricing_summary", None)
+    if cached is not None:
+        return cached
     prices = [
         period.price
         for working_hour in court.working_hours.all()
         for period in working_hour.pricing_periods.all()
     ]
-    return {
+    cached = {
         "minimum_slot_price": min(prices) if prices else None,
         "maximum_slot_price": max(prices) if prices else None,
     }
+    court._sloty_pricing_summary = cached
+    return cached
 
 
 def validate_slot_duration_against_pricing(court, slot_duration_minutes):

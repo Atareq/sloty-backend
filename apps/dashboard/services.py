@@ -23,6 +23,7 @@ from apps.courts.models import CourtWorkingHour
 from apps.courts.pricing import working_hour_bounds
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
+from apps.transactions.services import annotate_booking_paid_amount
 
 ZERO = Decimal("0.00")
 
@@ -141,21 +142,11 @@ def validate_calendar_access(access):
 
 def get_calendar_items(*, access, date_from, date_to, court=None, status=None):
     validate_calendar_access(access)
-    queryset = (
+    queryset = annotate_booking_paid_amount(
         access.scoped_calendar_bookings_queryset()
         .select_related("court")
         .filter(start_time__lt=date_to, end_time__gt=date_from)
-        .annotate(
-            paid_amount=money_sum(
-                "transactions__amount",
-                filter=Q(
-                    transactions__is_cancelled=False,
-                    transactions__transaction_type=Transaction.Type.PAYMENT,
-                ),
-            ),
-        )
-        .order_by("start_time", "id")
-    )
+    ).order_by("start_time", "id")
     if court is not None:
         if not access.can_access_court(court):
             raise PermissionDenied("You cannot access this court.")

@@ -2,8 +2,6 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from django.db.models import DecimalField, Q, Sum, Value
-from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.translation import pgettext
 
@@ -17,7 +15,7 @@ from apps.reports.constants import (
     PERIOD_DAYTIME,
     PERIOD_EVENING,
 )
-from apps.transactions.models import Transaction
+from apps.transactions.services import annotate_booking_paid_amount
 
 ZERO = Decimal("0.00")
 
@@ -197,25 +195,13 @@ def get_court_usage_report(*, access, query):
                 bucket_start = bucket_end
 
     queryset = (
-        Booking.objects.filter(
-            court_id__in=court_ids,
-            status__in=query["included_statuses"],
-            start_time__lt=query["range_end"],
-            end_time__gt=query["range_start"],
-        )
-        .select_related("court", "created_by")
-        .annotate(
-            paid_amount=Coalesce(
-                Sum(
-                    "transactions__amount",
-                    filter=Q(
-                        transactions__is_cancelled=False,
-                        transactions__transaction_type=Transaction.Type.PAYMENT,
-                    ),
-                ),
-                Value(ZERO),
-                output_field=DecimalField(max_digits=12, decimal_places=2),
-            )
+        annotate_booking_paid_amount(
+            Booking.objects.filter(
+                court_id__in=court_ids,
+                status__in=query["included_statuses"],
+                start_time__lt=query["range_end"],
+                end_time__gt=query["range_start"],
+            ).select_related("court", "created_by")
         )
         .only(
             "id",

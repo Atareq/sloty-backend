@@ -1,7 +1,3 @@
-from decimal import Decimal
-
-from django.db.models import DecimalField, Q, Sum, Value
-from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
@@ -44,7 +40,7 @@ from apps.bookings.services import (
 )
 from apps.clubs.mixins import ClubScopedAccessMixin
 from apps.clubs.permissions import CanManageClubBookings
-from apps.transactions.models import Transaction
+from apps.transactions.services import annotate_booking_paid_amount
 
 
 @extend_schema_view(
@@ -82,7 +78,7 @@ class BookingViewSet(
             from apps.bookings.models import Booking
 
             return Booking.objects.none()
-        return (
+        return annotate_booking_paid_amount(
             self.get_access_context()
             .scoped_bookings_queryset()
             .select_related(
@@ -92,21 +88,7 @@ class BookingViewSet(
                 "previous_recurring_booking",
                 "next_recurring_booking",
             )
-            .annotate(
-                paid_amount=Coalesce(
-                    Sum(
-                        "transactions__amount",
-                        filter=Q(
-                            transactions__is_cancelled=False,
-                            transactions__transaction_type=Transaction.Type.PAYMENT,
-                        ),
-                    ),
-                    Value(Decimal("0.00")),
-                    output_field=DecimalField(max_digits=10, decimal_places=2),
-                )
-            )
-            .order_by("start_time", "id")
-        )
+        ).order_by("start_time", "id")
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -209,6 +191,11 @@ class BookingViewSet(
         tags=["Bookings"],
         request=BookingCompleteSerializer,
         responses=BookingDetailSerializer,
+        description=(
+            "Complete a CONFIRMED booking. Remaining amount must already be "
+            "zero. confirm_collect_remaining_cash is a deprecated no-op and "
+            "does not create a cash transaction."
+        ),
     )
     @action(detail=True, methods=["post"])
     def complete(self, request, *args, **kwargs):

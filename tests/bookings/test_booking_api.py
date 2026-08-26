@@ -1,8 +1,10 @@
-from datetime import time, timedelta
+from datetime import date, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 from django.core.management import call_command
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import resolve, reverse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -15,6 +17,7 @@ from apps.bookings.filters import BookingFilter
 from apps.bookings.models import Booking
 from apps.bookings.views import BookingViewSet
 from apps.clubs.models import Club, ClubMembership
+from apps.common.middleware import SQLQueryStats
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.transactions.models import Transaction
 
@@ -611,19 +614,96 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             self.court,
             start_time=self.time_at(9),
             end_time=self.time_at(10),
+            customer_name="Ahmed Mohamed",
+            customer_phone="+201012345678",
             source=Booking.Source.RECURRING,
             recurrence_status=Booking.RecurrenceStatus.ACTIVE,
             status=Booking.Status.CONFIRMED,
+            total_price=Decimal("300.00"),
         )
+        self.create_transaction(anchor, amount=Decimal("50.00"))
 
         response = self.get_slots(date="2026-06-03")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        slot = self.slot_by_hour(response, 9, date=timezone.datetime(2026, 6, 3).date())
+        future_date = timezone.datetime(2026, 6, 3).date()
+        slot = self.slot_by_hour(response, 9, date=future_date)
         self.assertEqual(slot["slot_status"], "RECURRING_RESERVED")
         self.assertEqual(slot["is_available"], False)
         self.assertIsNone(slot["booking"])
+        self.assertEqual(slot["date"], "2026-06-03")
         self.assertEqual(slot["recurring_anchor_booking_id"], anchor.id)
+        self.assertEqual(slot["can_start_recurring"], None)
+        self.assertEqual(
+            slot["recurring_context"],
+            {
+                "anchor_booking_id": anchor.id,
+                "customer_name": "Ahmed Mohamed",
+                "customer_phone": "+201012345678",
+                "recurrence_status": "ACTIVE",
+            },
+        )
+        self.assertEqual(
+            slot["recurring_context"]["anchor_booking_id"],
+            slot["recurring_anchor_booking_id"],
+        )
+        self.assertNotIn("status", slot["recurring_context"])
+        self.assertNotIn("total_price", slot["recurring_context"])
+        self.assertNotIn("total_booking_value", slot["recurring_context"])
+        self.assertNotIn("paid_amount", slot["recurring_context"])
+        self.assertNotIn("remaining_amount", slot["recurring_context"])
+        self.assertNotIn("is_fully_paid", slot["recurring_context"])
+        # slot_price is current schedule price for the selected occurrence
+        self.assertEqual(slot["slot_price"], "300.00")
+
+    def test_virtual_recurring_slot_price_uses_current_schedule_not_anchor(self):
+        anchor = self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            status=Booking.Status.CONFIRMED,
+            total_price=Decimal("300.00"),
+        )
+        working_hour = CourtWorkingHour.objects.get(court=self.court, weekday=2)
+        self.set_price_periods(
+            working_hour,
+            (time(9, 0), time(12, 0), Decimal("450.00")),
+        )
+
+        response = self.get_slots(date="2026-06-03")
+
+        slot = self.slot_by_hour(response, 9, date=timezone.datetime(2026, 6, 3).date())
+        self.assertEqual(slot["slot_status"], "RECURRING_RESERVED")
+        self.assertEqual(slot["slot_price"], "450.00")
+        self.assertNotEqual(slot["slot_price"], f"{anchor.total_price:.2f}")
+        self.assertEqual(slot["recurring_context"]["anchor_booking_id"], anchor.id)
+
+    def test_ended_recurrence_clears_future_virtual_slot_context(self):
+        anchor = self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            status=Booking.Status.CONFIRMED,
+        )
+        end_response = self.client.post(
+            self.booking_lifecycle_url(self.club, anchor, "end-recurrence"),
+            {"reason": "Customer stopped weekly reservation"},
+            format="json",
+        )
+        self.assertEqual(end_response.status_code, status.HTTP_200_OK)
+
+        response = self.get_slots(date="2026-06-03")
+
+        slot = self.slot_by_hour(response, 9, date=timezone.datetime(2026, 6, 3).date())
+        self.assertEqual(slot["slot_status"], "FREE")
+        self.assertIsNone(slot["booking"])
+        self.assertIsNone(slot["recurring_anchor_booking_id"])
+        self.assertIsNone(slot["recurring_context"])
+        self.assertEqual(slot["can_start_recurring"], True)
 
     def test_current_actual_recurring_slot_returns_booking_payload(self):
         booking = self.create_booking(
@@ -644,6 +724,9 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertEqual(slot["booking"]["source"], "RECURRING")
         self.assertEqual(slot["booking"]["is_recurring"], True)
         self.assertEqual(slot["booking"]["recurrence_status"], "ACTIVE")
+        self.assertIsNone(slot["recurring_anchor_booking_id"])
+        self.assertIsNone(slot["recurring_context"])
+        self.assertIsNone(slot["can_start_recurring"])
 
     def test_free_slot_reports_can_start_recurring(self):
         response = self.get_slots()
@@ -651,6 +734,9 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         slot = self.slot_by_hour(response, 9)
         self.assertEqual(slot["slot_status"], "FREE")
+        self.assertIsNone(slot["booking"])
+        self.assertIsNone(slot["recurring_anchor_booking_id"])
+        self.assertIsNone(slot["recurring_context"])
         self.assertEqual(slot["can_start_recurring"], True)
         self.assertIsNone(slot["recurring_blocked_reason"])
         self.assertIsNone(slot["first_recurring_conflict_start"])
@@ -669,6 +755,8 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         slot = self.slot_by_hour(response, 9)
         self.assertEqual(slot["slot_status"], "FREE")
+        self.assertIsNone(slot["booking"])
+        self.assertIsNone(slot["recurring_context"])
         self.assertEqual(slot["can_start_recurring"], False)
         self.assertEqual(slot["recurring_blocked_reason"], "FUTURE_CONFLICT")
         self.assertIn("2026-06-17", str(slot["first_recurring_conflict_start"]))
@@ -781,11 +869,87 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             closes_at=time(23, 0),
         )
 
-        with self.assertNumQueries(7):
+        with self.assertNumQueries(6):
             response = self.get_slots()
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["slots"]), 23)
+
+    def test_virtual_recurring_slots_query_count_stays_bounded(self):
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            status=Booking.Status.CONFIRMED,
+        )
+        # Ensure weekday coverage for multiple future Wednesdays in range.
+        for weekday in range(7):
+            self.create_working_hours(
+                self.court,
+                weekday=weekday,
+                opens_at=time(9, 0),
+                closes_at=time(12, 0),
+            )
+
+        with self.assertNumQueries(6):
+            response = self.client.get(
+                self.booking_slots_url(self.club),
+                {
+                    "court": self.court.id,
+                    "date_from": "2026-06-03",
+                    "date_to": "2026-06-24",
+                },
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        reserved = [
+            slot
+            for slot in response.data["slots"]
+            if slot["slot_status"] == "RECURRING_RESERVED"
+        ]
+        self.assertGreaterEqual(len(reserved), 4)
+        for slot in reserved:
+            self.assertIsNotNone(slot["recurring_context"])
+            self.assertIsNone(slot["booking"])
+
+    def test_multiday_blocking_booking_still_occupies_later_day_slots(self):
+        self.create_working_hours(
+            self.court,
+            weekday=3,
+            opens_at=time(9, 0),
+            closes_at=time(12, 0),
+        )
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(20),
+            end_time=timezone.datetime(
+                2026,
+                5,
+                21,
+                10,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+            status=Booking.Status.CONFIRMED,
+        )
+
+        response = self.get_slots(date="2026-05-21")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slot = self.slot_by_hour(response, 9, date=date(2026, 5, 21))
+        self.assertFalse(slot["is_available"])
+        self.assertIsNotNone(slot["booking"])
+
+    def test_schema_includes_recurring_context_on_slots(self):
+        schema_response = self.client.get(reverse("schema"))
+
+        self.assertEqual(schema_response.status_code, status.HTTP_200_OK)
+        schema = schema_response.content.decode()
+        self.assertIn("recurring_context", schema)
+        self.assertIn("anchor_booking_id", schema)
+        self.assertIn("RECURRING_RESERVED", schema)
+        self.assertIn("/api/v1/clubs/{club_slug}/bookings/slots/", schema)
 
 
 class BookingScopeTests(BookingAPITestCase):
@@ -898,6 +1062,74 @@ class BookingScopeTests(BookingAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_staff_sees_virtual_recurring_context_only_for_assigned_court(self):
+        assigned_anchor = self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            customer_name="Assigned Court Customer",
+            customer_phone="+201011111111",
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            status=Booking.Status.CONFIRMED,
+        )
+        self.create_booking(
+            self.same_club_other_court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            customer_name="Other Court Customer",
+            customer_phone="+201022222222",
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            status=Booking.Status.CONFIRMED,
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        allowed = self.client.get(
+            self.booking_slots_url(self.club),
+            {"court": self.court.id, "date": "2026-06-03"},
+        )
+        denied = self.client.get(
+            self.booking_slots_url(self.club),
+            {"court": self.same_club_other_court.id, "date": "2026-06-03"},
+        )
+
+        self.assertEqual(allowed.status_code, status.HTTP_200_OK)
+        reserved = next(
+            slot
+            for slot in allowed.data["slots"]
+            if slot["slot_status"] == "RECURRING_RESERVED"
+        )
+        self.assertEqual(
+            reserved["recurring_context"]["anchor_booking_id"],
+            assigned_anchor.id,
+        )
+        self.assertEqual(
+            reserved["recurring_context"]["customer_name"],
+            "Assigned Court Customer",
+        )
+        self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_owner_cannot_see_other_club_virtual_recurring_context(self):
+        self.create_booking(
+            self.other_court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            customer_name="Cross Club Customer",
+            customer_phone="+201033333333",
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            status=Booking.Status.CONFIRMED,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(
+            self.booking_slots_url(self.other_club),
+            {"court": self.other_court.id, "date": "2026-06-03"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class BookingCreationPermissionTests(BookingAPITestCase):
@@ -2260,6 +2492,98 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             {"source": "automatic_hold_expiry", "recurrence_ended": False},
         )
 
+    def test_due_hold_candidates_respect_per_court_expiry_hours(self):
+        from apps.bookings.services import due_hold_booking_candidate_ids
+
+        long_court = self.create_court(
+            self.club,
+            "Long Expiry Court",
+            internal_hold_expiry_hours=48,
+        )
+        due_short = self.age_booking(
+            self.create_booking(
+                self.court,
+                status=Booking.Status.HOLD,
+                start_time=self.time_at(14),
+                end_time=self.time_at(15),
+                customer_phone="+201000001011",
+            ),
+            hours=13,
+        )
+        not_due_long = self.age_booking(
+            self.create_booking(
+                long_court,
+                status=Booking.Status.HOLD,
+                start_time=self.time_at(15),
+                end_time=self.time_at(16),
+                customer_phone="+201000001012",
+            ),
+            hours=13,
+        )
+
+        due_ids = set(due_hold_booking_candidate_ids(now=timezone.now()))
+
+        self.assertIn(due_short.id, due_ids)
+        self.assertNotIn(not_due_long.id, due_ids)
+
+    def test_due_hold_candidate_query_does_not_materialize_non_due_holds(self):
+        from apps.bookings.services import due_hold_booking_candidate_ids
+
+        due_hold = self.age_booking(
+            self.create_booking(
+                self.court,
+                status=Booking.Status.HOLD,
+                start_time=self.time_at(8),
+                end_time=self.time_at(9),
+                customer_phone="+201000001021",
+            ),
+            hours=13,
+        )
+        for index in range(25):
+            self.age_booking(
+                self.create_booking(
+                    self.court,
+                    status=Booking.Status.HOLD,
+                    start_time=self.time_at(10),
+                    end_time=self.time_at(11),
+                    customer_phone=f"+2010000011{index:02d}",
+                ),
+                hours=1,
+            )
+
+        due_ids = due_hold_booking_candidate_ids(now=timezone.now())
+
+        self.assertEqual(due_ids, [due_hold.id])
+
+    def test_expire_due_holds_rechecks_expiry_after_lock(self):
+        from apps.bookings.services import (
+            due_hold_booking_candidate_ids,
+            expire_locked_due_hold_bookings,
+        )
+
+        booking = self.age_booking(
+            self.create_booking(
+                self.court,
+                status=Booking.Status.HOLD,
+                start_time=self.time_at(8),
+                end_time=self.time_at(9),
+                customer_phone="+201000001031",
+            ),
+            hours=13,
+        )
+        due_ids = due_hold_booking_candidate_ids(now=timezone.now())
+        self.assertEqual(due_ids, [booking.id])
+        Booking.objects.filter(pk=booking.pk).update(created=timezone.now())
+
+        expired = expire_locked_due_hold_bookings(
+            due_ids=due_ids,
+            now=timezone.now(),
+        )
+
+        booking.refresh_from_db()
+        self.assertEqual(expired, [])
+        self.assertEqual(booking.status, Booking.Status.HOLD)
+
 
 class BookingFilterTests(BookingAPITestCase):
     def setUp(self):
@@ -2467,6 +2791,53 @@ class BookingFilterTests(BookingAPITestCase):
         self.assertIn(self.confirmed_booking.id, self.list_ids(response))
         self.assertNotIn(completed_with_remaining.id, self.list_ids(response))
 
+    def test_has_remaining_amount_true_uses_paid_versus_total_price(self):
+        fully_paid = self.create_booking(
+            self.court,
+            customer_phone="+201000000019",
+            start_time=self.time_at(18),
+            end_time=self.time_at(19),
+            status=Booking.Status.CONFIRMED,
+        )
+        self.create_transaction(fully_paid, amount=fully_paid.total_price)
+        completed_with_remaining = self.create_booking(
+            self.court,
+            customer_phone="+201000000029",
+            start_time=self.time_at(19),
+            end_time=self.time_at(20),
+            status=Booking.Status.COMPLETED,
+        )
+
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"has_remaining_amount": "true"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = self.list_ids(response)
+        self.assertIn(self.booking.id, ids)
+        self.assertIn(self.confirmed_booking.id, ids)
+        self.assertIn(completed_with_remaining.id, ids)
+        self.assertNotIn(fully_paid.id, ids)
+
+    def test_has_remaining_amount_false_returns_fully_paid_bookings(self):
+        fully_paid = self.create_booking(
+            self.court,
+            customer_phone="+201000000039",
+            start_time=self.time_at(17),
+            end_time=self.time_at(18),
+            status=Booking.Status.CONFIRMED,
+        )
+        self.create_transaction(fully_paid, amount=fully_paid.total_price)
+
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"has_remaining_amount": "false"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {fully_paid.id})
+
     def test_hold_expiring_filter_uses_internal_hold_expiry_hours(self):
         self.court.internal_hold_expiry_hours = 1
         self.court.save(update_fields=["internal_hold_expiry_hours"])
@@ -2633,3 +3004,151 @@ class BookingPaymentSummaryTests(BookingAPITestCase):
         self.assertEqual(booking_data["paid_amount"], "100.00")
         self.assertEqual(booking_data["remaining_amount"], "200.00")
         self.assertFalse(booking_data["is_fully_paid"])
+
+
+class BookingQueryScalingTests(BookingAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("query-scale-admin")
+        self.club = self.create_club("Query Scale Club", slug="query-scale-club")
+        self.court = self.create_court(self.club, "Query Scale Court")
+        self.client.force_authenticate(user=self.platform_admin)
+
+    def test_booking_list_query_count_does_not_grow_with_rows(self):
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            customer_phone="+201000009001",
+        )
+
+        with CaptureQueriesContext(connection) as first:
+            first_response = self.client.get(self.booking_list_url(self.club))
+
+        for hour in range(10, 19):
+            self.create_booking(
+                self.court,
+                start_time=self.time_at(hour),
+                end_time=self.time_at(hour + 1),
+                customer_phone=f"+2010000090{hour}",
+            )
+
+        with CaptureQueriesContext(connection) as second:
+            second_response = self.client.get(self.booking_list_url(self.club))
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(first_response.data["results"]), 1)
+        self.assertEqual(len(second_response.data["results"]), 10)
+        self.assertEqual(len(first), len(second))
+
+    def test_booking_detail_query_count_stays_bounded(self):
+        booking = self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+        )
+        self.create_transaction(booking, amount=Decimal("50.00"))
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get(self.booking_detail_url(self.club, booking))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertLessEqual(len(queries), 5)
+        self.assertEqual(response.data["paid_amount"], "50.00")
+
+    def test_schedule_query_count_stays_bounded_across_slot_and_anchor_growth(self):
+        self.create_working_hours(
+            self.court,
+            weekday=2,
+            opens_at=time(9, 0),
+            closes_at=time(12, 0),
+        )
+
+        def slot_query_count(**params):
+            data = {"court": self.court.id, "date": "2026-05-20"}
+            if "date_from" in params or "date_to" in params:
+                data.pop("date")
+            data.update(params)
+            with CaptureQueriesContext(connection) as queries:
+                response = self.client.get(self.booking_slots_url(self.club), data)
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            return len(queries), response.data["slots"]
+
+        empty_count, empty_slots = slot_query_count()
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            status=Booking.Status.CONFIRMED,
+            customer_phone="+201000009101",
+        )
+        few_count, _few_slots = slot_query_count()
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(11),
+            end_time=self.time_at(12),
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            status=Booking.Status.CONFIRMED,
+            customer_phone="+201000009102",
+        )
+        one_anchor_count, one_week_slots = slot_query_count(
+            date_from="2026-05-20",
+            date_to="2026-06-10",
+        )
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            status=Booking.Status.CONFIRMED,
+            customer_phone="+201000009103",
+        )
+        many_anchor_count, many_week_slots = slot_query_count(
+            date_from="2026-05-20",
+            date_to="2026-06-10",
+        )
+
+        reserved = [
+            slot
+            for slot in many_week_slots
+            if slot["slot_status"] == "RECURRING_RESERVED"
+        ]
+        self.assertGreater(len(empty_slots), 0)
+        self.assertGreaterEqual(len(reserved), 2)
+        self.assertEqual(empty_count, few_count)
+        self.assertEqual(one_anchor_count, many_anchor_count)
+        self.assertEqual(empty_count, one_anchor_count)
+
+    def test_profiler_flags_orm_get_loop_but_not_batched_select_related(self):
+        bookings = [
+            self.create_booking(
+                self.court,
+                start_time=self.time_at(9 + index),
+                end_time=self.time_at(10 + index),
+                customer_phone=f"+2010000092{index:02d}",
+            )
+            for index in range(3)
+        ]
+
+        naive_stats = SQLQueryStats()
+        with connection.execute_wrapper(naive_stats):
+            for booking in bookings:
+                Booking.objects.get(pk=booking.pk)
+
+        batched_stats = SQLQueryStats()
+        ids = [booking.pk for booking in bookings]
+        with connection.execute_wrapper(batched_stats):
+            list(
+                Booking.objects.filter(pk__in=ids).select_related(
+                    "court",
+                    "club",
+                    "previous_recurring_booking",
+                    "next_recurring_booking",
+                )
+            )
+
+        self.assertGreaterEqual(naive_stats.potential_n_plus_one_count, 1)
+        self.assertEqual(batched_stats.potential_n_plus_one_count, 0)
+        self.assertGreater(naive_stats.query_count, batched_stats.query_count)

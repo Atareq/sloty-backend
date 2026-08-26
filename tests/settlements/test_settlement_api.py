@@ -4,7 +4,8 @@ from pathlib import Path
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.management import call_command
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
+from django.test.utils import CaptureQueriesContext
 from django.urls import resolve, reverse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -1566,3 +1567,33 @@ class SettlementSeedSchemaTests(SettlementAPITestCase):
             "/api/v1/clubs/{club_slug}/settlements/",
             schema_response.content.decode(),
         )
+
+
+class SettlementQueryScalingTests(SettlementAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("settlement-query-admin")
+        self.club = self.create_club("Settlement Query Club", slug="settlement-query")
+        self.court = self.create_court(self.club, "Settlement Query Court")
+        self.client.force_authenticate(user=self.platform_admin)
+
+    def test_settlement_list_query_count_does_not_grow_with_rows(self):
+        self.create_settlement(self.club, court=self.court)
+
+        with CaptureQueriesContext(connection) as first:
+            first_response = self.client.get(self.settlement_list_url(self.club))
+
+        for index in range(9):
+            self.create_settlement(
+                self.club,
+                court=self.court,
+                notes=f"extra-{index}",
+            )
+
+        with CaptureQueriesContext(connection) as second:
+            second_response = self.client.get(self.settlement_list_url(self.club))
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data["count"], 1)
+        self.assertEqual(second_response.data["count"], 10)
+        self.assertEqual(len(first), len(second))

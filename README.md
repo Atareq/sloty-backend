@@ -4,6 +4,21 @@ Sloty is a Django + Django REST Framework backend for a sports court rental
 management system. The default local settings module is
 `config.settings.local`.
 
+## Documentation source of truth
+
+1. `AGENTS.md` — current engineering architecture and conventions.
+2. Locked contracts under `docs/`, currently
+   `docs/recurring-bookings-contract.txt`.
+3. This README — setup and API/operator guidance.
+4. `docs/business-analysis.txt`, `docs/documentation.txt`, and
+   `docs/sprints.txt` — historical planning context only.
+
+Business calendar rules use `TIME_ZONE=Africa/Cairo` with timezone-aware UTC
+storage (`USE_TZ=True`).
+
+JWT access/refresh lifetimes are set with `JWT_ACCESS_TOKEN_MINUTES` (default
+60) and `JWT_REFRESH_TOKEN_DAYS` (default 7). Token claims are unchanged.
+
 ## Local Setup
 
 Create a local environment file from the safe example values:
@@ -33,16 +48,26 @@ Run the development server:
 python manage.py runserver
 ```
 
-Optional local SQL request summaries can be enabled in `.env`:
+Optional SQL request performance logs can be enabled without `DEBUG`:
 
 ```env
 SQL_QUERY_STATS_ENABLED=true
 SQL_QUERY_STATS_VERBOSE=false
+SQL_QUERY_STATS_WARN_QUERY_COUNT=1
 SQL_QUERY_STATS_SLOW_QUERY_MS=100
+SQL_QUERY_STATS_SLOW_REQUEST_MS=500
+SQL_QUERY_STATS_MAX_QUERY_SAMPLES=5
+SQL_QUERY_STATS_MAX_SQL_LENGTH=500
 ```
 
-When enabled, API requests log one terminal line with method, path, status,
-query count, combined SQL time, and total request time.
+When enabled, every API request logs a `[PERF]` summary with method, path,
+status, query count, combined SQL time (`db=`), and total request time.
+A `[PERF:WARN]` line is added when query count exceeds
+`SQL_QUERY_STATS_WARN_QUERY_COUNT` (default `1`). That warning is an
+observability threshold, not a required query budget. Duplicate SQL+params
+and repeated SQL shapes (possible N+1, logged as `[PERF:N+1?]`) are
+reported separately. Verbose mode may include truncated SQL structure
+and never logs parameter values.
 
 Swagger UI is available at:
 
@@ -113,8 +138,9 @@ Useful filters:
 - `is_active`
 - `search`
 
-Platform admins and club owners can list memberships in the selected club.
-Managers and staff cannot list club users.
+Platform admins and club owners can list all memberships in the selected club.
+Managers can list active MANAGER and STAFF employees. Staff cannot list club
+users.
 
 ## Egypt Locations and Club Address Fields
 
@@ -146,9 +172,6 @@ replaces the weekly schedule and pricing for that court:
   "working_hours": [
     {
       "weekday": 0,
-      "opens_at": "10:00:00",
-      "closes_at": "23:00:00",
-      "is_closed": false,
       "pricing_periods": [
         {
           "starts_at": "10:00:00",
@@ -164,14 +187,15 @@ replaces the weekly schedule and pricing for that court:
     },
     {
       "weekday": 1,
-      "opens_at": null,
-      "closes_at": null,
-      "is_closed": true,
       "pricing_periods": []
     }
   ]
 }
 ```
+
+`opens_at`, `closes_at`, and `is_closed` are not accepted. A weekday with no
+pricing periods is closed. Operating hours come from the child pricing
+periods.
 
 The older `/api/v1/clubs/{club_slug}/court-working-hours/` row-level route is
 kept temporarily for GET compatibility. POST/PATCH writes are rejected with
@@ -388,8 +412,11 @@ Create a weekly recurrence through the normal booking endpoint with
 `recurrence_status=ACTIVE`; no future booking rows are generated.
 
 Future schedule slots blocked only by an active weekly recurrence return
-`slot_status=RECURRING_RESERVED`, `booking=null`, and the active anchor booking
-id. Completing an active recurring booking requires a `continue_recurring`
+`slot_status=RECURRING_RESERVED`, `booking=null`, the active anchor booking
+id, and `recurring_context` (anchor id, customer name/phone, recurrence
+status). Selected slot date/time/`slot_price` describe the future occurrence;
+anchor lifecycle and financial state are not copied onto the virtual slot.
+Completing an active recurring booking requires a `continue_recurring`
 decision; continuation creates next week's booking and records any required
 deposit as a normal booking payment transaction.
 
@@ -509,8 +536,17 @@ Useful booking list filters for dashboard cards:
 
 - `needs_action=true`
 - `overdue=true`
-- `remaining_amount_gt=0&ended=true`
+- `has_remaining_amount=true&status=CONFIRMED&ended=true`
 - `hold_expiring=true`
+
+`has_remaining_amount` is the canonical remaining-amount filter (`true` means
+paid amount is less than `total_price`). Deprecated `remaining_amount_gt`
+still returns CONFIRMED bookings with remaining amount greater than zero when
+the parameter is present.
+
+Completion requires remaining amount already paid.
+`confirm_collect_remaining_cash` is accepted as a deprecated no-op and does
+not create a cash transaction.
 
 ## Reports Endpoints
 
