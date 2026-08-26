@@ -2,11 +2,13 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.utils.translation import gettext_lazy as _
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
 from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log
+from apps.bookings.filters import compute_booking_hold_expires_at
 from apps.bookings.models import Booking
 from apps.bookings.services import (
     FREE_SLOT_STATUS,
@@ -52,6 +54,19 @@ class BookingPaymentSummaryMixin(serializers.Serializer):
         return get_paid_amount_for_booking(obj) >= obj.total_price
 
 
+class BookingHoldExpiresAtMixin(serializers.Serializer):
+    hold_expires_at = serializers.SerializerMethodField()
+
+    @extend_schema_field(serializers.DateTimeField(allow_null=True))
+    def get_hold_expires_at(self, obj):
+        if obj.status != Booking.Status.HOLD:
+            return None
+        annotated_value = getattr(obj, "hold_expires_at", None)
+        if annotated_value is not None:
+            return annotated_value
+        return compute_booking_hold_expires_at(obj)
+
+
 class BookingRecurrenceReadMixin:
     is_recurring = serializers.SerializerMethodField()
     next_recurring_booking_id = serializers.SerializerMethodField()
@@ -66,6 +81,7 @@ class BookingRecurrenceReadMixin:
 
 class BookingListSerializer(
     BookingPaymentSummaryMixin,
+    BookingHoldExpiresAtMixin,
     BookingRecurrenceReadMixin,
     serializers.ModelSerializer,
 ):
@@ -95,6 +111,7 @@ class BookingListSerializer(
             "recurrence_status",
             "previous_recurring_booking_id",
             "next_recurring_booking_id",
+            "hold_expires_at",
             "created_by",
             "created",
         )
@@ -103,6 +120,7 @@ class BookingListSerializer(
 
 class BookingDetailSerializer(
     BookingPaymentSummaryMixin,
+    BookingHoldExpiresAtMixin,
     BookingRecurrenceReadMixin,
     serializers.ModelSerializer,
 ):
@@ -138,6 +156,7 @@ class BookingDetailSerializer(
             "cancelled_at",
             "no_show_at",
             "expired_at",
+            "hold_expires_at",
             "created_by",
             "created",
             "modified",
@@ -253,6 +272,15 @@ class BookingCancelSerializer(serializers.Serializer):
         default="",
         trim_whitespace=True,
     )
+
+
+class BookingRecurrenceNextSerializer(serializers.Serializer):
+    can_continue = serializers.BooleanField()
+    next_start_time = serializers.DateTimeField()
+    next_end_time = serializers.DateTimeField()
+    next_total_price = serializers.CharField()
+    next_required_deposit = serializers.CharField()
+    requires_payment_reference = serializers.BooleanField()
 
 
 class BookingCancellationPreviewResponseSerializer(serializers.Serializer):

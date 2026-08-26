@@ -2,6 +2,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework.mixins import (
     CreateModelMixin,
+    DestroyModelMixin,
     ListModelMixin,
     RetrieveModelMixin,
     UpdateModelMixin,
@@ -25,6 +26,7 @@ from apps.clubs.serializers import (
     ClubUpdateSerializer,
     ClubUserListSerializer,
 )
+from apps.clubs.services import soft_delete_membership
 
 
 def scoped_clubs_for_user(user):
@@ -35,6 +37,7 @@ def scoped_clubs_for_user(user):
     return Club.objects.filter(
         memberships__user=user,
         memberships__is_active=True,
+        memberships__deleted_at__isnull=True,
     ).distinct()
 
 
@@ -95,6 +98,15 @@ class ClubViewSet(
         request=ClubMembershipSerializer,
         responses=ClubMembershipSerializer,
     ),
+    destroy=extend_schema(
+        tags=["Clubs"],
+        responses=None,
+        description=(
+            "Permanently remove a club membership (soft delete). Distinct from "
+            "PATCH is_active=false. Soft-deleted memberships cannot be "
+            "reactivated and are excluded from current membership lists."
+        ),
+    ),
 )
 class ClubMembershipViewSet(
     ClubScopedAccessMixin,
@@ -102,11 +114,12 @@ class ClubMembershipViewSet(
     CreateModelMixin,
     RetrieveModelMixin,
     UpdateModelMixin,
+    DestroyModelMixin,
     GenericViewSet,
 ):
     serializer_class = ClubMembershipSerializer
     permission_classes = (CanManageClubMemberships,)
-    http_method_names = ("get", "post", "patch", "head", "options")
+    http_method_names = ("get", "post", "patch", "delete", "head", "options")
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
@@ -114,7 +127,7 @@ class ClubMembershipViewSet(
         return (
             self.get_access_context()
             .scoped_memberships_queryset()
-            .select_related("club", "court", "user", "created_by")
+            .select_related("club", "court", "user", "created_by", "deleted_by")
             .order_by("id")
         )
 
@@ -125,6 +138,13 @@ class ClubMembershipViewSet(
 
     def perform_create(self, serializer):
         serializer.save()
+
+    def perform_destroy(self, instance):
+        soft_delete_membership(
+            access=self.get_access_context(),
+            membership=instance,
+            actor=self.request.user,
+        )
 
 
 @extend_schema_view(

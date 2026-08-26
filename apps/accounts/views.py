@@ -38,7 +38,7 @@ class MeAPIView(RetrieveAPIView):
             .prefetch_related(
                 Prefetch(
                     "club_memberships",
-                    queryset=ClubMembership.objects.filter(is_active=True)
+                    queryset=ClubMembership.objects.granting_access()
                     .select_related("club", "court")
                     .order_by("club__name", "role", "id"),
                     to_attr="active_memberships_for_me",

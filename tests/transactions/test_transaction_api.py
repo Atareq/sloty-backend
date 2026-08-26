@@ -248,9 +248,19 @@ class TransactionAccessTests(TransactionAPITestCase):
         self.booking = self.create_booking(self.court)
         self.same_club_other_booking = self.create_booking(self.same_club_other_court)
         self.other_booking = self.create_booking(self.other_court)
-        self.transaction_obj = self.create_transaction(self.booking)
+        self.transaction_obj = self.create_transaction(
+            self.booking,
+            created_by=self.staff,
+        )
+        self.same_court_other_collector_transaction = self.create_transaction(
+            self.booking,
+            created_by=self.manager,
+            payment_reference="MGR-SAME-COURT",
+        )
         self.same_club_other_transaction = self.create_transaction(
-            self.same_club_other_booking
+            self.same_club_other_booking,
+            created_by=self.manager,
+            payment_reference="MGR-OTHER-COURT",
         )
         self.other_transaction = self.create_transaction(self.other_booking)
         self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
@@ -280,7 +290,11 @@ class TransactionAccessTests(TransactionAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             self.list_ids(response),
-            {self.transaction_obj.id, self.same_club_other_transaction.id},
+            {
+                self.transaction_obj.id,
+                self.same_court_other_collector_transaction.id,
+                self.same_club_other_transaction.id,
+            },
         )
         self.assertNotIn(self.other_transaction.id, self.list_ids(response))
 
@@ -292,7 +306,11 @@ class TransactionAccessTests(TransactionAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             self.list_ids(response),
-            {self.transaction_obj.id, self.same_club_other_transaction.id},
+            {
+                self.transaction_obj.id,
+                self.same_court_other_collector_transaction.id,
+                self.same_club_other_transaction.id,
+            },
         )
 
     def test_manager_can_list_transactions_in_assigned_club(self):
@@ -303,7 +321,11 @@ class TransactionAccessTests(TransactionAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             self.list_ids(response),
-            {self.transaction_obj.id, self.same_club_other_transaction.id},
+            {
+                self.transaction_obj.id,
+                self.same_court_other_collector_transaction.id,
+                self.same_club_other_transaction.id,
+            },
         )
 
     def test_staff_can_list_transactions_for_assigned_court_only(self):
@@ -314,6 +336,33 @@ class TransactionAccessTests(TransactionAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(self.list_ids(response), {self.transaction_obj.id})
         self.assertNotIn(self.same_club_other_transaction.id, self.list_ids(response))
+        self.assertNotIn(
+            self.same_court_other_collector_transaction.id,
+            self.list_ids(response),
+        )
+
+    def test_staff_cannot_broaden_transaction_list_with_created_by(self):
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"created_by": self.manager.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), set())
+
+    def test_staff_cannot_retrieve_another_collector_on_assigned_court(self):
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(
+            self.transaction_detail_url(
+                self.club,
+                self.same_court_other_collector_transaction,
+            )
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_staff_cannot_retrieve_transaction_for_another_court(self):
         self.client.force_authenticate(user=self.staff)
@@ -1003,14 +1052,21 @@ class TransactionFilterTests(TransactionAPITestCase):
         )
 
     def test_filters_respect_staff_assigned_court_scope(self):
+        staff_transaction = self.create_transaction(
+            self.booking,
+            amount=Decimal("15.00"),
+            created_by=self.staff,
+            payment_reference="STAFF-OWN",
+        )
         self.client.force_authenticate(user=self.staff)
 
         response = self.client.get(
             self.transaction_list_url(self.club),
-            {"date": timezone.localdate(self.transaction_obj.created).isoformat()},
+            {"date": timezone.localdate(staff_transaction.created).isoformat()},
         )
 
-        self.assertEqual(self.list_ids(response), {self.transaction_obj.id})
+        self.assertEqual(self.list_ids(response), {staff_transaction.id})
+        self.assertNotIn(self.transaction_obj.id, self.list_ids(response))
         self.assertNotIn(self.same_club_other_transaction.id, self.list_ids(response))
 
     def test_club_query_param_does_not_control_club_scoped_filtering(self):

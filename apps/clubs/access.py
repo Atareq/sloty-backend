@@ -21,10 +21,10 @@ class ClubAccessContext:
     @cached_property
     def active_memberships(self):
         return list(
-            ClubMembership.objects.filter(
+            ClubMembership.objects.granting_access()
+            .filter(
                 club=self.club,
                 user=self.user,
-                is_active=True,
             )
             .select_related("club", "court", "user")
             .order_by("id")
@@ -91,10 +91,9 @@ class ClubAccessContext:
         return self.active_memberships_for_user(user).exists()
 
     def active_memberships_for_user(self, user):
-        return ClubMembership.objects.filter(
+        return ClubMembership.objects.granting_access().filter(
             club=self.club,
             user=user,
-            is_active=True,
         )
 
     def active_roles_for_user(self, user):
@@ -162,12 +161,25 @@ class ClubAccessContext:
             and self.can_access_court(booking.court)
         )
 
-    def can_access_transaction(self, transaction):
+    @property
+    def is_staff_only(self):
         return (
+            self.is_staff
+            and not self.is_platform_admin
+            and not self.is_owner
+            and not self.is_manager
+        )
+
+    def can_access_transaction(self, transaction):
+        if not (
             transaction is not None
             and transaction.club_id == self.club.id
             and self.can_access_court(transaction.court)
-        )
+        ):
+            return False
+        if self.is_staff_only:
+            return transaction.created_by_id == self.user.id
+        return True
 
     def can_cancel_transaction(self, transaction):
         if not self.can_access_transaction(transaction):
@@ -323,7 +335,10 @@ class ClubAccessContext:
     def scoped_transactions_queryset(self):
         from apps.transactions.models import Transaction
 
-        return Transaction.objects.filter(court__in=self.scoped_courts_queryset())
+        queryset = Transaction.objects.filter(court__in=self.scoped_courts_queryset())
+        if self.is_staff_only:
+            queryset = queryset.filter(created_by=self.user)
+        return queryset
 
     def scoped_settlements_queryset(self):
         from apps.settlements.models import Settlement
@@ -344,13 +359,13 @@ class ClubAccessContext:
         return queryset.none()
 
     def scoped_memberships_queryset(self):
-        queryset = ClubMembership.objects.filter(club=self.club)
+        queryset = ClubMembership.objects.current().filter(club=self.club)
         if self.can_manage_memberships():
             return queryset
         return queryset.none()
 
     def scoped_club_users_queryset(self):
-        queryset = ClubMembership.objects.filter(club=self.club)
+        queryset = ClubMembership.objects.current().filter(club=self.club)
         if self.is_platform_admin or self.is_owner:
             return queryset
         if self.is_manager:

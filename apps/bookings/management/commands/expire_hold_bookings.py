@@ -4,7 +4,12 @@ from apps.bookings.services import expire_due_hold_bookings
 
 
 class Command(BaseCommand):
-    help = "Expire due HOLD bookings using each court's internal hold expiry hours."
+    help = (
+        "Expire due HOLD bookings using each court's internal hold expiry hours. "
+        "This command does not run by itself. Production and staging must "
+        "schedule it (cron or equivalent), typically every 5 minutes, or HOLD "
+        "bookings will not expire automatically."
+    )
 
     def handle(self, *args, **options):
         expired_bookings = expire_due_hold_bookings()

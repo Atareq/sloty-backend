@@ -26,6 +26,10 @@ Status: Implemented as the active recurrence contract.
 9. Completing an ACTIVE recurring booking requires `continue_recurring`.
    `false` ends recurrence; `true` creates next week's booking and records the
    required next deposit as an ordinary booking PAYMENT transaction.
+   `GET /api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/` is the
+   read-only preview of that next occurrence (datetime, current schedule
+   price, required deposit, payment-reference flag). Preview does not mutate;
+   complete revalidates.
 10. Cancelling, no-showing, or expiring an ACTIVE recurring booking sets
     recurrence status to ENDED.
 11. Active recurring bookings cannot be rescheduled. End/cancel as appropriate

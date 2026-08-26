@@ -7,13 +7,14 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.urls import resolve, reverse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
 from apps.audit.models import AuditLog
-from apps.bookings.filters import BookingFilter
+from apps.bookings.filters import BookingFilter, compute_booking_hold_expires_at
 from apps.bookings.models import Booking
 from apps.bookings.views import BookingViewSet
 from apps.clubs.models import Club, ClubMembership
@@ -1484,6 +1485,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         "cancelled_at",
         "no_show_at",
         "expired_at",
+        "hold_expires_at",
         "created_by",
         "created",
         "modified",
@@ -1961,6 +1963,112 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         next_payment = Transaction.objects.get(booking=next_booking)
         self.assertEqual(next_payment.transaction_type, Transaction.Type.PAYMENT)
         self.assertEqual(next_payment.amount, Decimal("50.00"))
+
+    def test_recurrence_next_preview_is_authoritative_and_does_not_mutate(self):
+        self.court.minimum_deposit = Decimal("150.00")
+        self.court.requires_digital_payment_reference = True
+        self.court.save(
+            update_fields=["minimum_deposit", "requires_digital_payment_reference"]
+        )
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+        )
+        self.create_transaction(booking, amount=booking.total_price)
+        booking_count = Booking.objects.count()
+
+        self.client.force_authenticate(user=self.platform_admin)
+        response = self.client.get(
+            self.booking_lifecycle_url(self.club, booking, "recurrence-next")
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["can_continue"])
+        self.assertEqual(
+            parse_datetime(response.data["next_start_time"]),
+            booking.start_time + timedelta(days=7),
+        )
+        self.assertEqual(
+            parse_datetime(response.data["next_end_time"]),
+            booking.end_time + timedelta(days=7),
+        )
+        self.assertEqual(response.data["next_total_price"], "300.00")
+        self.assertEqual(response.data["next_required_deposit"], "150.00")
+        self.assertTrue(response.data["requires_payment_reference"])
+        self.assertEqual(Booking.objects.count(), booking_count)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+        self.assertEqual(booking.recurrence_status, Booking.RecurrenceStatus.ACTIVE)
+
+    def test_recurrence_next_conflict_uses_stable_unavailable_code(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+        )
+        self.create_transaction(booking, amount=booking.total_price)
+        self.create_booking(
+            self.court,
+            customer_phone="+201000000081",
+            start_time=booking.start_time + timedelta(days=7),
+            end_time=booking.end_time + timedelta(days=7),
+            status=Booking.Status.HOLD,
+        )
+
+        self.client.force_authenticate(user=self.platform_admin)
+        response = self.client.get(
+            self.booking_lifecycle_url(self.club, booking, "recurrence-next")
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "NEXT_RECURRING_SLOT_UNAVAILABLE")
+
+    def test_recurrence_next_rejects_non_active_confirmed_recurrence(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            source=Booking.Source.MANUAL,
+        )
+        hold_recurring = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            start_time=self.time_at(18),
+            end_time=self.time_at(19),
+            customer_phone="+201000000082",
+        )
+
+        self.client.force_authenticate(user=self.platform_admin)
+        manual_response = self.client.get(
+            self.booking_lifecycle_url(self.club, booking, "recurrence-next")
+        )
+        hold_response = self.client.get(
+            self.booking_lifecycle_url(self.club, hold_recurring, "recurrence-next")
+        )
+
+        self.assertEqual(manual_response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(manual_response, "BOOKING_RECURRENCE_NOT_ACTIVE")
+        self.assertEqual(hold_response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(hold_response, "RECURRENCE_CANNOT_CONTINUE")
+
+    def test_recurrence_next_respects_staff_court_scope(self):
+        booking = self.create_booking(
+            self.same_club_other_court,
+            status=Booking.Status.CONFIRMED,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+        )
+
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get(
+            self.booking_lifecycle_url(self.club, booking, "recurrence-next")
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_end_recurrence_keeps_booking_status_and_transactions(self):
         booking = self.create_booking(
@@ -2860,6 +2968,154 @@ class BookingFilterTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(self.list_ids(response), {expiring_hold.id})
 
+    def test_search_matches_customer_name_and_phone_variants(self):
+        named = self.create_booking(
+            self.court,
+            customer_name="Ahmed Hassan",
+            customer_phone="+201012345678",
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+        )
+        other = self.create_booking(
+            self.court,
+            customer_name="Mona Ali",
+            customer_phone="+201000000088",
+            start_time=self.time_at(11),
+            end_time=self.time_at(12),
+        )
+        other_club_same_name = self.create_booking(
+            self.other_court,
+            customer_name="Ahmed Hassan",
+            customer_phone="+201012345678",
+        )
+
+        name_response = self.client.get(
+            self.booking_list_url(self.club),
+            {"search": "Ahmed"},
+        )
+        phone_response = self.client.get(
+            self.booking_list_url(self.club),
+            {"search": "01012345678"},
+        )
+        spaced_phone_response = self.client.get(
+            self.booking_list_url(self.club),
+            {"search": "0101 234 5678"},
+        )
+        e164_response = self.client.get(
+            self.booking_list_url(self.club),
+            {"search": "+201012345678", "status": Booking.Status.HOLD},
+        )
+
+        self.assertEqual(self.list_ids(name_response), {named.id})
+        self.assertEqual(self.list_ids(phone_response), {named.id})
+        self.assertEqual(self.list_ids(spaced_phone_response), {named.id})
+        self.assertEqual(self.list_ids(e164_response), {named.id})
+        self.assertNotIn(other.id, self.list_ids(name_response))
+        self.assertNotIn(other_club_same_name.id, self.list_ids(name_response))
+        self.assertNotIn(other_club_same_name.id, self.list_ids(phone_response))
+
+    def test_search_respects_staff_court_scope(self):
+        staff = self.create_user("search-staff")
+        hidden_court = self.create_court(self.club, "Hidden Search Court")
+        visible = self.create_booking(
+            self.court,
+            customer_name="Search Visible",
+            customer_phone="+201011111111",
+            start_time=self.time_at(12),
+            end_time=self.time_at(13),
+        )
+        hidden = self.create_booking(
+            hidden_court,
+            customer_name="Search Visible",
+            customer_phone="+201011111111",
+            start_time=self.time_at(12),
+            end_time=self.time_at(13),
+        )
+        self.create_membership(
+            staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"search": "Search Visible"},
+        )
+
+        self.assertEqual(self.list_ids(response), {visible.id})
+        self.assertNotIn(hidden.id, self.list_ids(response))
+
+    def test_upcoming_includes_in_progress_and_excludes_terminal(self):
+        now = timezone.now()
+        in_progress = self.create_booking(
+            self.court,
+            customer_phone="+201000000071",
+            start_time=now - timedelta(minutes=30),
+            end_time=now + timedelta(minutes=30),
+            status=Booking.Status.CONFIRMED,
+        )
+        future_hold = self.create_booking(
+            self.court,
+            customer_phone="+201000000072",
+            start_time=now + timedelta(hours=2),
+            end_time=now + timedelta(hours=3),
+            status=Booking.Status.HOLD,
+        )
+        ended_confirmed = self.create_booking(
+            self.court,
+            customer_phone="+201000000073",
+            start_time=now - timedelta(hours=3),
+            end_time=now - timedelta(hours=2),
+            status=Booking.Status.CONFIRMED,
+        )
+        completed = self.create_booking(
+            self.court,
+            customer_phone="+201000000074",
+            start_time=now + timedelta(hours=4),
+            end_time=now + timedelta(hours=5),
+            status=Booking.Status.COMPLETED,
+        )
+
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"upcoming": "true"},
+        )
+
+        ids = self.list_ids(response)
+        self.assertEqual(ids, {in_progress.id, future_hold.id})
+        self.assertNotIn(ended_confirmed.id, ids)
+        self.assertNotIn(completed.id, ids)
+        self.assertNotIn(self.other_booking.id, ids)
+
+    def test_hold_expires_at_matches_expiration_rule_and_is_null_when_not_hold(self):
+        hold = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            customer_phone="+201000000075",
+        )
+        confirmed = self.confirmed_booking
+        hold.refresh_from_db()
+
+        list_response = self.client.get(self.booking_list_url(self.club))
+        detail_response = self.client.get(self.booking_detail_url(self.club, hold))
+        confirmed_detail = self.client.get(
+            self.booking_detail_url(self.club, confirmed)
+        )
+
+        hold_row = next(
+            item for item in list_response.data["results"] if item["id"] == hold.id
+        )
+        expected = compute_booking_hold_expires_at(hold)
+        self.assertEqual(hold_row["hold_expires_at"], expected)
+        self.assertEqual(detail_response.data["hold_expires_at"], expected)
+        self.assertIsNone(confirmed_detail.data["hold_expires_at"])
+        confirmed_row = next(
+            item for item in list_response.data["results"] if item["id"] == confirmed.id
+        )
+        self.assertIsNone(confirmed_row["hold_expires_at"])
+
 
 class BookingFilterPatternTests(BookingAPITestCase):
     def test_booking_route_resolves_to_viewset(self):
@@ -2887,6 +3143,16 @@ class BookingFilterPatternTests(BookingAPITestCase):
         self.assertNotIn("ClubAccessContext", filter_source)
         self.assertNotIn("get_access_context", filter_source)
         self.assertNotIn("club_slug", filter_source)
+
+    def test_openapi_documents_new_booking_contract_fields(self):
+        response = self.client.get(reverse("schema"))
+        schema = response.content.decode()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("hold_expires_at", schema)
+        self.assertIn("recurrence-next", schema)
+        self.assertIn("search", schema)
+        self.assertIn("upcoming", schema)
 
 
 class BookingPaymentSummaryTests(BookingAPITestCase):

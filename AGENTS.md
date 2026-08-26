@@ -166,9 +166,21 @@ Current implemented app:
 - `POST /api/v1/clubs/{club_slug}/memberships/` supports club-scoped onboarding:
   nested user data plus membership role/court are persisted together through
   `apps/clubs/services.py`.
+- `PATCH` `is_active` deactivates or reactivates a current membership. This is
+  temporary: the row remains in current membership lists and can be turned
+  back on.
+- `DELETE /api/v1/clubs/{club_slug}/memberships/{id}/` soft-deletes a
+  membership (`deleted_at` / `deleted_by`, `is_active=false`). Soft-deleted
+  rows are excluded from current membership and club-user lists, grant no
+  club access, and cannot be reactivated with PATCH. The `User` account and
+  historical bookings/transactions/settlements/audit rows are preserved.
+  Audit action is `MEMBERSHIP_DELETED`. Owners cannot delete OWNER
+  memberships. The same person may be onboarded again as a new membership
+  row after soft delete.
 - `GET /api/v1/clubs/{club_slug}/users/` is a read-only, club-scoped,
   membership-based users list. Platform admins and owners see all selected-club
-  memberships. Managers can list active MANAGER/STAFF employees read-only.
+  current (non-deleted) memberships, including deactivated rows. Managers can
+  list active MANAGER/STAFF employees read-only.
   Staff cannot list club users.
 - `apps/courts/` contains court setup and court working hours logic.
 - `Court` keeps `default_price` only as legacy migration data. It stores
@@ -178,7 +190,10 @@ Current implemented app:
   payment-reference validation. Automatic hold expiry is implemented through
   `python manage.py expire_hold_bookings` and `expire_due_hold_bookings()`.
   The command filters likely-due HOLD rows in the database, then re-checks
-  expiry under `select_for_update()`. Do not add a Celery scheduler.
+  expiry under `select_for_update()`. Do not add a Celery scheduler. Production
+  and staging must schedule `python manage.py expire_hold_bookings` (cron or
+  equivalent, typically every 5 minutes). The UI may promise automatic HOLD
+  cancel only when that job is actually running.
 - Working-hour pricing uses child pricing periods tied explicitly to
   `CourtWorkingHour`, not one global morning/night price on `Court` and not one
   price field on `CourtWorkingHour`. `Court.default_price` must not be used for
@@ -202,8 +217,17 @@ Current implemented app:
   status, source, or price.
 - Booking list filters currently supported by the API are `court`, `status`,
   `source`, `date`, `date_from`, `date_to`, `needs_action`, `overdue`,
-  `has_remaining_amount`, deprecated `remaining_amount_gt`, `ended`, and
-  `hold_expiring`.
+  `has_remaining_amount`, deprecated `remaining_amount_gt`, `ended`,
+  `hold_expiring`, `search`, and `upcoming`.
+- `search` matches `customer_name` (case-insensitive contains) and
+  `customer_phone`, including practical Egyptian phone variants such as
+  `01012345678`, spaced digits, and `+201012345678`. It runs on the already
+  authorized/scoped queryset and composes with pagination and other filters.
+- `upcoming=true` means `status` in `HOLD`/`CONFIRMED` and `end_time > now`,
+  so an in-progress booking remains upcoming. Terminal statuses are excluded.
+- Booking list/detail expose read-only `hold_expires_at`: for `HOLD` this is
+  `Booking.created + Court.internal_hold_expiry_hours` (the same rule used by
+  `expire_hold_bookings`); for every other status it is `null`.
 - New booking creation and rescheduling must be inside configured court working
   hours and fully covered by pricing periods. No `outside_working_hours` flag is
   stored.
@@ -368,6 +392,10 @@ Rules for the flow:
   user.
 - Club-scoped member onboarding creates a non-platform active `User` plus active
   `ClubMembership` in one `transaction.atomic()` workflow.
+- Club membership has three operational states: active (`is_active=true`,
+  `deleted_at` null), deactivated (`is_active=false`, `deleted_at` null,
+  reactivatable), and soft-deleted (`deleted_at` set, not reactivatable).
+  Access-granting queries use active non-deleted memberships only.
 - `apps/clubs/access.py` contains `ClubAccessContext`, the central source of
   truth for club-scoped access checks and scoped querysets.
 - `apps/clubs/mixins.py` contains `ClubScopedAccessMixin` for club-scoped
@@ -454,7 +482,9 @@ Rules for the flow:
   compatibility; it does not collect cash.
 - Manual `expire` is allowed only from `HOLD`. Automatic due-hold expiry uses
   `python manage.py expire_hold_bookings`, sets `EXPIRED`, records
-  `expired_at`, and audits with actor `None`.
+  `expired_at`, and audits with actor `None`. The command is not a background
+  worker; operations must schedule it. `hold_expires_at` on list/detail uses
+  the same `created + internal_hold_expiry_hours` cutoff.
 - Booking lifecycle traceability fields are `cancellation_reason`,
   `no_show_reason`, `reschedule_reason`, `completed_at`, `cancelled_at`,
   `no_show_at`, and `expired_at`. Do not add payment status or cached remaining
@@ -560,7 +590,10 @@ pricing periods.
 - `TransactionViewSet` must use `ClubScopedAccessMixin`.
 - Transaction serializers must receive `context["club_access"]`.
 - Transaction views should call `access.scoped_transactions_queryset()` for
-  list/detail scoping.
+  list/detail scoping. Staff (not owner/manager/platform admin) see only
+  transactions they collected (`created_by` is the current user) on their
+  assigned court. `?created_by=` cannot broaden that Staff scope. Owner,
+  manager, and platform admin retain club/court-wide transaction lists.
 - Transaction creation should call
   `access.can_create_transaction_for_booking(booking)`.
 - Object-level transaction checks, when needed, should call
@@ -692,6 +725,7 @@ pricing periods.
 - Sprint 10 adds `TRANSACTION_CANCELLED`. A cancel records before/after cancel and
   booking status data plus reason metadata; a CONFIRMED-to-HOLD recalculation
   also records an explicit `BOOKING_UPDATED` audit log.
+- Membership soft delete records `MEMBERSHIP_DELETED`.
 - Audit filters live in `apps/audit/filters.py` and must follow the standard
   FilterSet pattern.
 - Audit logging does not implement reports, dashboards, exports, correction
@@ -807,6 +841,14 @@ Owning app: `apps/bookings/`. Locked contract:
   completes the booking and sets `ENDED`; true atomically creates next week's
   booking, records the next deposit as an ordinary booking `Transaction` when
   required, and marks the completed booking `RENEWED`.
+- `GET /api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/` is the
+  read-only continuation preview for an ACTIVE recurring CONFIRMED booking.
+  It returns `can_continue`, `next_start_time`, `next_end_time`,
+  `next_total_price`, `next_required_deposit`, and
+  `requires_payment_reference` using the same rules as completion. It does
+  not mutate. Completion revalidates. FE must not send next amounts.
+  Stable codes include `BOOKING_RECURRENCE_NOT_ACTIVE`,
+  `RECURRENCE_CANNOT_CONTINUE`, and `NEXT_RECURRING_SLOT_UNAVAILABLE`.
 - Cancelling, no-showing, or expiring an ACTIVE recurring booking sets
   `recurrence_status=ENDED`. Active recurring bookings cannot be rescheduled;
   end/cancel and create a new recurrence instead.
@@ -1376,6 +1418,8 @@ Notes:
   `/api/v1/clubs/{club_slug}/bookings/{id}/no-show/`,
   `/api/v1/clubs/{club_slug}/bookings/{id}/reschedule/`,
   `/api/v1/clubs/{club_slug}/bookings/{id}/expire/`,
+  `/api/v1/clubs/{club_slug}/bookings/{id}/end-recurrence/`,
+  `/api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/`,
   `/api/v1/clubs/{club_slug}/transactions/`,
   `/api/v1/clubs/{club_slug}/transactions/{id}/cancel/`,
   `/api/v1/clubs/{club_slug}/settlements/`,

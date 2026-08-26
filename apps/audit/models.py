@@ -22,6 +22,7 @@ class AuditLog(models.Model):
             "SETTLEMENT_MARKED_SETTLED",
             _("Settlement marked settled"),
         )
+        MEMBERSHIP_DELETED = "MEMBERSHIP_DELETED", _("Membership deleted")
 
     club = models.ForeignKey(
         Club,

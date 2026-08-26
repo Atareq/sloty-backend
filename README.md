@@ -159,6 +159,12 @@ requests.
 
 - `/api/v1/clubs/`
 - `/api/v1/clubs/{club_slug}/memberships/`
+- `DELETE /api/v1/clubs/{club_slug}/memberships/{id}/` soft-deletes a
+  membership. This is permanent removal from the current club membership
+  experience and is distinct from `PATCH {"is_active": false}` (temporary
+  deactivation that can be reversed). Soft-deleted memberships cannot be
+  reactivated, disappear from current membership/user lists, and grant no
+  club access. The user account and historical operational records remain.
 - `/api/v1/clubs/{club_slug}/courts/`
 - `GET /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
 - `PUT /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
@@ -221,6 +227,18 @@ Useful booking list filters:
 - `date`
 - `date_from`
 - `date_to`
+- `needs_action`
+- `overdue`
+- `has_remaining_amount`
+- `ended`
+- `hold_expiring`
+- `search` (customer name or mobile; phone variants such as `01012345678`,
+  spaced digits, and `+201012345678`)
+- `upcoming=true` (`HOLD`/`CONFIRMED` and `end_time > now`, including
+  in-progress bookings)
+
+Booking list and detail include read-only `hold_expires_at`. For `HOLD` it is
+`created + court.internal_hold_expiry_hours`. For other statuses it is `null`.
 
 Booking overlap validation treats `HOLD`, `CONFIRMED`, `COMPLETED`, and
 `NO_SHOW` bookings as blocking historical or active slots. Only `CANCELLED` and
@@ -269,10 +287,16 @@ endpoint:
 {"reason": "Wrong amount entered"}
 ```
 
+Staff transaction lists are collector-scoped ("my collections"): Staff see
+only transactions they recorded (`created_by` is the current user) on their
+assigned court. Query parameters cannot expand that to another collector.
+Owners, managers, and platform admins keep club/court-wide lists.
+
 Platform admins may cancel any eligible transaction in the selected club. Owners,
 managers, and staff may cancel only transactions they created and can access;
-staff remain limited to their assigned court. Already cancelled or settled
-transactions and transactions attached to terminal bookings cannot be cancelled.
+staff remain limited to their assigned court and to their own collections.
+Already cancelled or settled transactions and transactions attached to terminal
+bookings cannot be cancelled.
 
 Cancelled transactions remain visible in list/detail responses and can be selected
 with `?is_cancelled=true` or `?is_cancelled=false`. They do not count toward booking
@@ -291,6 +315,8 @@ integration are not implemented.
 - `POST /api/v1/clubs/{club_slug}/bookings/{id}/no-show/`
 - `POST /api/v1/clubs/{club_slug}/bookings/{id}/reschedule/`
 - `POST /api/v1/clubs/{club_slug}/bookings/{id}/expire/`
+- `POST /api/v1/clubs/{club_slug}/bookings/{id}/end-recurrence/`
+- `GET /api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/`
 
 Allowed transitions are `HOLD -> CANCELLED`, `HOLD -> EXPIRED`,
 `CONFIRMED -> CANCELLED`, `CONFIRMED -> COMPLETED`, and
@@ -332,16 +358,26 @@ paid before completion. If a remaining amount exists, the backend returns 409
 with `BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT`; record the missing payment as a
 normal transaction first, then complete the booking.
 
+For an ACTIVE recurring CONFIRMED booking, call
+`GET /api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/` before
+completion to show the next occurrence datetime, slot price, required deposit,
+and whether a payment reference will be required for digital methods. The
+preview does not write data. Completing with `continue_recurring=true`
+revalidates the same rules. Clients must not send next amounts.
+
 `expire` accepts an empty body and is allowed only for `HOLD` bookings.
 
-To expire due HOLD bookings manually, run:
+To expire due HOLD bookings, run:
 
 ```bash
 python manage.py expire_hold_bookings
 ```
 
-The command uses each court's `internal_hold_expiry_hours`, is idempotent, and
-does not require Celery or a scheduler.
+The command uses each court's `internal_hold_expiry_hours` and is idempotent.
+There is no Celery worker. Production and staging must schedule this command
+(cron or equivalent, typically every 5 minutes) or HOLD bookings will not
+expire automatically. The product UI must not promise automatic cancel unless
+that job is actually running.
 
 ## Sprint 6 Settlement Endpoints
 

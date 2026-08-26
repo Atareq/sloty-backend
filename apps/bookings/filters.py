@@ -16,6 +16,10 @@ from django.utils import timezone
 from apps.bookings.models import Booking
 
 
+def compute_booking_hold_expires_at(booking):
+    return booking.created + timedelta(hours=booking.court.internal_hold_expiry_hours)
+
+
 def annotate_booking_hold_expires_at(queryset):
     hold_expiry_duration = ExpressionWrapper(
         Cast("court__internal_hold_expiry_hours", IntegerField())
@@ -28,6 +32,32 @@ def annotate_booking_hold_expires_at(queryset):
             output_field=DateTimeField(),
         )
     )
+
+
+def customer_search_query(value):
+    query = (value or "").strip()
+    if not query:
+        return Q()
+
+    filters = Q(customer_name__icontains=query)
+    compact = "".join(query.split())
+    variants = {query, compact}
+    digits = "".join(character for character in compact if character.isdigit())
+    if digits:
+        variants.add(digits)
+        if compact.startswith("+"):
+            variants.add(f"+{digits}")
+        if digits.startswith("20"):
+            variants.add(f"+{digits}")
+            if len(digits) > 2:
+                variants.add(f"0{digits[2:]}")
+        if digits.startswith("0") and len(digits) >= 10:
+            variants.add(f"+20{digits[1:]}")
+            variants.add(f"20{digits[1:]}")
+    for variant in variants:
+        if variant:
+            filters |= Q(customer_phone__icontains=variant)
+    return filters
 
 
 def day_bounds(date_value):
@@ -67,6 +97,17 @@ class BookingFilter(django_filters.FilterSet):
     )
     ended = django_filters.BooleanFilter(method="filter_ended")
     hold_expiring = django_filters.BooleanFilter(method="filter_hold_expiring")
+    search = django_filters.CharFilter(
+        method="filter_search",
+        help_text="Search customer_name and customer_phone.",
+    )
+    upcoming = django_filters.BooleanFilter(
+        method="filter_upcoming",
+        help_text=(
+            "true returns HOLD and CONFIRMED bookings whose end_time is still "
+            "in the future, including in-progress bookings."
+        ),
+    )
 
     class Meta:
         model = Booking
@@ -83,6 +124,8 @@ class BookingFilter(django_filters.FilterSet):
             "has_remaining_amount",
             "ended",
             "hold_expiring",
+            "search",
+            "upcoming",
         )
 
     def filter_date(self, queryset, name, value):
@@ -155,3 +198,17 @@ class BookingFilter(django_filters.FilterSet):
         if not value:
             return queryset
         return self.with_hold_expiry(queryset).filter(self.expiring_hold_query())
+
+    def filter_search(self, queryset, name, value):
+        query = customer_search_query(value)
+        if not query:
+            return queryset
+        return queryset.filter(query)
+
+    def filter_upcoming(self, queryset, name, value):
+        if not value:
+            return queryset
+        return queryset.filter(
+            status__in={Booking.Status.HOLD, Booking.Status.CONFIRMED},
+            end_time__gt=timezone.now(),
+        )

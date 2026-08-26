@@ -11,7 +11,7 @@ from rest_framework.mixins import (
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
-from apps.bookings.filters import BookingFilter
+from apps.bookings.filters import BookingFilter, annotate_booking_hold_expires_at
 from apps.bookings.models import Booking
 from apps.bookings.serializers import (
     BookingCancellationPreviewResponseSerializer,
@@ -23,6 +23,7 @@ from apps.bookings.serializers import (
     BookingExpireSerializer,
     BookingListSerializer,
     BookingNoShowSerializer,
+    BookingRecurrenceNextSerializer,
     BookingRescheduleSerializer,
     BookingSlotQuerySerializer,
     BookingSlotsResponseSerializer,
@@ -36,6 +37,7 @@ from apps.bookings.services import (
     expire_booking,
     generate_booking_slots,
     no_show_booking,
+    preview_recurrence_next,
     reschedule_booking,
 )
 from apps.clubs.mixins import ClubScopedAccessMixin
@@ -78,15 +80,17 @@ class BookingViewSet(
             from apps.bookings.models import Booking
 
             return Booking.objects.none()
-        return annotate_booking_paid_amount(
-            self.get_access_context()
-            .scoped_bookings_queryset()
-            .select_related(
-                "club",
-                "court",
-                "created_by",
-                "previous_recurring_booking",
-                "next_recurring_booking",
+        return annotate_booking_hold_expires_at(
+            annotate_booking_paid_amount(
+                self.get_access_context()
+                .scoped_bookings_queryset()
+                .select_related(
+                    "club",
+                    "court",
+                    "created_by",
+                    "previous_recurring_booking",
+                    "next_recurring_booking",
+                )
             )
         ).order_by("start_time", "id")
 
@@ -113,6 +117,8 @@ class BookingViewSet(
             return BookingExpireSerializer
         if self.action == "end_recurrence":
             return BookingEndRecurrenceSerializer
+        if self.action == "recurrence_next":
+            return BookingRecurrenceNextSerializer
         return BookingDetailSerializer
 
     def get_lifecycle_booking(self, access):
@@ -280,3 +286,21 @@ class BookingViewSet(
             reason=data.get("reason", ""),
         )
         return self.lifecycle_response(booking)
+
+    @extend_schema(
+        tags=["Bookings"],
+        request=None,
+        responses=BookingRecurrenceNextSerializer,
+        description=(
+            "Read-only preview of the next weekly occurrence for an ACTIVE "
+            "recurring CONFIRMED booking. Uses the same date, price, deposit, "
+            "and availability rules as complete with continue_recurring=true. "
+            "Does not mutate. Completion revalidates."
+        ),
+    )
+    @action(detail=True, methods=["get"], url_path="recurrence-next")
+    def recurrence_next(self, request, *args, **kwargs):
+        access, booking = self.get_lifecycle_context()
+        data = preview_recurrence_next(access=access, booking=booking)
+        serializer = BookingRecurrenceNextSerializer(data)
+        return Response(serializer.data)

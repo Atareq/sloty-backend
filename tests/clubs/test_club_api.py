@@ -7,6 +7,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
+from apps.audit.models import AuditLog
 from apps.clubs.access import ClubAccessContext
 from apps.clubs.models import Club, ClubMembership
 from apps.clubs.services import create_club_member
@@ -877,6 +878,101 @@ class ClubMembershipAPITests(ClubAPITestCase):
         self.client.force_authenticate(user=self.owner)
         scoped_response = self.client.get(reverse("club-list"))
         self.assertEqual(self.list_ids(scoped_response), set())
+
+    def test_soft_delete_is_distinct_from_deactivate_and_blocks_reactivation(self):
+        owner_membership = self.create_membership(
+            self.owner,
+            self.club,
+            ClubMembership.Role.OWNER,
+        )
+        staff_membership = self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        deactivate_response = self.client.patch(
+            self.membership_detail_url(self.club, staff_membership),
+            {"is_active": False},
+            format="json",
+        )
+        self.assertEqual(deactivate_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(deactivate_response.data["is_deleted"])
+        self.assertIsNone(deactivate_response.data["deleted_at"])
+
+        reactivate_response = self.client.patch(
+            self.membership_detail_url(self.club, staff_membership),
+            {"is_active": True},
+            format="json",
+        )
+        self.assertEqual(reactivate_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(reactivate_response.data["is_active"])
+
+        delete_response = self.client.delete(
+            self.membership_detail_url(self.club, staff_membership)
+        )
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        staff_membership.refresh_from_db()
+        self.assertFalse(staff_membership.is_active)
+        self.assertIsNotNone(staff_membership.deleted_at)
+        self.assertEqual(staff_membership.deleted_by, self.owner)
+        self.assertTrue(User.objects.filter(pk=self.staff.pk).exists())
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action=AuditLog.Action.MEMBERSHIP_DELETED,
+                entity_type="ClubMembership",
+                entity_id=staff_membership.id,
+            ).exists()
+        )
+
+        list_response = self.client.get(self.membership_list_url(self.club))
+        listed_ids = {item["id"] for item in list_response.data["results"]}
+        self.assertIn(owner_membership.id, listed_ids)
+        self.assertNotIn(staff_membership.id, listed_ids)
+
+        retrieve_response = self.client.get(
+            self.membership_detail_url(self.club, staff_membership)
+        )
+        patch_response = self.client.patch(
+            self.membership_detail_url(self.club, staff_membership),
+            {"is_active": True},
+            format="json",
+        )
+        self.assertEqual(retrieve_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(patch_response.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.client.force_authenticate(user=self.staff)
+        scoped_response = self.client.get(reverse("club-list"))
+        self.assertEqual(self.list_ids(scoped_response), set())
+
+        self.authenticate_platform_admin()
+        rehire_response = self.post_membership(
+            self.club,
+            self.staff,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.assertEqual(rehire_response.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(rehire_response.data["id"], staff_membership.id)
+
+    def test_owner_cannot_soft_delete_owner_membership(self):
+        owner_membership = self.create_membership(
+            self.owner,
+            self.club,
+            ClubMembership.Role.OWNER,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.delete(
+            self.membership_detail_url(self.club, owner_membership)
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        owner_membership.refresh_from_db()
+        self.assertIsNone(owner_membership.deleted_at)
+        self.assertTrue(owner_membership.is_active)
 
 
 class ClubUserListAPITests(ClubAPITestCase):

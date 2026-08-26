@@ -3,7 +3,10 @@ from rest_framework.exceptions import PermissionDenied
 
 from apps.accounts.models import User
 from apps.clubs.models import Club, ClubMembership, generate_unique_club_slug
-from apps.clubs.services import create_club_member
+from apps.clubs.services import (
+    MEMBERSHIP_DELETED_CANNOT_REACTIVATE_MESSAGE,
+    create_club_member,
+)
 from apps.common.egypt_locations import (
     get_all_city_choices,
     get_governorate_choices,
@@ -179,8 +182,10 @@ class ClubMembershipUserCreateSerializer(serializers.ModelSerializer):
 
 class ClubMembershipSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    deleted_by = serializers.PrimaryKeyRelatedField(read_only=True)
     club = serializers.PrimaryKeyRelatedField(read_only=True)
     user_summary = ClubMembershipUserSummarySerializer(source="user", read_only=True)
+    is_deleted = serializers.SerializerMethodField()
 
     class Meta:
         model = ClubMembership
@@ -194,12 +199,26 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
             "manager_can_settle_transactions",
             "manager_can_change_pricing",
             "is_active",
+            "is_deleted",
+            "deleted_at",
+            "deleted_by",
             "created_by",
             "created",
             "modified",
         )
-        read_only_fields = ("id", "created_by", "created", "modified")
+        read_only_fields = (
+            "id",
+            "is_deleted",
+            "deleted_at",
+            "deleted_by",
+            "created_by",
+            "created",
+            "modified",
+        )
         validators = []
+
+    def get_is_deleted(self, obj):
+        return obj.deleted_at is not None
 
     def validate(self, attrs):
         access = self.context["club_access"]
@@ -221,6 +240,10 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
         )
 
         if self.instance is not None:
+            if self.instance.deleted_at is not None:
+                raise serializers.ValidationError(
+                    {"is_active": str(MEMBERSHIP_DELETED_CANNOT_REACTIVATE_MESSAGE)}
+                )
             for field_name in ("user", "role", "court"):
                 if field_name in attrs and attrs[field_name] != getattr(
                     self.instance, field_name

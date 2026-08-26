@@ -11,7 +11,10 @@ from rest_framework.exceptions import PermissionDenied
 
 from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log
-from apps.bookings.filters import annotate_booking_hold_expires_at
+from apps.bookings.filters import (
+    annotate_booking_hold_expires_at,
+    compute_booking_hold_expires_at,
+)
 from apps.bookings.models import Booking
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
@@ -71,6 +74,15 @@ BOOKING_RECURRENCE_NOT_ACTIVE_MESSAGE = _("This booking has no active recurrence
 RECURRING_BOOKING_RESCHEDULE_NOT_SUPPORTED_MESSAGE = _(
     "Active recurring bookings cannot be rescheduled."
 )
+RECURRENCE_CANNOT_CONTINUE_MESSAGE = _("This recurrence cannot be continued.")
+NEXT_RECURRING_SLOT_UNAVAILABLE_MESSAGE = _("The next recurring slot is not available.")
+NEXT_OCCURRENCE_PLAN_ERROR_CODES = {
+    "BOOKING_SLOT_UNAVAILABLE",
+    "BOOKING_OUTSIDE_WORKING_HOURS",
+    "BOOKING_PRICE_NOT_CONFIGURED",
+    "BOOKING_MULTIDAY_NOT_SUPPORTED",
+    "BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID",
+}
 
 
 def booking_audit_snapshot(booking):
@@ -1119,6 +1131,86 @@ def ensure_booking_can_be_completed(booking):
     return remaining_amount
 
 
+def plan_next_recurring_occurrence(*, court, booking):
+    if not court.is_active or not court.club.is_active:
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="RECURRENCE_CANNOT_CONTINUE",
+            message=RECURRENCE_CANNOT_CONTINUE_MESSAGE,
+        )
+
+    next_start = booking.start_time + timedelta(days=7)
+    next_end = booking.end_time + timedelta(days=7)
+    try:
+        validate_booking_duration(court, next_start, next_end)
+        next_price = calculate_booking_price(court, next_start, next_end)
+        validate_no_availability_conflict(
+            court,
+            next_start,
+            next_end,
+            exclude_booking=booking,
+        )
+    except serializers.ValidationError as exc:
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="NEXT_RECURRING_SLOT_UNAVAILABLE",
+            message=NEXT_RECURRING_SLOT_UNAVAILABLE_MESSAGE,
+            details={"validation": exc.detail},
+        ) from exc
+    except SlotyAPIException as exc:
+        if exc.api_code in NEXT_OCCURRENCE_PLAN_ERROR_CODES:
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="NEXT_RECURRING_SLOT_UNAVAILABLE",
+                message=NEXT_RECURRING_SLOT_UNAVAILABLE_MESSAGE,
+                details=exc.details,
+            ) from exc
+        raise
+
+    required_deposit = min(court.minimum_deposit, next_price)
+    return {
+        "next_start_time": next_start,
+        "next_end_time": next_end,
+        "next_total_price": next_price,
+        "next_required_deposit": required_deposit,
+        "requires_payment_reference": bool(court.requires_digital_payment_reference),
+    }
+
+
+def preview_recurrence_next(*, access, booking):
+    validate_booking_for_lifecycle_action(access=access, booking=booking)
+    if (
+        booking.source != Booking.Source.RECURRING
+        or booking.recurrence_status != Booking.RecurrenceStatus.ACTIVE
+    ):
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="BOOKING_RECURRENCE_NOT_ACTIVE",
+            message=BOOKING_RECURRENCE_NOT_ACTIVE_MESSAGE,
+        )
+    if booking.status != Booking.Status.CONFIRMED:
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="RECURRENCE_CANNOT_CONTINUE",
+            message=RECURRENCE_CANNOT_CONTINUE_MESSAGE,
+        )
+
+    court = (
+        Court.objects.select_related("club")
+        .prefetch_related("working_hours__pricing_periods")
+        .get(pk=booking.court_id)
+    )
+    plan = plan_next_recurring_occurrence(court=court, booking=booking)
+    return {
+        "can_continue": True,
+        "next_start_time": plan["next_start_time"],
+        "next_end_time": plan["next_end_time"],
+        "next_total_price": f"{plan['next_total_price']:.2f}",
+        "next_required_deposit": f"{plan['next_required_deposit']:.2f}",
+        "requires_payment_reference": plan["requires_payment_reference"],
+    }
+
+
 def complete_booking(
     *,
     access,
@@ -1166,20 +1258,13 @@ def complete_booking(
                 .prefetch_related("working_hours__pricing_periods")
                 .get(pk=locked_booking.court_id)
             )
-            if not locked_court.is_active or not locked_court.club.is_active:
-                raise serializers.ValidationError(
-                    {"court": _("Cannot continue recurrence on an inactive court.")}
-                )
-            next_start = locked_booking.start_time + timedelta(days=7)
-            next_end = locked_booking.end_time + timedelta(days=7)
-            validate_booking_duration(locked_court, next_start, next_end)
-            next_price = calculate_booking_price(locked_court, next_start, next_end)
-            validate_no_availability_conflict(
-                locked_court,
-                next_start,
-                next_end,
-                exclude_booking=locked_booking,
+            next_plan = plan_next_recurring_occurrence(
+                court=locked_court,
+                booking=locked_booking,
             )
+            next_start = next_plan["next_start_time"]
+            next_end = next_plan["next_end_time"]
+            next_price = next_plan["next_total_price"]
             next_booking = Booking.objects.create(
                 club=locked_booking.club,
                 court=locked_court,
@@ -1194,7 +1279,7 @@ def complete_booking(
                 previous_recurring_booking=locked_booking,
                 created_by=actor,
             )
-            required_next_deposit = min(locked_court.minimum_deposit, next_price)
+            required_next_deposit = next_plan["next_required_deposit"]
             if required_next_deposit > 0:
                 if not next_deposit_payment_method:
                     raise serializers.ValidationError(
@@ -1399,10 +1484,7 @@ def expire_locked_due_hold_bookings(*, due_ids, now):
             .order_by("id")
         )
         for locked_booking in locked_bookings:
-            expiry_cutoff = now - timedelta(
-                hours=locked_booking.court.internal_hold_expiry_hours
-            )
-            if locked_booking.created > expiry_cutoff:
+            if compute_booking_hold_expires_at(locked_booking) > now:
                 continue
             expired_bookings.append(
                 expire_locked_booking(
