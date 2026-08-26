@@ -87,7 +87,7 @@ class CanManageClubCourts(BasePermission):
         if request.method in SAFE_METHODS:
             return access.can_access_court(obj)
         if view.action in {"update", "partial_update"}:
-            return access.is_platform_admin or access.is_owner or access.is_manager
+            return access.can_update_court(obj, {})
         return access.can_access_court(obj)
 
 

@@ -1,3 +1,9 @@
+HISTORICAL / PLANNING DOCUMENT
+
+This document may describe an earlier implementation state.
+Do not use it as the current backend source of truth.
+Use AGENTS.md and current locked contract documents.
+
 Phase 3 Started — Senior Team Lead / Sprint Planning
 
 We are now in Phase 3 only.

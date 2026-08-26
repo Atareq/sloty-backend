@@ -316,6 +316,22 @@ class CourtAPITests(CourtAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        court.refresh_from_db()
+        self.assertEqual(court.name, "Manager Non Price Court")
+
+    def test_owner_can_update_court_name(self):
+        court = self.create_court(self.club, "Owner Name Court")
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.patch(
+            self.court_detail_url(self.club, court),
+            {"name": "Owner Updated Court"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        court.refresh_from_db()
+        self.assertEqual(court.name, "Owner Updated Court")
 
     def test_staff_cannot_update_courts(self):
         court = self.create_court(self.club, "Staff Price Court")

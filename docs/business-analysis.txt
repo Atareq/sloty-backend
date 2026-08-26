@@ -1,3 +1,9 @@
+HISTORICAL / PLANNING DOCUMENT
+
+This document may describe an earlier implementation state.
+Do not use it as the current backend source of truth.
+Use AGENTS.md and current locked contract documents.
+
 The goal of Phase 2 was to convert the business idea from Phase 1 into clear operational rules, workflows, roles, permissions, edge cases, and acceptance criteria.
 
 The project is still not in implementation stage.

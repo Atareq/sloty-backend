@@ -1,9 +1,12 @@
+from datetime import timedelta
+
+from django.conf import settings
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
-from rest_framework_simplejwt.tokens import AccessToken
+from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from apps.accounts.models import User
 from apps.accounts.services import find_orphan_business_users
@@ -201,6 +204,37 @@ class JWTAPITests(AccountAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("access", response.data)
         self.assertIn("refresh", response.data)
+
+    def test_token_lifetimes_follow_simple_jwt_settings(self):
+        user = self.create_user(username="lifetime-token-user")
+
+        response = self.obtain_token(user.username)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        access = AccessToken(response.data["access"])
+        refresh = RefreshToken(response.data["refresh"])
+        self.assertAlmostEqual(
+            access["exp"] - access["iat"],
+            settings.SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"].total_seconds(),
+            delta=2,
+        )
+        self.assertAlmostEqual(
+            refresh["exp"] - refresh["iat"],
+            settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds(),
+            delta=2,
+        )
+        self.assertEqual(
+            settings.SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"],
+            timedelta(minutes=settings.JWT_ACCESS_TOKEN_MINUTES),
+        )
+        self.assertEqual(
+            settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"],
+            timedelta(days=settings.JWT_REFRESH_TOKEN_DAYS),
+        )
+        self.assertLess(
+            settings.SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"],
+            settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"],
+        )
 
     def test_invalid_credentials_fail(self):
         user = self.create_user(username="invalid-token-user")

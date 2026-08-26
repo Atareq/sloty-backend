@@ -16,6 +16,20 @@ from django.utils import timezone
 from apps.bookings.models import Booking
 
 
+def annotate_booking_hold_expires_at(queryset):
+    hold_expiry_duration = ExpressionWrapper(
+        Cast("court__internal_hold_expiry_hours", IntegerField())
+        * Value(timedelta(hours=1)),
+        output_field=DurationField(),
+    )
+    return queryset.annotate(
+        hold_expires_at=ExpressionWrapper(
+            F("created") + hold_expiry_duration,
+            output_field=DateTimeField(),
+        )
+    )
+
+
 def day_bounds(date_value):
     start = datetime.combine(date_value, time.min)
     end = datetime.combine(date_value, time.max)
@@ -36,7 +50,20 @@ class BookingFilter(django_filters.FilterSet):
     needs_action = django_filters.BooleanFilter(method="filter_needs_action")
     overdue = django_filters.BooleanFilter(method="filter_overdue")
     remaining_amount_gt = django_filters.NumberFilter(
-        method="filter_remaining_amount_gt"
+        method="filter_remaining_amount_gt",
+        help_text=(
+            "Deprecated. Prefer has_remaining_amount. When present, returns "
+            "CONFIRMED bookings with remaining amount greater than zero. The "
+            "numeric value is ignored except as a presence flag."
+        ),
+    )
+    has_remaining_amount = django_filters.BooleanFilter(
+        method="filter_has_remaining_amount",
+        help_text=(
+            "Canonical remaining-amount filter. true returns bookings whose "
+            "paid amount is less than total_price. false returns fully paid "
+            "bookings."
+        ),
     )
     ended = django_filters.BooleanFilter(method="filter_ended")
     hold_expiring = django_filters.BooleanFilter(method="filter_hold_expiring")
@@ -53,6 +80,7 @@ class BookingFilter(django_filters.FilterSet):
             "needs_action",
             "overdue",
             "remaining_amount_gt",
+            "has_remaining_amount",
             "ended",
             "hold_expiring",
         )
@@ -71,17 +99,7 @@ class BookingFilter(django_filters.FilterSet):
         return queryset.filter(start_time__lt=value)
 
     def with_hold_expiry(self, queryset):
-        hold_expiry_duration = ExpressionWrapper(
-            Cast("court__internal_hold_expiry_hours", IntegerField())
-            * Value(timedelta(hours=1)),
-            output_field=DurationField(),
-        )
-        return queryset.annotate(
-            hold_expires_at=ExpressionWrapper(
-                F("created") + hold_expiry_duration,
-                output_field=DateTimeField(),
-            )
-        )
+        return annotate_booking_hold_expires_at(queryset)
 
     def expiring_hold_query(self):
         now = timezone.now()
@@ -120,6 +138,13 @@ class BookingFilter(django_filters.FilterSet):
             status=Booking.Status.CONFIRMED,
             paid_amount__lt=F("total_price"),
         )
+
+    def filter_has_remaining_amount(self, queryset, name, value):
+        if value is None:
+            return queryset
+        if value:
+            return queryset.filter(paid_amount__lt=F("total_price"))
+        return queryset.filter(paid_amount__gte=F("total_price"))
 
     def filter_ended(self, queryset, name, value):
         if not value:

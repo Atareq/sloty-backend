@@ -1,3 +1,9 @@
+HISTORICAL / PLANNING DOCUMENT
+
+This document may describe an earlier implementation state.
+Do not use it as the current backend source of truth.
+Use AGENTS.md and current locked contract documents.
+
 Phase 1 Final Report
 FROM a project management point of view.
 Sports Courts Rental Management System — Business Direction
