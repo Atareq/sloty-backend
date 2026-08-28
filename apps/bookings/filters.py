@@ -10,14 +10,18 @@ from django.db.models import (
     Q,
     Value,
 )
-from django.db.models.functions import Cast
+from django.db.models.functions import Cast, Least
 from django.utils import timezone
 
 from apps.bookings.models import Booking
+from apps.common.search import customer_phone_search_q
 
 
 def compute_booking_hold_expires_at(booking):
-    return booking.created + timedelta(hours=booking.court.internal_hold_expiry_hours)
+    policy_expires_at = booking.created + timedelta(
+        hours=booking.court.internal_hold_expiry_hours
+    )
+    return min(policy_expires_at, booking.start_time)
 
 
 def annotate_booking_hold_expires_at(queryset):
@@ -26,38 +30,38 @@ def annotate_booking_hold_expires_at(queryset):
         * Value(timedelta(hours=1)),
         output_field=DurationField(),
     )
+    policy_expires_at = ExpressionWrapper(
+        F("created") + hold_expiry_duration,
+        output_field=DateTimeField(),
+    )
     return queryset.annotate(
-        hold_expires_at=ExpressionWrapper(
-            F("created") + hold_expiry_duration,
+        hold_expires_at=Least(
+            policy_expires_at,
+            F("start_time"),
             output_field=DateTimeField(),
         )
     )
 
 
-def customer_search_query(value):
-    query = (value or "").strip()
-    if not query:
-        return Q()
-
-    filters = Q(customer_name__icontains=query)
-    compact = "".join(query.split())
-    variants = {query, compact}
-    digits = "".join(character for character in compact if character.isdigit())
-    if digits:
-        variants.add(digits)
-        if compact.startswith("+"):
-            variants.add(f"+{digits}")
-        if digits.startswith("20"):
-            variants.add(f"+{digits}")
-            if len(digits) > 2:
-                variants.add(f"0{digits[2:]}")
-        if digits.startswith("0") and len(digits) >= 10:
-            variants.add(f"+20{digits[1:]}")
-            variants.add(f"20{digits[1:]}")
-    for variant in variants:
-        if variant:
-            filters |= Q(customer_phone__icontains=variant)
-    return filters
+def booking_needs_action_q(*, now, include_expired=False):
+    warning_end = now + timedelta(minutes=30)
+    query = (
+        Q(status=Booking.Status.HOLD)
+        | Q(status=Booking.Status.CONFIRMED, end_time__lt=now)
+        | Q(
+            status=Booking.Status.CONFIRMED,
+            end_time__lt=now,
+            paid_amount__lt=F("total_price"),
+        )
+        | Q(
+            status=Booking.Status.HOLD,
+            hold_expires_at__gt=now,
+            hold_expires_at__lte=warning_end,
+        )
+    )
+    if include_expired:
+        query |= Q(status=Booking.Status.EXPIRED)
+    return query
 
 
 def day_bounds(date_value):
@@ -99,7 +103,10 @@ class BookingFilter(django_filters.FilterSet):
     hold_expiring = django_filters.BooleanFilter(method="filter_hold_expiring")
     search = django_filters.CharFilter(
         method="filter_search",
-        help_text="Search customer_name and customer_phone.",
+        help_text=(
+            "Search customer_name, customer_phone (including Egyptian phone "
+            "variants), and notes."
+        ),
     )
     upcoming = django_filters.BooleanFilter(
         method="filter_upcoming",
@@ -153,20 +160,21 @@ class BookingFilter(django_filters.FilterSet):
             hold_expires_at__lte=warning_end,
         )
 
+    def _has_explicit_date_context(self):
+        data = self.data or {}
+        return any(
+            data.get(key) not in (None, "") for key in ("date", "date_from", "date_to")
+        )
+
     def filter_needs_action(self, queryset, name, value):
         if not value:
             return queryset
         queryset = self.with_hold_expiry(queryset)
-        now = timezone.now()
         return queryset.filter(
-            Q(status=Booking.Status.HOLD)
-            | Q(status=Booking.Status.CONFIRMED, end_time__lt=now)
-            | Q(
-                status=Booking.Status.CONFIRMED,
-                end_time__lt=now,
-                paid_amount__lt=F("total_price"),
+            booking_needs_action_q(
+                now=timezone.now(),
+                include_expired=self._has_explicit_date_context(),
             )
-            | self.expiring_hold_query()
         ).distinct()
 
     def filter_overdue(self, queryset, name, value):
@@ -200,10 +208,14 @@ class BookingFilter(django_filters.FilterSet):
         return self.with_hold_expiry(queryset).filter(self.expiring_hold_query())
 
     def filter_search(self, queryset, name, value):
-        query = customer_search_query(value)
-        if not query:
+        cleaned = (value or "").strip()
+        if not cleaned:
             return queryset
-        return queryset.filter(query)
+        return queryset.filter(
+            Q(customer_name__icontains=cleaned)
+            | customer_phone_search_q("customer_phone", cleaned)
+            | Q(notes__icontains=cleaned)
+        )
 
     def filter_upcoming(self, queryset, name, value):
         if not value:

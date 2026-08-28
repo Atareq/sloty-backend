@@ -954,8 +954,21 @@ class ClubMembershipAPITests(ClubAPITestCase):
             ClubMembership.Role.STAFF,
             court=self.court,
         )
-        self.assertEqual(rehire_response.status_code, status.HTTP_201_CREATED)
-        self.assertNotEqual(rehire_response.data["id"], staff_membership.id)
+        self.assertEqual(rehire_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(rehire_response, "user")
+        self.assertEqual(
+            rehire_response.data["field_errors"]["user"][0]["code"],
+            "MEMBERSHIP_DELETED_CANNOT_RECREATE",
+        )
+        self.assertFalse(
+            ClubMembership.objects.filter(
+                club=self.club,
+                user=self.staff,
+                role=ClubMembership.Role.STAFF,
+                court=self.court,
+                deleted_at__isnull=True,
+            ).exists()
+        )
 
     def test_owner_cannot_soft_delete_owner_membership(self):
         owner_membership = self.create_membership(

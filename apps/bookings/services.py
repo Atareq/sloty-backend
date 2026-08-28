@@ -724,6 +724,10 @@ def actor_requires_staff_cancel_reason(access):
 
 
 def calculate_cancellation_refund(*, booking, requested_at):
+    # Refund deadline is derived from the current operational start_time.
+    # Reschedule overwrites start_time; preserving previously lost refund
+    # rights requires stored booking state (do not use AuditLog or client
+    # amounts). See APPROVAL REQUIRED — RESCHEDULE REFUND PERSISTENCE.
     if requested_at >= booking.start_time:
         raise SlotyAPIException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1168,12 +1172,14 @@ def plan_next_recurring_occurrence(*, court, booking):
         raise
 
     required_deposit = min(court.minimum_deposit, next_price)
+    requires_digital_payment_reference = bool(court.requires_digital_payment_reference)
     return {
         "next_start_time": next_start,
         "next_end_time": next_end,
         "next_total_price": next_price,
         "next_required_deposit": required_deposit,
-        "requires_payment_reference": bool(court.requires_digital_payment_reference),
+        "requires_digital_payment_reference": requires_digital_payment_reference,
+        "requires_payment_reference": requires_digital_payment_reference,
     }
 
 
@@ -1207,6 +1213,9 @@ def preview_recurrence_next(*, access, booking):
         "next_end_time": plan["next_end_time"],
         "next_total_price": f"{plan['next_total_price']:.2f}",
         "next_required_deposit": f"{plan['next_required_deposit']:.2f}",
+        "requires_digital_payment_reference": plan[
+            "requires_digital_payment_reference"
+        ],
         "requires_payment_reference": plan["requires_payment_reference"],
     }
 

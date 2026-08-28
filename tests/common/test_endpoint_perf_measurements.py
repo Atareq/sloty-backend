@@ -8,9 +8,12 @@ from django.db import connection
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 
 from apps.bookings.models import Booking
+from apps.bookings.services import due_hold_booking_candidate_ids
+from apps.settlements.models import Settlement, SettlementTransaction
 from tests.bookings.test_booking_api import BookingAPITestCase
 
 PERF_RE = re.compile(
@@ -193,6 +196,16 @@ class EndpointPerfMeasurementTests(BookingAPITestCase):
         rows.append(row)
 
         response, row = self._measure(
+            "GET booking search",
+            lambda: self.client.get(
+                self.booking_list_url(self.club),
+                {"search": "Existing"},
+            ),
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rows.append(row)
+
+        response, row = self._measure(
             "GET transactions",
             lambda: self.client.get(
                 reverse(
@@ -205,11 +218,66 @@ class EndpointPerfMeasurementTests(BookingAPITestCase):
         rows.append(row)
 
         response, row = self._measure(
+            "GET transaction search",
+            lambda: self.client.get(
+                reverse(
+                    "club-transaction-list",
+                    kwargs={"club_slug": self.club.slug},
+                ),
+                {"search": "Existing"},
+            ),
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rows.append(row)
+
+        response, row = self._measure(
             "GET settlements",
             lambda: self.client.get(
                 reverse(
                     "club-settlement-list",
                     kwargs={"club_slug": self.club.slug},
+                )
+            ),
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rows.append(row)
+
+        response, row = self._measure(
+            "GET unsettled-summary",
+            lambda: self.client.get(
+                reverse(
+                    "club-settlement-unsettled-summary",
+                    kwargs={"club_slug": self.club.slug},
+                )
+            ),
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rows.append(row)
+
+        settlement = Settlement.objects.create(
+            club=self.club,
+            court=self.court,
+            period_start=self.time_at(8),
+            period_end=self.time_at(14),
+            status=Settlement.Status.SETTLED,
+            total_amount=Decimal("50.00"),
+            transaction_count=1,
+            collected_by=self.platform_admin,
+            created_by=self.platform_admin,
+            settled_by=self.platform_admin,
+        )
+        paid = self.booking.transactions.get()
+        SettlementTransaction.objects.create(
+            settlement=settlement,
+            transaction=paid,
+            amount=paid.amount,
+        )
+        response, row = self._measure(
+            "GET settlement detail",
+            lambda: self.client.get(
+                reverse(
+                    "club-settlement-detail",
+                    kwargs={"club_slug": self.club.slug, "pk": settlement.pk},
                 )
             ),
         )
@@ -244,6 +312,22 @@ class EndpointPerfMeasurementTests(BookingAPITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         rows.append(row)
+
+        with CaptureQueriesContext(connection) as hold_expiry_queries:
+            due_hold_booking_candidate_ids(now=timezone.now())
+        rows.append(
+            {
+                "label": "HOLD expiry candidate query",
+                "status": "-",
+                "queries": len(hold_expiry_queries),
+                "db_ms": 0.0,
+                "total_ms": 0.0,
+                "duplicates": 0,
+                "repeated_shapes": 0,
+                "potential_n_plus_one": 0,
+                "log": f"django_queries={len(hold_expiry_queries)}",
+            }
+        )
 
         if os.environ.get("SLOTY_PRINT_PERF") == "1":
             print(

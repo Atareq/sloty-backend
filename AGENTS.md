@@ -175,8 +175,11 @@ Current implemented app:
   club access, and cannot be reactivated with PATCH. The `User` account and
   historical bookings/transactions/settlements/audit rows are preserved.
   Audit action is `MEMBERSHIP_DELETED`. Owners cannot delete OWNER
-  memberships. The same person may be onboarded again as a new membership
-  row after soft delete.
+  memberships. Recreating the same club + user + role + court identity after
+  soft delete is rejected with `MEMBERSHIP_DELETED_CANNOT_RECREATE`. Whether
+  a deleted user may later be added with a different role or court is
+  unresolved. Implementation uses custom `deleted_at` / `deleted_by` fields,
+  not `SafeDeleteModel`; keep django-safedelete installed.
 - `GET /api/v1/clubs/{club_slug}/users/` is a read-only, club-scoped,
   membership-based users list. Platform admins and owners see all selected-club
   current (non-deleted) memberships, including deactivated rows. Managers can
@@ -189,7 +192,8 @@ Current implemented app:
   Sprint 4 transactions use `requires_digital_payment_reference` for manual
   payment-reference validation. Automatic hold expiry is implemented through
   `python manage.py expire_hold_bookings` and `expire_due_hold_bookings()`.
-  The command filters likely-due HOLD rows in the database, then re-checks
+  The command filters likely-due HOLD rows in the database using
+  `min(created + internal_hold_expiry_hours, start_time)`, then re-checks
   expiry under `select_for_update()`. Do not add a Celery scheduler. Production
   and staging must schedule `python manage.py expire_hold_bookings` (cron or
   equivalent, typically every 5 minutes). The UI may promise automatic HOLD
@@ -219,15 +223,17 @@ Current implemented app:
   `source`, `date`, `date_from`, `date_to`, `needs_action`, `overdue`,
   `has_remaining_amount`, deprecated `remaining_amount_gt`, `ended`,
   `hold_expiring`, `search`, and `upcoming`.
-- `search` matches `customer_name` (case-insensitive contains) and
-  `customer_phone`, including practical Egyptian phone variants such as
-  `01012345678`, spaced digits, and `+201012345678`. It runs on the already
-  authorized/scoped queryset and composes with pagination and other filters.
+- `search` matches `customer_name` (case-insensitive contains),
+  `customer_phone` including practical Egyptian phone variants such as
+  `01012345678`, spaced digits, and `+201012345678`, and `notes`. It runs on
+  the already authorized/scoped queryset and composes with pagination and
+  other filters. Do not add a separate `notes_search` parameter.
 - `upcoming=true` means `status` in `HOLD`/`CONFIRMED` and `end_time > now`,
   so an in-progress booking remains upcoming. Terminal statuses are excluded.
 - Booking list/detail expose read-only `hold_expires_at`: for `HOLD` this is
-  `Booking.created + Court.internal_hold_expiry_hours` (the same rule used by
-  `expire_hold_bookings`); for every other status it is `null`.
+  `min(Booking.created + Court.internal_hold_expiry_hours, Booking.start_time)`
+  (the same rule used by `expire_hold_bookings`); for every other status it is
+  `null`.
 - New booking creation and rescheduling must be inside configured court working
   hours and fully covered by pricing periods. No `outside_working_hours` flag is
   stored.
@@ -396,6 +402,9 @@ Rules for the flow:
   `deleted_at` null), deactivated (`is_active=false`, `deleted_at` null,
   reactivatable), and soft-deleted (`deleted_at` set, not reactivatable).
   Access-granting queries use active non-deleted memberships only.
+  Recreating the same club + user + role + court after soft delete is rejected
+  with `MEMBERSHIP_DELETED_CANNOT_RECREATE`. Soft delete uses custom
+  `deleted_at` / `deleted_by` fields rather than `SafeDeleteModel`.
 - `apps/clubs/access.py` contains `ClubAccessContext`, the central source of
   truth for club-scoped access checks and scoped querysets.
 - `apps/clubs/mixins.py` contains `ClubScopedAccessMixin` for club-scoped
@@ -473,7 +482,11 @@ Rules for the flow:
   the current booking.
 - Rescheduling keeps existing transactions attached to the same booking. If the
   recalculated price is higher, update `total_price`; if it is lower or equal,
-  keep the existing `total_price`.
+  keep the existing `total_price`. Cancellation refund still uses the current
+  `start_time` after reschedule. Restoring previously lost refund rights is a
+  known loophole; do not add refund-floor / original-start fields, do not use
+  AuditLog as financial state, and do not accept previous refund amounts from
+  the client until `APPROVAL REQUIRED — RESCHEDULE REFUND PERSISTENCE`.
 - `complete` is allowed only from `CONFIRMED`. If a dynamic remaining amount
   exists, completion is rejected with
   `BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT` and 409 Conflict. The backend must
@@ -484,7 +497,7 @@ Rules for the flow:
   `python manage.py expire_hold_bookings`, sets `EXPIRED`, records
   `expired_at`, and audits with actor `None`. The command is not a background
   worker; operations must schedule it. `hold_expires_at` on list/detail uses
-  the same `created + internal_hold_expiry_hours` cutoff.
+  the same `min(created + internal_hold_expiry_hours, start_time)` rule.
 - Booking lifecycle traceability fields are `cancellation_reason`,
   `no_show_reason`, `reschedule_reason`, `completed_at`, `cancelled_at`,
   `no_show_at`, and `expired_at`. Do not add payment status or cached remaining
@@ -622,6 +635,23 @@ pricing periods.
 - Cancelled transactions remain visible and may be filtered with `is_cancelled`, but
   only non-cancelled transactions count toward settlements, calendar summaries,
   and dashboard revenue.
+- Transaction list filters currently supported by the API are `booking`,
+  `court`, `payment_method`, `transaction_type`, `date`, `date_from`,
+  `date_to`, `created_by`, `is_cancelled`, `settlement_status`, `settlement`,
+  `search`, and `ordering`.
+- `search` matches `booking.customer_name` (case-insensitive contains),
+  `booking.customer_phone` using the shared Egyptian phone-variant helper
+  also used by booking search, and `payment_reference` (case-insensitive
+  contains, so `8821` matches `IPN-882192`).
+- `settlement` filters `settlement_line__settlement_id` on the already
+  scoped transaction queryset. It cannot leak another club or expand Staff
+  self-only collections.
+- `ordering=-created` (default) is newest first with `-created, -id`.
+  `ordering=created` is oldest first with `created, id`. Arbitrary field
+  ordering is not allowed.
+- Transaction list/detail include `booking_customer_name`,
+  `booking_customer_phone`, `booking_start_time`, and `booking_end_time` from
+  the related booking. The queryset already `select_related("booking")`.
 - Transaction list date filters use `Transaction.created` as the date authority.
   Date-only `date_from`/`date_to` values mean complete local calendar days with
   an exclusive next-day upper bound.
@@ -652,6 +682,26 @@ pricing periods.
   their own unsettled transactions, and omitted `collected_by` defaults to
   `request.user`. Preview must not create `Settlement`,
   `SettlementTransaction`, audit rows, locks, or transaction state changes.
+- `GET .../settlements/unsettled-summary/` is the management all-collector
+  read model of current unsettled custody. Candidate semantics match preview:
+  selected club, `is_cancelled=false`, no settlement line, collector=
+  `Transaction.created_by`, existing court/access rules. `period_start` is
+  the earliest unsettled transaction for that collector; `period_end` is
+  request time. Platform admins and owners see eligible selected-club
+  collectors. Managers need `manager_can_settle_transactions=True`, cannot
+  see OWNER money, and have `can_approve=false` for their own row. Staff and
+  managers without the flag cannot use this endpoint. Optional `collected_by`
+  and `court` follow preview access validation. This is grouped ORM
+  aggregation, not one preview per employee. POST create and GET list remain
+  the mutation and history APIs; do not add a second receive/history route.
+- Settlement list/detail include `court_name` (`Court.name` or `null` when
+  `court` is null) and `settled_by_name` using the same display-name rule as
+  `collected_by_name` (full name if present, otherwise username). Settlement
+  lines, preview transactions, and transaction list/detail include
+  `booking_customer_name`, `booking_customer_phone`, `booking_start_time`,
+  and `booking_end_time`. Preview `court_name` still uses `""` when court is
+  omitted. Do not add `created_by_name` unless a current UI contract requires
+  it.
 - Platform admins and owners can preview active users in the selected club and
   can create, list, retrieve, and mark settlements as settled.
 - Managers can create/list/retrieve/mark settlements only when their own
@@ -841,11 +891,14 @@ Owning app: `apps/bookings/`. Locked contract:
   completes the booking and sets `ENDED`; true atomically creates next week's
   booking, records the next deposit as an ordinary booking `Transaction` when
   required, and marks the completed booking `RENEWED`.
-- `GET /api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/` is the
+-   `GET /api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/` is the
   read-only continuation preview for an ACTIVE recurring CONFIRMED booking.
   It returns `can_continue`, `next_start_time`, `next_end_time`,
   `next_total_price`, `next_required_deposit`, and
-  `requires_payment_reference` using the same rules as completion. It does
+  `requires_digital_payment_reference` using the same rules as completion.
+  `requires_payment_reference` is a deprecated alias of that field. It means
+  the court flag `Court.requires_digital_payment_reference`: a reference is
+  required only for DIGITAL_WALLET / BANK_TRANSFER, not CASH. It does
   not mutate. Completion revalidates. FE must not send next amounts.
   Stable codes include `BOOKING_RECURRENCE_NOT_ACTIVE`,
   `RECURRENCE_CANNOT_CONTINUE`, and `NEXT_RECURRING_SLOT_UNAVAILABLE`.
@@ -950,15 +1003,21 @@ It should include:
 2. CONFIRMED bookings whose end_time has passed and are not completed.
 3. CONFIRMED bookings whose end_time has passed and still have remaining_amount > 0.
 4. HOLD bookings close to expiry.
+5. EXPIRED bookings only when the request already has explicit date context
+   (`date`, `date_from`, or `date_to`) or the dashboard period already
+   scopes bookings. Do not invent a 7/14/30-day recency window.
 ```
 
 It should not include:
 
 ```text
 COMPLETED bookings with remaining_amount > 0
+all historical EXPIRED rows on an unscoped needs_action=true list
 ```
 
-because that is a data integrity warning.
+Unscoped `needs_action=true` therefore still excludes EXPIRED. Including
+EXPIRED without date context requires
+`NEEDS BUSINESS DECISION — EXPIRED RECENCY WINDOW`.
 
 ### Hold expiry logic
 
@@ -970,10 +1029,17 @@ Do not hardcode the hold expiry duration.
 Recommended logic:
 
 ```text
-hold_expires_at = booking.created + internal_hold_expiry_hours
+effective_hold_expires_at = min(
+    booking.created + court.internal_hold_expiry_hours,
+    booking.start_time
+)
 ```
 
-or use a stored concrete expiry datetime if the booking model already has one.
+`compute_booking_hold_expires_at()` and `annotate_booking_hold_expires_at()`
+are the single authority. Dashboard hold-expiring counts, booking
+`hold_expiring`, list/detail `hold_expires_at`, and `expire_hold_bookings`
+must use that rule. A HOLD whose start time has arrived is due even if the
+policy hours have not elapsed.
 
 `hold_expiring=true` should mean:
 
@@ -997,9 +1063,11 @@ Examples:
 ```text
 transactions?settlement_status=unsettled
 bookings?needs_action=true
+bookings?needs_action=true&date_from=...&date_to=...
 bookings?overdue=true
 bookings?has_remaining_amount=true&status=CONFIRMED&ended=true
 bookings?hold_expiring=true
+settlements/unsettled-summary/
 settlements/preview?collected_by=<user_id>
 ```
 
@@ -1026,6 +1094,11 @@ filtered lists.
   SQL parameters, request bodies, or Authorization headers. Verbose
   mode may include truncated SQL structure only.
 - Egypt location constants live in `apps/common/egypt_locations.py`.
+- Shared customer phone-variant search helpers live in `apps/common/search.py`
+  (`phone_search_variants`, `customer_phone_search_q`). Each FilterSet builds
+  its own Q: bookings search `customer_name`, `customer_phone`, and `notes`;
+  transactions search `booking__customer_name`, `booking__customer_phone`,
+  and `payment_reference`.
 - `get_governorate_choices()`, `get_all_city_choices()`,
   `get_city_choices(governorate_code)`, and validation helpers are the source
   of truth for controlled governorate and city/center codes.
@@ -1398,12 +1471,18 @@ Notes:
 - `SECRET_KEY` must be provided through the environment or local `.env`.
 - JWT access and refresh lifetimes are environment-driven through
   `JWT_ACCESS_TOKEN_MINUTES` (default 60) and `JWT_REFRESH_TOKEN_DAYS`
-  (default 7). Custom JWT claims are unchanged.
+  (default 7). Custom JWT claims are unchanged. A 12-hour working shift is
+  supported when the frontend silently refreshes; production must not set
+  `JWT_REFRESH_TOKEN_DAYS` to an incompatible short value. Do not change
+  refresh lifetime to exactly 12 hours.
 - Business calendar rules use Django `TIME_ZONE = "Africa/Cairo"` with
   `USE_TZ = True`. Datetimes remain timezone-aware UTC in the database.
 - SQLite is the default local database. Set `DB_ENGINE=postgresql` plus the
   `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_PORT` variables when
   using PostgreSQL.
+- PostgreSQL concurrency tests live in `tests/test_postgresql_concurrency.py`
+  and skip on SQLite. Run them with:
+  `DB_ENGINE=postgresql pytest tests/test_postgresql_concurrency.py`
 - If settings are changed, verify the configured local apps match real package
   paths under `apps/`.
 - Club-scoped API routes currently include:
@@ -1423,7 +1502,8 @@ Notes:
   `/api/v1/clubs/{club_slug}/transactions/`,
   `/api/v1/clubs/{club_slug}/transactions/{id}/cancel/`,
   `/api/v1/clubs/{club_slug}/settlements/`,
-  `/api/v1/clubs/{club_slug}/settlements/preview/`, and
+  `/api/v1/clubs/{club_slug}/settlements/preview/`,
+  `/api/v1/clubs/{club_slug}/settlements/unsettled-summary/`, and
   `/api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`,
   `/api/v1/clubs/{club_slug}/audit-logs/`, and
   `/api/v1/clubs/{club_slug}/audit-logs/{id}/`.

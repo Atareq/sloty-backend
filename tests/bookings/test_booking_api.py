@@ -1,6 +1,8 @@
+import unittest
 from datetime import date, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from django.core.management import call_command
 from django.db import connection
@@ -14,7 +16,11 @@ from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
 from apps.audit.models import AuditLog
-from apps.bookings.filters import BookingFilter, compute_booking_hold_expires_at
+from apps.bookings.filters import (
+    BookingFilter,
+    annotate_booking_hold_expires_at,
+    compute_booking_hold_expires_at,
+)
 from apps.bookings.models import Booking
 from apps.bookings.views import BookingViewSet
 from apps.clubs.models import Club, ClubMembership
@@ -1543,9 +1549,37 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             end_time=self.future_time_at(1, 21),
         )
 
-        response = self.post_lifecycle(self.club, booking, "cancel", None)
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "cancel",
+            None,
+        )
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_cancel_after_start_returns_time_passed_even_if_hold_expiry_is_due(self):
+        now = timezone.now()
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            start_time=now - timedelta(minutes=10),
+            end_time=now + timedelta(minutes=50),
+        )
+        Booking.objects.filter(pk=booking.pk).update(created=now - timedelta(hours=2))
+
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "cancel",
+            self.platform_admin,
+            {"reason": "Customer cancelled late"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_CANCELLATION_TIME_PASSED")
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.HOLD)
 
     def test_platform_admin_can_cancel_hold(self):
         booking = self.create_booking(
@@ -1996,6 +2030,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         )
         self.assertEqual(response.data["next_total_price"], "300.00")
         self.assertEqual(response.data["next_required_deposit"], "150.00")
+        self.assertTrue(response.data["requires_digital_payment_reference"])
         self.assertTrue(response.data["requires_payment_reference"])
         self.assertEqual(Booking.objects.count(), booking_count)
         booking.refresh_from_db()
@@ -2516,13 +2551,23 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
         booking.refresh_from_db()
         return booking
 
+    def future_slot(self, *, hours_from_now=8, duration_hours=1):
+        start_time = timezone.now() + timedelta(hours=hours_from_now)
+        end_time = start_time + timedelta(hours=duration_hours)
+        return start_time, end_time
+
     def test_expire_hold_bookings_expires_due_holds_only_and_is_idempotent(self):
+        due_start, due_end = self.future_slot(hours_from_now=8)
+        not_due_start, not_due_end = self.future_slot(hours_from_now=9)
+        confirmed_start, confirmed_end = self.future_slot(hours_from_now=10)
+        terminal_start, terminal_end = self.future_slot(hours_from_now=11)
+        recurring_start, recurring_end = self.future_slot(hours_from_now=12)
         due_hold = self.age_booking(
             self.create_booking(
                 self.court,
                 status=Booking.Status.HOLD,
-                start_time=self.time_at(8),
-                end_time=self.time_at(9),
+                start_time=due_start,
+                end_time=due_end,
                 customer_phone="+201000001001",
             ),
             hours=13,
@@ -2531,8 +2576,8 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             self.create_booking(
                 self.court,
                 status=Booking.Status.HOLD,
-                start_time=self.time_at(9),
-                end_time=self.time_at(10),
+                start_time=not_due_start,
+                end_time=not_due_end,
                 customer_phone="+201000001002",
             ),
             hours=2,
@@ -2541,8 +2586,8 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             self.create_booking(
                 self.court,
                 status=Booking.Status.CONFIRMED,
-                start_time=self.time_at(10),
-                end_time=self.time_at(11),
+                start_time=confirmed_start,
+                end_time=confirmed_end,
                 customer_phone="+201000001003",
             ),
             hours=13,
@@ -2551,8 +2596,8 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             self.create_booking(
                 self.court,
                 status=Booking.Status.CANCELLED,
-                start_time=self.time_at(11),
-                end_time=self.time_at(12),
+                start_time=terminal_start,
+                end_time=terminal_end,
                 customer_phone="+201000001004",
             ),
             hours=13,
@@ -2563,8 +2608,8 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
                 status=Booking.Status.HOLD,
                 source=Booking.Source.RECURRING,
                 recurrence_status=Booking.RecurrenceStatus.ACTIVE,
-                start_time=self.time_at(12),
-                end_time=self.time_at(13),
+                start_time=recurring_start,
+                end_time=recurring_end,
                 customer_phone="+201000001005",
             ),
             hours=13,
@@ -2608,12 +2653,14 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             "Long Expiry Court",
             internal_hold_expiry_hours=48,
         )
+        due_start, due_end = self.future_slot(hours_from_now=8)
+        long_start, long_end = self.future_slot(hours_from_now=9)
         due_short = self.age_booking(
             self.create_booking(
                 self.court,
                 status=Booking.Status.HOLD,
-                start_time=self.time_at(14),
-                end_time=self.time_at(15),
+                start_time=due_start,
+                end_time=due_end,
                 customer_phone="+201000001011",
             ),
             hours=13,
@@ -2622,8 +2669,8 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             self.create_booking(
                 long_court,
                 status=Booking.Status.HOLD,
-                start_time=self.time_at(15),
-                end_time=self.time_at(16),
+                start_time=long_start,
+                end_time=long_end,
                 customer_phone="+201000001012",
             ),
             hours=13,
@@ -2637,12 +2684,14 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
     def test_due_hold_candidate_query_does_not_materialize_non_due_holds(self):
         from apps.bookings.services import due_hold_booking_candidate_ids
 
+        due_start, due_end = self.future_slot(hours_from_now=8)
+        not_due_start, not_due_end = self.future_slot(hours_from_now=10)
         due_hold = self.age_booking(
             self.create_booking(
                 self.court,
                 status=Booking.Status.HOLD,
-                start_time=self.time_at(8),
-                end_time=self.time_at(9),
+                start_time=due_start,
+                end_time=due_end,
                 customer_phone="+201000001021",
             ),
             hours=13,
@@ -2652,8 +2701,8 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
                 self.create_booking(
                     self.court,
                     status=Booking.Status.HOLD,
-                    start_time=self.time_at(10),
-                    end_time=self.time_at(11),
+                    start_time=not_due_start,
+                    end_time=not_due_end,
                     customer_phone=f"+2010000011{index:02d}",
                 ),
                 hours=1,
@@ -2669,12 +2718,13 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             expire_locked_due_hold_bookings,
         )
 
+        start_time, end_time = self.future_slot(hours_from_now=8)
         booking = self.age_booking(
             self.create_booking(
                 self.court,
                 status=Booking.Status.HOLD,
-                start_time=self.time_at(8),
-                end_time=self.time_at(9),
+                start_time=start_time,
+                end_time=end_time,
                 customer_phone="+201000001031",
             ),
             hours=13,
@@ -2691,6 +2741,135 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
         booking.refresh_from_db()
         self.assertEqual(expired, [])
         self.assertEqual(booking.status, Booking.Status.HOLD)
+
+    def annotated_hold_expires_at(self, booking):
+        return (
+            annotate_booking_hold_expires_at(
+                Booking.objects.filter(pk=booking.pk).select_related("court")
+            )
+            .values_list("hold_expires_at", flat=True)
+            .get()
+        )
+
+    def test_policy_expiry_earlier_than_start_is_effective_deadline(self):
+        self.court.internal_hold_expiry_hours = 2
+        self.court.save(update_fields=["internal_hold_expiry_hours"])
+        created = timezone.datetime(
+            2026, 9, 4, 10, 0, tzinfo=timezone.get_current_timezone()
+        )
+        start_time = timezone.datetime(
+            2026, 9, 4, 15, 0, tzinfo=timezone.get_current_timezone()
+        )
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            start_time=start_time,
+            end_time=start_time + timedelta(hours=1),
+            customer_phone="+201000001041",
+        )
+        Booking.objects.filter(pk=booking.pk).update(created=created)
+        booking.refresh_from_db()
+
+        expected = created + timedelta(hours=2)
+        self.assertEqual(compute_booking_hold_expires_at(booking), expected)
+        self.assertEqual(self.annotated_hold_expires_at(booking), expected)
+
+    def test_start_time_earlier_than_policy_expiry_is_effective_deadline(self):
+        self.court.internal_hold_expiry_hours = 12
+        self.court.save(update_fields=["internal_hold_expiry_hours"])
+        created = timezone.datetime(
+            2026, 9, 4, 19, 30, tzinfo=timezone.get_current_timezone()
+        )
+        start_time = timezone.datetime(
+            2026, 9, 4, 20, 0, tzinfo=timezone.get_current_timezone()
+        )
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            start_time=start_time,
+            end_time=start_time + timedelta(hours=1),
+            customer_phone="+201000001042",
+        )
+        Booking.objects.filter(pk=booking.pk).update(created=created)
+        booking.refresh_from_db()
+
+        self.assertEqual(compute_booking_hold_expires_at(booking), start_time)
+        self.assertEqual(self.annotated_hold_expires_at(booking), start_time)
+
+    def test_hold_is_due_exactly_at_start_time(self):
+        from apps.bookings.services import due_hold_booking_candidate_ids
+
+        now = timezone.now()
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            start_time=now,
+            end_time=now + timedelta(hours=1),
+            customer_phone="+201000001043",
+        )
+        Booking.objects.filter(pk=booking.pk).update(created=now - timedelta(hours=1))
+
+        due_ids = due_hold_booking_candidate_ids(now=now)
+        self.assertIn(booking.id, due_ids)
+
+    def test_past_start_hold_is_automatic_expiry_candidate(self):
+        from apps.bookings.services import due_hold_booking_candidate_ids
+
+        now = timezone.now()
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            start_time=now - timedelta(minutes=15),
+            end_time=now + timedelta(minutes=45),
+            customer_phone="+201000001044",
+        )
+        Booking.objects.filter(pk=booking.pk).update(
+            created=now - timedelta(minutes=30)
+        )
+
+        due_ids = due_hold_booking_candidate_ids(now=now)
+        self.assertIn(booking.id, due_ids)
+
+    def test_python_and_orm_deadlines_match_across_court_expiry_hours(self):
+        other_court = self.create_court(
+            self.club,
+            "Other Hours Court",
+            internal_hold_expiry_hours=48,
+        )
+        created = timezone.now() - timedelta(hours=3)
+        start_time = timezone.now() + timedelta(hours=10)
+        short_booking = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            start_time=start_time,
+            end_time=start_time + timedelta(hours=1),
+            customer_phone="+201000001045",
+        )
+        long_booking = self.create_booking(
+            other_court,
+            status=Booking.Status.HOLD,
+            start_time=start_time,
+            end_time=start_time + timedelta(hours=1),
+            customer_phone="+201000001046",
+        )
+        Booking.objects.filter(pk__in=[short_booking.pk, long_booking.pk]).update(
+            created=created
+        )
+        short_booking.refresh_from_db()
+        long_booking.refresh_from_db()
+
+        self.assertEqual(
+            compute_booking_hold_expires_at(short_booking),
+            self.annotated_hold_expires_at(short_booking),
+        )
+        self.assertEqual(
+            compute_booking_hold_expires_at(long_booking),
+            self.annotated_hold_expires_at(long_booking),
+        )
+        self.assertNotEqual(
+            compute_booking_hold_expires_at(short_booking),
+            compute_booking_hold_expires_at(long_booking),
+        )
 
 
 class BookingFilterTests(BookingAPITestCase):
@@ -2870,6 +3049,53 @@ class BookingFilterTests(BookingAPITestCase):
         self.assertIn(self.confirmed_booking.id, self.list_ids(response))
         self.assertNotIn(completed_with_remaining.id, self.list_ids(response))
 
+    def test_needs_action_includes_expired_only_with_explicit_date_context(self):
+        contextual_expired = self.create_booking(
+            self.court,
+            customer_phone="+201000000091",
+            start_time=self.time_at(18),
+            end_time=self.time_at(19),
+            status=Booking.Status.EXPIRED,
+        )
+        historical_expired = self.create_booking(
+            self.court,
+            customer_phone="+201000000092",
+            start_time=timezone.datetime(
+                2026,
+                4,
+                15,
+                18,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+            end_time=timezone.datetime(
+                2026,
+                4,
+                15,
+                19,
+                0,
+                tzinfo=timezone.get_current_timezone(),
+            ),
+            status=Booking.Status.EXPIRED,
+        )
+
+        unscoped = self.client.get(
+            self.booking_list_url(self.club),
+            {"needs_action": "true"},
+        )
+        dated = self.client.get(
+            self.booking_list_url(self.club),
+            {"needs_action": "true", "date": "2026-05-20"},
+        )
+
+        self.assertEqual(unscoped.status_code, status.HTTP_200_OK)
+        self.assertEqual(dated.status_code, status.HTTP_200_OK)
+        self.assertIn(self.booking.id, self.list_ids(unscoped))
+        self.assertNotIn(contextual_expired.id, self.list_ids(unscoped))
+        self.assertNotIn(historical_expired.id, self.list_ids(unscoped))
+        self.assertIn(contextual_expired.id, self.list_ids(dated))
+        self.assertNotIn(historical_expired.id, self.list_ids(dated))
+
     def test_overdue_filter_returns_ended_bookings(self):
         response = self.client.get(
             self.booking_list_url(self.club),
@@ -3014,6 +3240,33 @@ class BookingFilterTests(BookingAPITestCase):
         self.assertNotIn(other_club_same_name.id, self.list_ids(name_response))
         self.assertNotIn(other_club_same_name.id, self.list_ids(phone_response))
 
+    def test_search_matches_notes(self):
+        tournament = self.create_booking(
+            self.court,
+            customer_name="Notes Hidden",
+            customer_phone="+201000000093",
+            start_time=self.time_at(13),
+            end_time=self.time_at(14),
+            notes="بطولة الشركة",
+        )
+        other = self.create_booking(
+            self.court,
+            customer_name="Notes Other",
+            customer_phone="+201000000094",
+            start_time=self.time_at(14),
+            end_time=self.time_at(15),
+            notes="training session",
+        )
+
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"search": "بطولة"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), {tournament.id})
+        self.assertNotIn(other.id, self.list_ids(response))
+
     def test_search_respects_staff_court_scope(self):
         staff = self.create_user("search-staff")
         hidden_court = self.create_court(self.club, "Hidden Search Court")
@@ -3153,6 +3406,7 @@ class BookingFilterPatternTests(BookingAPITestCase):
         self.assertIn("recurrence-next", schema)
         self.assertIn("search", schema)
         self.assertIn("upcoming", schema)
+        self.assertIn("requires_digital_payment_reference", schema)
 
 
 class BookingPaymentSummaryTests(BookingAPITestCase):
@@ -3418,3 +3672,182 @@ class BookingQueryScalingTests(BookingAPITestCase):
         self.assertGreaterEqual(naive_stats.potential_n_plus_one_count, 1)
         self.assertEqual(batched_stats.potential_n_plus_one_count, 0)
         self.assertGreater(naive_stats.query_count, batched_stats.query_count)
+
+
+@unittest.skip(
+    "APPROVAL REQUIRED — RESCHEDULE REFUND PERSISTENCE: "
+    "lost refund rights cannot be preserved after start_time is overwritten "
+    "without stored booking state."
+)
+class BookingRescheduleRefundEntitlementTests(BookingAPITestCase):
+    def setUp(self):
+        self.owner = self.create_user("refund-reschedule-owner")
+        self.club = self.create_club("Refund Reschedule Club", slug="refund-reschedule")
+        self.court = self.create_court(self.club, "Refund Reschedule Court")
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.client.force_authenticate(user=self.owner)
+
+    def post_lifecycle(self, club, booking, action_name, user, payload=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.post(
+            self.booking_lifecycle_url(club, booking, action_name),
+            payload or {},
+            format="json",
+        )
+
+    def configure_refund_policy(self):
+        self.court.minimum_deposit = Decimal("100.00")
+        self.court.cancellation_refund_notice_days = 1
+        self.court.save(
+            update_fields=["minimum_deposit", "cancellation_refund_notice_days"]
+        )
+
+    def later_wednesday(self, hour):
+        return timezone.datetime(
+            2026,
+            6,
+            3,
+            hour,
+            tzinfo=timezone.get_current_timezone(),
+        )
+
+    def preview_amounts(self, booking, now):
+        with patch("apps.bookings.services.timezone.now", return_value=now):
+            response = self.client.post(
+                self.booking_lifecycle_url(
+                    self.club,
+                    booking,
+                    "cancellation-preview",
+                ),
+                {},
+                format="json",
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return (
+            Decimal(response.data["refund_amount"]),
+            Decimal(response.data["retained_amount"]),
+        )
+
+    def paid_confirmed_booking(self, *, start_hour=20, amount="300.00"):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            start_time=self.time_at(start_hour),
+            end_time=self.time_at(start_hour + 1),
+            customer_phone="+201000002001",
+        )
+        self.create_transaction(
+            booking,
+            amount=Decimal(amount),
+            payment_method=Transaction.PaymentMethod.CASH,
+            created_by=self.owner,
+        )
+        return booking
+
+    def reschedule_to(self, booking, start_time):
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "reschedule",
+            self.owner,
+            {
+                "court": self.court.id,
+                "start_time": start_time.isoformat(),
+                "end_time": (start_time + timedelta(hours=1)).isoformat(),
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        return booking
+
+    def test_full_refund_remains_available_after_later_reschedule(self):
+        self.configure_refund_policy()
+        booking = self.paid_confirmed_booking()
+        before_now = timezone.datetime(
+            2026,
+            5,
+            18,
+            10,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        self.client.force_authenticate(user=self.owner)
+        refund_before, retained_before = self.preview_amounts(booking, before_now)
+        self.assertEqual(refund_before, Decimal("300.00"))
+        self.assertEqual(retained_before, Decimal("0.00"))
+
+        self.reschedule_to(booking, self.later_wednesday(20))
+        refund_after, retained_after = self.preview_amounts(booking, before_now)
+        self.assertEqual(refund_after, Decimal("300.00"))
+        self.assertEqual(retained_after, Decimal("0.00"))
+
+    def test_non_refundable_deposit_stays_non_refundable_after_later_reschedule(self):
+        self.configure_refund_policy()
+        booking = self.paid_confirmed_booking()
+        now = self.time_at(10)
+        self.client.force_authenticate(user=self.owner)
+        refund_before, retained_before = self.preview_amounts(booking, now)
+        self.assertEqual(refund_before, Decimal("200.00"))
+        self.assertEqual(retained_before, Decimal("100.00"))
+
+        self.reschedule_to(booking, self.later_wednesday(20))
+        refund_after, retained_after = self.preview_amounts(booking, now)
+        self.assertLessEqual(refund_after, Decimal("200.00"))
+        self.assertGreaterEqual(retained_after, Decimal("100.00"))
+
+    def test_partial_refund_does_not_improve_after_later_reschedule(self):
+        self.test_non_refundable_deposit_stays_non_refundable_after_later_reschedule()
+
+    def test_multiple_reschedules_never_improve_refund_rights(self):
+        self.configure_refund_policy()
+        booking = self.paid_confirmed_booking()
+        now = self.time_at(10)
+        self.client.force_authenticate(user=self.owner)
+        _, retained_before = self.preview_amounts(booking, now)
+        self.reschedule_to(booking, self.later_wednesday(20))
+        _, retained_mid = self.preview_amounts(booking, now)
+        self.reschedule_to(booking, self.later_wednesday(21))
+        refund_after, retained_after = self.preview_amounts(booking, now)
+        self.assertGreaterEqual(retained_mid, retained_before)
+        self.assertGreaterEqual(retained_after, retained_mid)
+        self.assertLessEqual(refund_after, Decimal("200.00"))
+
+    def test_earlier_reschedule_does_not_improve_refund_rights(self):
+        self.configure_refund_policy()
+        booking = self.paid_confirmed_booking(start_hour=21)
+        now = self.time_at(10)
+        self.client.force_authenticate(user=self.owner)
+        refund_before, retained_before = self.preview_amounts(booking, now)
+        self.reschedule_to(booking, self.time_at(12))
+        refund_after, retained_after = self.preview_amounts(booking, now)
+        self.assertLessEqual(refund_after, refund_before)
+        self.assertGreaterEqual(retained_after, retained_before)
+
+    def test_preview_and_cancel_use_the_same_authoritative_amounts(self):
+        self.configure_refund_policy()
+        booking = self.paid_confirmed_booking()
+        now = self.time_at(10)
+        self.client.force_authenticate(user=self.owner)
+        self.reschedule_to(booking, self.later_wednesday(20))
+        refund_preview, retained_preview = self.preview_amounts(booking, now)
+        with patch("apps.bookings.services.timezone.now", return_value=now):
+            cancel = self.post_lifecycle(
+                self.club,
+                booking,
+                "cancel",
+                self.owner,
+                {
+                    "reason": "Customer cancelled",
+                    "refund_payment_method": Transaction.PaymentMethod.CASH,
+                },
+            )
+        self.assertEqual(cancel.status_code, status.HTTP_200_OK)
+        refund = Transaction.objects.get(
+            booking=booking,
+            transaction_type=Transaction.Type.REFUND,
+        )
+        self.assertEqual(-refund.amount, refund_preview)
+        self.assertEqual(
+            Decimal("300.00") - refund_preview,
+            retained_preview,
+        )

@@ -8,6 +8,7 @@ from django.db import IntegrityError, connection, transaction
 from django.test.utils import CaptureQueriesContext
 from django.urls import resolve, reverse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -133,6 +134,12 @@ class SettlementAPITestCase(APITestCase):
 
     def settlement_preview_url(self, club):
         return reverse("club-settlement-preview", kwargs={"club_slug": club.slug})
+
+    def settlement_unsettled_summary_url(self, club):
+        return reverse(
+            "club-settlement-unsettled-summary",
+            kwargs={"club_slug": club.slug},
+        )
 
     def settlement_detail_url(self, club, settlement_obj):
         return reverse(
@@ -659,6 +666,18 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
                 self.other_court_transaction.id,
             },
         )
+        preview_item = next(
+            item
+            for item in response.data["transactions"]
+            if item["id"] == self.first_transaction.id
+        )
+        self.assertEqual(preview_item["booking_customer_name"], "Settlement Customer")
+        self.assertEqual(
+            preview_item["booking_customer_phone"],
+            self.booking.customer_phone,
+        )
+        self.assertIsNotNone(preview_item["booking_start_time"])
+        self.assertIsNotNone(preview_item["booking_end_time"])
 
     def test_preview_without_collected_by_defaults_to_request_user(self):
         response = self.client.get(self.settlement_preview_url(self.club))
@@ -1462,6 +1481,40 @@ class SettlementImmutabilityFilterPatternTests(SettlementAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["collected_by"], self.staff.id)
         self.assertEqual(response.data["collected_by_name"], self.staff.username)
+        self.assertEqual(response.data["court_name"], self.court.name)
+        self.assertEqual(response.data["settled_by_name"], "")
+
+    def test_settled_by_name_uses_full_name_then_username(self):
+        self.settler.first_name = "Mohamed"
+        self.settler.last_name = "Ahmed"
+        self.settler.save(update_fields=["first_name", "last_name"])
+
+        list_response = self.client.get(
+            self.settlement_list_url(self.club),
+            {"status": Settlement.Status.SETTLED},
+        )
+        detail_response = self.client.get(
+            self.settlement_detail_url(self.club, self.settled)
+        )
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            list_response.data["results"][0]["settled_by_name"],
+            "Mohamed Ahmed",
+        )
+        self.assertEqual(detail_response.data["settled_by_name"], "Mohamed Ahmed")
+
+        self.settler.first_name = ""
+        self.settler.last_name = ""
+        self.settler.save(update_fields=["first_name", "last_name"])
+        username_response = self.client.get(
+            self.settlement_detail_url(self.club, self.settled)
+        )
+        self.assertEqual(
+            username_response.data["settled_by_name"],
+            self.settler.username,
+        )
 
     def test_filters_respect_club_access_and_ignore_club_query_param(self):
         response = self.client.get(
@@ -1564,9 +1617,12 @@ class SettlementSeedSchemaTests(SettlementAPITestCase):
         self.assertEqual(schema_response.status_code, status.HTTP_200_OK)
         self.assertEqual(docs_response.status_code, status.HTTP_200_OK)
         self.assertIn(
-            "/api/v1/clubs/{club_slug}/settlements/",
+            "/api/v1/clubs/{club_slug}/settlements/unsettled-summary/",
             schema_response.content.decode(),
         )
+        self.assertIn("booking_customer_name", schema_response.content.decode())
+        self.assertIn("court_name", schema_response.content.decode())
+        self.assertIn("settled_by_name", schema_response.content.decode())
 
 
 class SettlementQueryScalingTests(SettlementAPITestCase):
@@ -1597,3 +1653,365 @@ class SettlementQueryScalingTests(SettlementAPITestCase):
         self.assertEqual(first_response.data["count"], 1)
         self.assertEqual(second_response.data["count"], 10)
         self.assertEqual(len(first), len(second))
+
+    def test_settlement_detail_query_count_does_not_grow_with_line_customer_fields(
+        self,
+    ):
+        first_booking = self.create_booking(
+            self.court,
+            customer_name="First Customer",
+            customer_phone="+201000009101",
+        )
+        first_transaction = self.create_transaction(
+            first_booking,
+            created_by=self.platform_admin,
+            payment_reference="DETAIL-Q-1",
+        )
+        first_settlement = self.create_settlement(
+            self.club,
+            court=self.court,
+            collected_by=self.platform_admin,
+            status=Settlement.Status.SETTLED,
+        )
+        SettlementTransaction.objects.create(
+            settlement=first_settlement,
+            transaction=first_transaction,
+            amount=first_transaction.amount,
+        )
+
+        with CaptureQueriesContext(connection) as first:
+            first_response = self.client.get(
+                self.settlement_detail_url(self.club, first_settlement)
+            )
+
+        many_settlement = self.create_settlement(
+            self.club,
+            court=self.court,
+            collected_by=self.platform_admin,
+            status=Settlement.Status.SETTLED,
+            notes="many-lines",
+        )
+        for index in range(12):
+            booking = self.create_booking(
+                self.court,
+                customer_name=f"Customer {index}",
+                customer_phone=f"+2010000092{index:02d}",
+                start_time=self.time_at(8 + (index % 10)),
+                end_time=self.time_at(9 + (index % 10)),
+            )
+            transaction_obj = self.create_transaction(
+                booking,
+                created_by=self.platform_admin,
+                payment_reference=f"DETAIL-Q-M-{index}",
+            )
+            SettlementTransaction.objects.create(
+                settlement=many_settlement,
+                transaction=transaction_obj,
+                amount=transaction_obj.amount,
+            )
+
+        with CaptureQueriesContext(connection) as second:
+            second_response = self.client.get(
+                self.settlement_detail_url(self.club, many_settlement)
+            )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(first_response.data["lines"]), 1)
+        self.assertEqual(len(second_response.data["lines"]), 12)
+        self.assertEqual(
+            first_response.data["lines"][0]["booking_customer_name"],
+            "First Customer",
+        )
+        self.assertEqual(len(first), len(second))
+
+
+class SettlementUnsettledSummaryTests(SettlementAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("summary-admin")
+        self.owner = self.create_user(
+            "summary-owner",
+            first_name="Owner",
+            last_name="One",
+        )
+        self.manager = self.create_user(
+            "summary-manager",
+            first_name="Manager",
+            last_name="Settle",
+        )
+        self.manager_denied = self.create_user("summary-manager-denied")
+        self.staff = self.create_user(
+            "summary-staff",
+            first_name="Mohamed",
+            last_name="Ahmed",
+        )
+        self.other_staff = self.create_user(
+            "summary-staff-two",
+            first_name="Ahmed",
+            last_name="Ali",
+        )
+        self.club = self.create_club("Summary Club", slug="unsettled-summary")
+        self.other_club = self.create_club("Other Summary Club", slug="other-unsettled")
+        self.court = self.create_court(self.club, "Summary Court")
+        self.other_court = self.create_court(self.other_club, "Other Summary Court")
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.create_membership(
+            self.manager,
+            self.club,
+            ClubMembership.Role.MANAGER,
+            manager_can_settle_transactions=True,
+        )
+        self.create_membership(
+            self.manager_denied,
+            self.club,
+            ClubMembership.Role.MANAGER,
+            manager_can_settle_transactions=False,
+        )
+        self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.create_membership(
+            self.other_staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.booking = self.create_booking(
+            self.court,
+            customer_name="Summary Customer",
+            customer_phone="+201012345678",
+        )
+        self.staff_cash = self.create_transaction(
+            self.booking,
+            amount=Decimal("800.00"),
+            payment_method=Transaction.PaymentMethod.CASH,
+            created=self.time_at(11),
+            created_by=self.staff,
+            payment_reference="SUM-CASH",
+        )
+        self.staff_wallet = self.create_transaction(
+            self.booking,
+            amount=Decimal("450.00"),
+            payment_method=Transaction.PaymentMethod.DIGITAL_WALLET,
+            created=self.time_at(12),
+            created_by=self.staff,
+            payment_reference="SUM-WALLET",
+        )
+        self.staff_refund = self.create_transaction(
+            self.booking,
+            amount=Decimal("-100.00"),
+            transaction_type=Transaction.Type.REFUND,
+            created=self.time_at(13),
+            created_by=self.staff,
+            payment_reference="SUM-REFUND",
+        )
+        self.other_staff_tx = self.create_transaction(
+            self.booking,
+            amount=Decimal("200.00"),
+            created=self.time_at(14),
+            created_by=self.other_staff,
+            payment_reference="SUM-OTHER-STAFF",
+        )
+        self.owner_tx = self.create_transaction(
+            self.booking,
+            amount=Decimal("500.00"),
+            created=self.time_at(15),
+            created_by=self.owner,
+            payment_reference="SUM-OWNER",
+        )
+        other_booking = self.create_booking(
+            self.other_court,
+            customer_phone="+201000009999",
+        )
+        self.create_transaction(
+            other_booking,
+            amount=Decimal("999.00"),
+            created_by=self.owner,
+            payment_reference="SUM-OTHER-CLUB",
+        )
+
+    def test_owner_sees_grouped_unsettled_collectors_with_signed_totals(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.settlement_unsettled_summary_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_id = {row["collected_by"]: row for row in response.data["results"]}
+        self.assertEqual(
+            set(by_id),
+            {self.staff.id, self.other_staff.id, self.owner.id},
+        )
+        staff_row = by_id[self.staff.id]
+        self.assertEqual(staff_row["collected_by_name"], "Mohamed Ahmed")
+        self.assertEqual(staff_row["transaction_count"], 3)
+        self.assertEqual(staff_row["booking_payments"], "1250.00")
+        self.assertEqual(staff_row["booking_refunds"], "-100.00")
+        self.assertEqual(staff_row["total_amount"], "1150.00")
+        self.assertEqual(staff_row["totals_by_payment_method"]["CASH"], "700.00")
+        self.assertEqual(
+            staff_row["totals_by_payment_method"]["DIGITAL_WALLET"],
+            "450.00",
+        )
+        self.assertEqual(staff_row["totals_by_payment_method"]["BANK_TRANSFER"], "0.00")
+        self.assertEqual(staff_row["totals_by_payment_method"]["OTHER"], "0.00")
+        self.assertFalse(staff_row["is_self"])
+        self.assertTrue(staff_row["can_approve"])
+        period_start = staff_row["period_start"]
+        if isinstance(period_start, str):
+            period_start = parse_datetime(period_start)
+        self.assertEqual(period_start, self.staff_cash.created)
+        owner_row = by_id[self.owner.id]
+        self.assertTrue(owner_row["is_self"])
+        self.assertTrue(owner_row["can_approve"])
+
+    def test_old_unsettled_transaction_remains_visible_days_later(self):
+        old_created = timezone.now() - timedelta(days=4)
+        Transaction.objects.filter(pk=self.staff_cash.pk).update(created=old_created)
+        self.staff_cash.refresh_from_db()
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.settlement_unsettled_summary_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        staff_row = next(
+            row
+            for row in response.data["results"]
+            if row["collected_by"] == self.staff.id
+        )
+        self.assertEqual(staff_row["total_amount"], "1150.00")
+        self.assertEqual(staff_row["transaction_count"], 3)
+
+    def test_manager_cannot_see_owner_money_and_cannot_approve_self(self):
+        self.create_transaction(
+            self.booking,
+            amount=Decimal("75.00"),
+            created=self.time_at(16),
+            created_by=self.manager,
+            payment_reference="SUM-MANAGER-SELF",
+        )
+        self.client.force_authenticate(user=self.manager)
+
+        response = self.client.get(self.settlement_unsettled_summary_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_id = {row["collected_by"]: row for row in response.data["results"]}
+        self.assertNotIn(self.owner.id, by_id)
+        self.assertIn(self.staff.id, by_id)
+        self.assertTrue(by_id[self.staff.id]["can_approve"])
+        self.assertTrue(by_id[self.manager.id]["is_self"])
+        self.assertFalse(by_id[self.manager.id]["can_approve"])
+
+    def test_staff_and_manager_without_flag_cannot_access_summary(self):
+        self.client.force_authenticate(user=self.staff)
+        staff_response = self.client.get(
+            self.settlement_unsettled_summary_url(self.club)
+        )
+        self.client.force_authenticate(user=self.manager_denied)
+        denied_response = self.client.get(
+            self.settlement_unsettled_summary_url(self.club)
+        )
+
+        self.assertEqual(staff_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(denied_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_collected_by_filter_validates_access_and_club(self):
+        self.client.force_authenticate(user=self.owner)
+        filtered = self.client.get(
+            self.settlement_unsettled_summary_url(self.club),
+            {"collected_by": self.staff.id},
+        )
+        self.assertEqual(filtered.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(filtered.data["results"]), 1)
+        self.assertEqual(filtered.data["results"][0]["collected_by"], self.staff.id)
+
+        outsider = self.create_user("summary-outsider")
+        self.create_membership(
+            outsider,
+            self.other_club,
+            ClubMembership.Role.STAFF,
+            court=self.other_court,
+        )
+        other_club = self.client.get(
+            self.settlement_unsettled_summary_url(self.club),
+            {"collected_by": outsider.id},
+        )
+        self.assertEqual(other_club.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.client.force_authenticate(user=self.manager)
+        owner_money = self.client.get(
+            self.settlement_unsettled_summary_url(self.club),
+            {"collected_by": self.owner.id},
+        )
+        self.assertEqual(owner_money.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_does_not_create_settlements_or_duplicate_mutation_routes(self):
+        before = Settlement.objects.count()
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.get(self.settlement_unsettled_summary_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Settlement.objects.count(), before)
+        repo_root = Path(__file__).resolve().parents[2]
+        urls_source = (repo_root / "apps" / "settlements" / "urls.py").read_text()
+        self.assertIn("unsettled-summary", urls_source)
+        self.assertNotIn("receive-money", urls_source)
+        self.assertNotIn("approve-custody", urls_source)
+
+
+class SettlementUnsettledSummaryQueryScalingTests(SettlementAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("summary-query-admin")
+        self.club = self.create_club("Summary Query Club", slug="summary-query")
+        self.court = self.create_court(self.club, "Summary Query Court")
+        self.client.force_authenticate(user=self.platform_admin)
+
+    def add_collector(self, index):
+        user = self.create_user(
+            f"summary-collector-{index}",
+            first_name="Collector",
+            last_name=str(index),
+        )
+        self.create_membership(
+            user,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        booking = self.create_booking(
+            self.court,
+            customer_phone=f"+2010000081{index:02d}",
+            start_time=self.time_at(8 + (index % 10)),
+            end_time=self.time_at(9 + (index % 10)),
+        )
+        self.create_transaction(
+            booking,
+            created_by=user,
+            payment_reference=f"SUM-SCALE-{index}",
+        )
+        return user
+
+    def test_query_count_does_not_grow_per_collector(self):
+        self.add_collector(0)
+
+        with CaptureQueriesContext(connection) as first:
+            first_response = self.client.get(
+                self.settlement_unsettled_summary_url(self.club)
+            )
+
+        for index in range(1, 20):
+            self.add_collector(index)
+
+        with CaptureQueriesContext(connection) as second:
+            second_response = self.client.get(
+                self.settlement_unsettled_summary_url(self.club)
+            )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(first_response.data["results"]), 1)
+        self.assertEqual(len(second_response.data["results"]), 20)
+        self.assertLessEqual(len(second) - len(first), 2)
+        self.assertLess(len(second), len(first) + 20)

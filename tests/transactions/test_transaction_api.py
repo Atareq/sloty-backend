@@ -3,7 +3,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
+from django.test.utils import CaptureQueriesContext
 from django.urls import resolve, reverse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -408,6 +409,8 @@ class TransactionResponseContextTests(TransactionAPITestCase):
         self.assertEqual(payload["court"], self.court.id)
         self.assertEqual(payload["created_by"], self.platform_admin.id)
         self.assertEqual(payload["id"], transaction_obj.id)
+        self.assertEqual(payload["booking_customer_name"], self.booking.customer_name)
+        self.assertEqual(payload["booking_customer_phone"], self.booking.customer_phone)
 
     def test_list_response_includes_booking_court_and_creator_context(self):
         response = self.client.get(self.transaction_list_url(self.club))
@@ -1081,6 +1084,149 @@ class TransactionFilterTests(TransactionAPITestCase):
         )
         self.assertNotIn(self.other_transaction.id, self.list_ids(response))
 
+    def test_search_matches_customer_name_phone_variants_and_reference(self):
+        named = self.create_transaction(
+            self.create_booking(
+                self.court,
+                customer_name="Ahmed Hassan",
+                customer_phone="+201012345678",
+                start_time=self.time_at(10),
+                end_time=self.time_at(11),
+            ),
+            created_by=self.platform_admin,
+            payment_reference="IPN-882192",
+        )
+        other = self.create_transaction(
+            self.create_booking(
+                self.court,
+                customer_name="Mona Ali",
+                customer_phone="+201000000088",
+                start_time=self.time_at(11),
+                end_time=self.time_at(12),
+            ),
+            created_by=self.platform_admin,
+            payment_reference="OTHER-REF",
+        )
+        other_club = self.create_transaction(
+            self.other_booking,
+            created_by=self.platform_admin,
+            payment_reference="IPN-882192-OTHER",
+        )
+
+        name_response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"search": "Ahmed"},
+        )
+        phone_response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"search": "01012345678"},
+        )
+        reference_response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"search": "8821"},
+        )
+
+        self.assertEqual(self.list_ids(name_response), {named.id})
+        self.assertEqual(self.list_ids(phone_response), {named.id})
+        self.assertEqual(self.list_ids(reference_response), {named.id})
+        self.assertNotIn(other.id, self.list_ids(name_response))
+        self.assertNotIn(other_club.id, self.list_ids(name_response))
+        self.assertNotIn(other_club.id, self.list_ids(reference_response))
+
+    def test_search_respects_staff_self_only_scope(self):
+        visible = self.create_transaction(
+            self.booking,
+            created_by=self.staff,
+            payment_reference="STAFF-SEARCH-OWN",
+        )
+        hidden_same_name = self.create_transaction(
+            self.create_booking(
+                self.court,
+                customer_name="Existing Customer",
+                customer_phone="+201000000001",
+                start_time=self.time_at(12),
+                end_time=self.time_at(13),
+            ),
+            created_by=self.platform_admin,
+            payment_reference="STAFF-SEARCH-HIDDEN",
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"search": "Existing Customer"},
+        )
+
+        self.assertEqual(self.list_ids(response), {visible.id})
+        self.assertNotIn(hidden_same_name.id, self.list_ids(response))
+
+    def test_filter_by_settlement_is_scoped_and_does_not_leak(self):
+        club_settlement = self.create_settlement_for_transaction(self.transaction_obj)
+        other_settlement = self.create_settlement_for_transaction(
+            self.other_transaction
+        )
+
+        matching = self.client.get(
+            self.transaction_list_url(self.club),
+            {"settlement": club_settlement.id},
+        )
+        wrong = self.client.get(
+            self.transaction_list_url(self.club),
+            {"settlement": 999999},
+        )
+        other_club = self.client.get(
+            self.transaction_list_url(self.club),
+            {"settlement": other_settlement.id},
+        )
+
+        self.assertEqual(self.list_ids(matching), {self.transaction_obj.id})
+        self.assertEqual(self.list_ids(wrong), set())
+        self.assertEqual(self.list_ids(other_club), set())
+
+        staff_tx = self.create_transaction(
+            self.booking,
+            amount=Decimal("15.00"),
+            created_by=self.staff,
+            payment_reference="STAFF-SETTLEMENT-OWN",
+        )
+        staff_settlement = self.create_settlement_for_transaction(staff_tx)
+        self.client.force_authenticate(user=self.staff)
+        staff_own = self.client.get(
+            self.transaction_list_url(self.club),
+            {"settlement": staff_settlement.id},
+        )
+        staff_other = self.client.get(
+            self.transaction_list_url(self.club),
+            {"settlement": club_settlement.id},
+        )
+        self.assertEqual(self.list_ids(staff_own), {staff_tx.id})
+        self.assertEqual(self.list_ids(staff_other), set())
+
+    def test_ordering_created_is_deterministic_with_id_tiebreaker(self):
+        first = self.transaction_obj
+        second = self.same_club_other_transaction
+        shared_created = timezone.now()
+        Transaction.objects.filter(pk__in=[first.pk, second.pk]).update(
+            created=shared_created
+        )
+
+        newest = self.client.get(
+            self.transaction_list_url(self.club),
+            {"ordering": "-created"},
+        )
+        oldest = self.client.get(
+            self.transaction_list_url(self.club),
+            {"ordering": "created"},
+        )
+        default = self.client.get(self.transaction_list_url(self.club))
+
+        newest_ids = [item["id"] for item in newest.data["results"]]
+        oldest_ids = [item["id"] for item in oldest.data["results"]]
+        default_ids = [item["id"] for item in default.data["results"]]
+        self.assertEqual(newest_ids, sorted([first.id, second.id], reverse=True))
+        self.assertEqual(oldest_ids, sorted([first.id, second.id]))
+        self.assertEqual(default_ids, newest_ids)
+
 
 class TransactionCentralizedAccessTests(TransactionAPITestCase):
     def test_transaction_route_resolves_to_viewset(self):
@@ -1137,3 +1283,68 @@ class TransactionCentralizedAccessTests(TransactionAPITestCase):
             "/api/v1/clubs/{club_slug}/transactions/",
             schema_response.content.decode(),
         )
+        schema = schema_response.content.decode()
+        self.assertIn("booking_customer_name", schema)
+        self.assertIn("booking_customer_phone", schema)
+        self.assertIn("booking_start_time", schema)
+        self.assertIn("booking_end_time", schema)
+        self.assertIn("settlement", schema)
+
+
+class TransactionQueryScalingTests(TransactionAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("tx-query-admin")
+        self.club = self.create_club("Tx Query Club", slug="tx-query")
+        self.court = self.create_court(self.club, "Tx Query Court")
+        self.client.force_authenticate(user=self.platform_admin)
+
+    def test_list_query_count_does_not_grow_with_customer_fields_or_search(self):
+        first_booking = self.create_booking(
+            self.court,
+            customer_name="Query Customer",
+            customer_phone="+201012345678",
+            start_time=self.time_at(8),
+            end_time=self.time_at(9),
+        )
+        self.create_transaction(
+            first_booking,
+            created_by=self.platform_admin,
+            payment_reference="TX-Q-1",
+        )
+
+        with CaptureQueriesContext(connection) as first:
+            first_response = self.client.get(self.transaction_list_url(self.club))
+
+        for index in range(12):
+            booking = self.create_booking(
+                self.court,
+                customer_name=f"Query Customer {index}",
+                customer_phone=f"+2010123456{index:02d}",
+                start_time=self.time_at(9 + (index % 8)),
+                end_time=self.time_at(10 + (index % 8)),
+            )
+            self.create_transaction(
+                booking,
+                created_by=self.platform_admin,
+                payment_reference=f"TX-Q-{index + 2}",
+            )
+
+        with CaptureQueriesContext(connection) as second:
+            second_response = self.client.get(self.transaction_list_url(self.club))
+        with CaptureQueriesContext(connection) as search:
+            search_response = self.client.get(
+                self.transaction_list_url(self.club),
+                {"search": "Query Customer"},
+            )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(search_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data["count"], 1)
+        self.assertEqual(second_response.data["count"], 13)
+        self.assertEqual(
+            first_response.data["results"][0]["booking_customer_name"],
+            "Query Customer",
+        )
+        self.assertEqual(len(first), len(second))
+        self.assertEqual(len(second), len(search))

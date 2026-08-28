@@ -2,7 +2,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers, status
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import ErrorDetail, PermissionDenied
 
 from apps.accounts.models import User
 from apps.audit.models import AuditLog
@@ -14,6 +14,52 @@ MEMBERSHIP_ALREADY_DELETED_MESSAGE = _("This club membership has already been re
 MEMBERSHIP_DELETED_CANNOT_REACTIVATE_MESSAGE = _(
     "A permanently removed membership cannot be reactivated."
 )
+MEMBERSHIP_DELETED_CANNOT_RECREATE_MESSAGE = _(
+    "This club, user, role, and court membership was permanently removed "
+    "and cannot be created again."
+)
+
+
+def deleted_membership_identity_exists(*, club, user, role, court=None):
+    queryset = ClubMembership.objects.filter(
+        club=club,
+        user=user,
+        role=role,
+        deleted_at__isnull=False,
+    )
+    if role == ClubMembership.Role.STAFF:
+        queryset = queryset.filter(court=court)
+    else:
+        queryset = queryset.filter(court__isnull=True)
+    return queryset.exists()
+
+
+def validate_membership_identity_not_deleted(
+    *,
+    club,
+    user,
+    role,
+    court=None,
+    field="user",
+):
+    if user is None:
+        return
+    if deleted_membership_identity_exists(
+        club=club,
+        user=user,
+        role=role,
+        court=court,
+    ):
+        raise serializers.ValidationError(
+            {
+                field: [
+                    ErrorDetail(
+                        str(MEMBERSHIP_DELETED_CANNOT_RECREATE_MESSAGE),
+                        code="MEMBERSHIP_DELETED_CANNOT_RECREATE",
+                    )
+                ]
+            }
+        )
 
 
 def create_club_member(
@@ -67,6 +113,14 @@ def create_club_member(
                 is_superuser=False,
                 created_by=created_by,
                 **user_data,
+            )
+        else:
+            validate_membership_identity_not_deleted(
+                club=access.club,
+                user=user,
+                role=role,
+                court=court,
+                field="user",
             )
 
         membership = ClubMembership.objects.create(

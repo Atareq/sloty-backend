@@ -280,7 +280,19 @@ class BookingRecurrenceNextSerializer(serializers.Serializer):
     next_end_time = serializers.DateTimeField()
     next_total_price = serializers.CharField()
     next_required_deposit = serializers.CharField()
-    requires_payment_reference = serializers.BooleanField()
+    requires_digital_payment_reference = serializers.BooleanField(
+        help_text=(
+            "If true, this court requires payment_reference when the next "
+            "deposit uses DIGITAL_WALLET or BANK_TRANSFER. CASH does not "
+            "require a reference."
+        )
+    )
+    requires_payment_reference = serializers.BooleanField(
+        help_text=(
+            "Deprecated alias of requires_digital_payment_reference. "
+            "Does not mean CASH requires a reference."
+        )
+    )
 
 
 class BookingCancellationPreviewResponseSerializer(serializers.Serializer):

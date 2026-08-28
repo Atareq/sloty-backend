@@ -6,6 +6,7 @@ from apps.clubs.models import Club, ClubMembership, generate_unique_club_slug
 from apps.clubs.services import (
     MEMBERSHIP_DELETED_CANNOT_REACTIVATE_MESSAGE,
     create_club_member,
+    validate_membership_identity_not_deleted,
 )
 from apps.common.egypt_locations import (
     get_all_city_choices,
@@ -487,6 +488,14 @@ class ClubMembershipCreateSerializer(serializers.Serializer):
                         "user_id": "Platform admin users cannot be attached as club users."  # noqa
                     }
                 )
+            error_field = "user" if "user" in self.initial_data else "user_id"
+            validate_membership_identity_not_deleted(
+                club=access.club,
+                user=resolved_user,
+                role=role,
+                court=court,
+                field=error_field,
+            )
 
         if role in {ClubMembership.Role.OWNER, ClubMembership.Role.MANAGER} and court:
             raise serializers.ValidationError(

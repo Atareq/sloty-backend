@@ -16,8 +16,13 @@ from apps.settlements.serializers import (
     SettlementListSerializer,
     SettlementPreviewRequestSerializer,
     SettlementPreviewResponseSerializer,
+    SettlementUnsettledSummaryRequestSerializer,
+    SettlementUnsettledSummaryResponseSerializer,
 )
-from apps.settlements.services import mark_settlement_settled
+from apps.settlements.services import (
+    build_unsettled_collector_summaries,
+    mark_settlement_settled,
+)
 
 
 @extend_schema_view(
@@ -86,6 +91,34 @@ class SettlementViewSet(
         )
         serializer.is_valid(raise_exception=True)
         response_serializer = SettlementPreviewResponseSerializer(serializer.preview())
+        return Response(response_serializer.data)
+
+    @extend_schema(
+        tags=["Settlements"],
+        parameters=[SettlementUnsettledSummaryRequestSerializer],
+        responses=SettlementUnsettledSummaryResponseSerializer,
+        description=(
+            "Read-only current unsettled transaction custody grouped by "
+            "collector. Candidate rows match settlement preview: selected "
+            "club, is_cancelled=false, no settlement line, collector="
+            "Transaction.created_by. period_start is the earliest unsettled "
+            "transaction for that collector; period_end is request time. "
+            "This is not persisted Settlement history."
+        ),
+    )
+    @action(detail=False, methods=["get"], url_path="unsettled-summary")
+    def unsettled_summary(self, request, *args, **kwargs):
+        serializer = SettlementUnsettledSummaryRequestSerializer(
+            data=request.query_params,
+            context=self.get_serializer_context(),
+        )
+        serializer.is_valid(raise_exception=True)
+        payload = build_unsettled_collector_summaries(
+            access=self.get_access_context(),
+            actor=request.user,
+            **serializer.validated_data,
+        )
+        response_serializer = SettlementUnsettledSummaryResponseSerializer(payload)
         return Response(response_serializer.data)
 
     @extend_schema(

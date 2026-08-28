@@ -17,7 +17,10 @@ Business calendar rules use `TIME_ZONE=Africa/Cairo` with timezone-aware UTC
 storage (`USE_TZ=True`).
 
 JWT access/refresh lifetimes are set with `JWT_ACCESS_TOKEN_MINUTES` (default
-60) and `JWT_REFRESH_TOKEN_DAYS` (default 7). Token claims are unchanged.
+60) and `JWT_REFRESH_TOKEN_DAYS` (default 7). Token claims are unchanged. A
+12-hour working shift is supported when the frontend silently refreshes;
+production must not override refresh lifetime to an incompatible short value.
+Do not set refresh lifetime to exactly 12 hours.
 
 ## Local Setup
 
@@ -29,6 +32,9 @@ cp .env.example .env
 
 Update `.env` for your machine. The default example uses SQLite; set
 `DB_ENGINE=postgresql` and the `DB_*` values when using PostgreSQL.
+PostgreSQL concurrency tests skip on SQLite; run
+`DB_ENGINE=postgresql pytest tests/test_postgresql_concurrency.py` when a
+PostgreSQL database is available.
 
 Install development dependencies:
 
@@ -164,7 +170,8 @@ requests.
   experience and is distinct from `PATCH {"is_active": false}` (temporary
   deactivation that can be reversed). Soft-deleted memberships cannot be
   reactivated, disappear from current membership/user lists, and grant no
-  club access. The user account and historical operational records remain.
+  club access. Recreating the same club, user, role, and court after delete
+  is rejected. The user account and historical operational records remain.
 - `/api/v1/clubs/{club_slug}/courts/`
 - `GET /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
 - `PUT /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
@@ -232,13 +239,15 @@ Useful booking list filters:
 - `has_remaining_amount`
 - `ended`
 - `hold_expiring`
-- `search` (customer name or mobile; phone variants such as `01012345678`,
+- `search` (customer name, mobile, or notes; phone variants such as
+  `01012345678`,
   spaced digits, and `+201012345678`)
 - `upcoming=true` (`HOLD`/`CONFIRMED` and `end_time > now`, including
   in-progress bookings)
 
 Booking list and detail include read-only `hold_expires_at`. For `HOLD` it is
-`created + court.internal_hold_expiry_hours`. For other statuses it is `null`.
+`min(created + court.internal_hold_expiry_hours, booking.start_time)`. For
+other statuses it is `null`.
 
 Booking overlap validation treats `HOLD`, `CONFIRMED`, `COMPLETED`, and
 `NO_SHOW` bookings as blocking historical or active slots. Only `CANCELLED` and
@@ -276,6 +285,12 @@ Useful transaction list filters:
 - `created_by`
 - `is_cancelled`
 - `settlement_status` (`unsettled` or `settled`)
+- `settlement` (exact settlement id; still scoped)
+- `search` (booking customer name/phone variants and payment reference)
+- `ordering` (`-created` newest, `created` oldest; id is the tie-breaker)
+
+Transaction list and detail include `booking_customer_name`,
+`booking_customer_phone`, `booking_start_time`, and `booking_end_time`.
 
 Creating the first valid transaction for a `HOLD` booking confirms it.
 Transactions are immutable financial history: PATCH, PUT, and DELETE are not
@@ -361,9 +376,11 @@ normal transaction first, then complete the booking.
 For an ACTIVE recurring CONFIRMED booking, call
 `GET /api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/` before
 completion to show the next occurrence datetime, slot price, required deposit,
-and whether a payment reference will be required for digital methods. The
-preview does not write data. Completing with `continue_recurring=true`
-revalidates the same rules. Clients must not send next amounts.
+and whether a digital payment reference will be required
+(`requires_digital_payment_reference`; `requires_payment_reference` is a
+deprecated alias). The preview does not write data. Completing with
+`continue_recurring=true` revalidates the same rules. Clients must not send
+next amounts.
 
 `expire` accepts an empty body and is allowed only for `HOLD` bookings.
 
@@ -373,11 +390,14 @@ To expire due HOLD bookings, run:
 python manage.py expire_hold_bookings
 ```
 
-The command uses each court's `internal_hold_expiry_hours` and is idempotent.
-There is no Celery worker. Production and staging must schedule this command
-(cron or equivalent, typically every 5 minutes) or HOLD bookings will not
-expire automatically. The product UI must not promise automatic cancel unless
-that job is actually running.
+The command uses each court's effective hold deadline
+`min(created + internal_hold_expiry_hours, booking.start_time)` and is
+idempotent.
+There is no Celery worker. This repository does not ship a cron, systemd
+timer, or other scheduler unit. Production and staging must schedule this
+command (cron or equivalent, typically every 5 minutes) or HOLD bookings
+will not expire automatically. The product UI must not promise automatic
+cancel unless that job is actually running.
 
 ## Sprint 6 Settlement Endpoints
 
@@ -385,12 +405,27 @@ that job is actually running.
 - `POST /api/v1/clubs/{club_slug}/settlements/`
 - `GET /api/v1/clubs/{club_slug}/settlements/{id}/`
 - `GET /api/v1/clubs/{club_slug}/settlements/preview/`
+- `GET /api/v1/clubs/{club_slug}/settlements/unsettled-summary/`
 - `POST /api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`
 
 Settlement is user-based. The owner/admin/allowed manager selects a collector
 from the club users list, previews that user's open balance, then approves a
 settlement for all currently unsettled valid transactions recorded by that user
 in the selected club.
+
+`GET .../settlements/unsettled-summary/` is the management all-collector view of
+current unsettled custody (not persisted Settlement rows). It uses the same
+candidate definition as preview. `period_start` is the earliest unsettled
+transaction for that collector; `period_end` is request time. Staff cannot use
+this endpoint. Managers need `manager_can_settle_transactions=true`, do not see
+OWNER money, and cannot approve their own row. Optional `collected_by` and
+`court` follow preview access rules. POST create remains the receive-money
+mutation. GET list remains settlement history.
+
+Settlement list/detail include `court_name` (`null` when `court` is omitted)
+and `settled_by_name` (full name if present, otherwise username).
+Settlement lines and preview transactions include booking customer name/phone
+and booking start/end times.
 
 Preview:
 
@@ -539,9 +574,13 @@ Summary also returns:
 - `staff_unsettled_money`: grouped current open balance by collector and court.
 
 Completed bookings with remaining amount are not included in normal
-`needs_action_count`; they are treated as data integrity warnings. Hold expiry
-uses each court's `internal_hold_expiry_hours`; `hold_expiring=true` uses a
-30-minute warning window before the calculated expiry time.
+`needs_action_count`; they are treated as data integrity warnings. EXPIRED
+bookings in the selected dashboard date range are included because that
+range is explicit operational date context. Unscoped booking
+`needs_action=true` does not include historical EXPIRED rows. Hold expiry
+uses each court's `internal_hold_expiry_hours` capped by `start_time`;
+`hold_expiring=true` uses a 30-minute warning window before the calculated
+expiry time.
 
 Summary response shape:
 

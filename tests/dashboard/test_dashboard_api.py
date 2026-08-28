@@ -1044,12 +1044,32 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         summary = response.data["summary"]
         breakdown = response.data["needs_action_breakdown"]
-        self.assertEqual(summary["needs_action_count"], 3)
+        self.assertEqual(summary["needs_action_count"], 4)
         self.assertEqual(breakdown["hold_waiting_payment_count"], 1)
         self.assertEqual(breakdown["overdue_confirmed_count"], 2)
         self.assertEqual(breakdown["remaining_after_slot_end_count"], 2)
         self.assertEqual(breakdown["expiring_hold_count"], 0)
         self.assertNotEqual(completed_with_remaining.status, Booking.Status.CONFIRMED)
+
+    def test_summary_needs_action_excludes_expired_outside_selected_period(self):
+        historical_expired = self.create_booking(
+            self.court,
+            customer_name="Old Expired",
+            customer_phone="+201000000119",
+            start_time=self.time_at(8) - timedelta(days=2),
+            end_time=self.time_at(9) - timedelta(days=2),
+            status=Booking.Status.EXPIRED,
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(self.summary_url(self.club), self.range_params())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["summary"]["needs_action_count"], 4)
+        self.assertNotEqual(
+            historical_expired.start_time.date(),
+            self.time_at(8).date(),
+        )
 
     def test_summary_unsettled_metrics_count_distinct_users_in_scope(self):
         owner_unsettled = self.create_transaction(
