@@ -17,12 +17,21 @@ Status: Implemented as the active recurrence contract.
 6. Create recurrence through `POST /api/v1/clubs/{club_slug}/bookings/` with
    `is_recurring=true`. Direct client `source=RECURRING` is rejected.
 7. Weekly matching uses local date delta modulo 7 plus interval overlap.
-   Future booking rows are not generated.
+   Future booking rows are not generated. Schedule slots blocked only by an
+   ACTIVE recurrence return `RECURRING_RESERVED` with `booking=null`,
+   `recurring_anchor_booking_id`, and `recurring_context` (customer/recurrence
+   identity from the anchor). Selected slot date/time remain authoritative.
 8. Existing future concrete blocking bookings take priority over starting a new
    recurrence.
 9. Completing an ACTIVE recurring booking requires `continue_recurring`.
    `false` ends recurrence; `true` creates next week's booking and records the
    required next deposit as an ordinary booking PAYMENT transaction.
+   `GET /api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/` is the
+   read-only preview of that next occurrence (datetime, current schedule
+   price, required deposit, and `requires_digital_payment_reference` from
+   the court flag; `requires_payment_reference` is a deprecated alias).
+   The flag means digital methods may require a reference; CASH does not.
+   Preview does not mutate; complete revalidates.
 10. Cancelling, no-showing, or expiring an ACTIVE recurring booking sets
     recurrence status to ENDED.
 11. Active recurring bookings cannot be rescheduled. End/cancel as appropriate

@@ -1,28 +1,22 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from django.db.models import (
-    Count,
-    DateTimeField,
-    DecimalField,
-    DurationField,
-    ExpressionWrapper,
-    F,
-    IntegerField,
-    Q,
-    Sum,
-    Value,
-)
-from django.db.models.functions import Cast, Coalesce, TruncDate, TruncMonth, TruncWeek
+from django.db.models import Count, DecimalField, F, Q, Sum, Value
+from django.db.models.functions import Coalesce, TruncDate, TruncMonth, TruncWeek
 from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
+from apps.bookings.filters import (
+    annotate_booking_hold_expires_at,
+    booking_needs_action_q,
+)
 from apps.bookings.models import Booking
 from apps.courts.models import CourtWorkingHour
 from apps.courts.pricing import working_hour_bounds
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
+from apps.transactions.services import annotate_booking_paid_amount
 
 ZERO = Decimal("0.00")
 
@@ -141,21 +135,11 @@ def validate_calendar_access(access):
 
 def get_calendar_items(*, access, date_from, date_to, court=None, status=None):
     validate_calendar_access(access)
-    queryset = (
+    queryset = annotate_booking_paid_amount(
         access.scoped_calendar_bookings_queryset()
         .select_related("court")
         .filter(start_time__lt=date_to, end_time__gt=date_from)
-        .annotate(
-            paid_amount=money_sum(
-                "transactions__amount",
-                filter=Q(
-                    transactions__is_cancelled=False,
-                    transactions__transaction_type=Transaction.Type.PAYMENT,
-                ),
-            ),
-        )
-        .order_by("start_time", "id")
-    )
+    ).order_by("start_time", "id")
     if court is not None:
         if not access.can_access_court(court):
             raise PermissionDenied("You cannot access this court.")
@@ -296,17 +280,7 @@ def local_date(value):
 
 
 def with_hold_expiry(queryset):
-    hold_expiry_duration = ExpressionWrapper(
-        Cast("court__internal_hold_expiry_hours", IntegerField())
-        * Value(timedelta(hours=1)),
-        output_field=DurationField(),
-    )
-    return queryset.annotate(
-        hold_expires_at=ExpressionWrapper(
-            F("created") + hold_expiry_duration,
-            output_field=DateTimeField(),
-        )
-    )
+    return annotate_booking_hold_expires_at(queryset)
 
 
 def apply_transaction_filters(
@@ -501,20 +475,7 @@ def get_needs_action_breakdown(bookings):
             ),
         )
     )
-    needs_action_query = (
-        Q(status=Booking.Status.HOLD)
-        | Q(status=Booking.Status.CONFIRMED, end_time__lt=now)
-        | Q(
-            status=Booking.Status.CONFIRMED,
-            end_time__lt=now,
-            paid_amount__lt=F("total_price"),
-        )
-        | Q(
-            status=Booking.Status.HOLD,
-            hold_expires_at__gt=now,
-            hold_expires_at__lte=warning_end,
-        )
-    )
+    needs_action_query = booking_needs_action_q(now=now, include_expired=True)
     return {
         "needs_action_count": annotated.filter(needs_action_query).aggregate(
             count=Count("id", distinct=True)

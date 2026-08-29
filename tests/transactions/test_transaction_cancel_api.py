@@ -149,10 +149,13 @@ class TransactionCancelAPITests(TransactionAPITestCase):
             created_by=self.other_user,
         )
 
-        for actor in (self.owner, self.manager, self.staff):
+        for actor in (self.owner, self.manager):
             with self.subTest(actor=actor.username):
                 response = self.post_cancel(self.club, transaction_obj, actor)
                 self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        staff_response = self.post_cancel(self.club, transaction_obj, self.staff)
+        self.assertEqual(staff_response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_staff_cannot_cancel_transaction_from_another_court(self):
         transaction_obj = self.create_transaction(

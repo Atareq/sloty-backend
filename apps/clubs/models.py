@@ -27,6 +27,14 @@ def generate_unique_club_slug(name: str, *, exclude_pk=None) -> str:
     return slug
 
 
+class ClubMembershipQuerySet(models.QuerySet):
+    def current(self):
+        return self.filter(deleted_at__isnull=True)
+
+    def granting_access(self):
+        return self.current().filter(is_active=True)
+
+
 class Club(models.Model):
     name = models.CharField(max_length=255, db_index=True)
     slug = models.SlugField(max_length=120, unique=True, db_index=True)
@@ -112,6 +120,14 @@ class ClubMembership(models.Model):
     manager_can_settle_transactions = models.BooleanField(default=False)
     manager_can_change_pricing = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
+    deleted_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    deleted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="deleted_club_memberships",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         blank=True,
@@ -161,7 +177,10 @@ class ClubMembership(models.Model):
             models.Index(fields=["club", "role", "is_active"]),
             models.Index(fields=["court", "role", "is_active"]),
             models.Index(fields=["user", "role", "is_active"]),
+            models.Index(fields=["club", "deleted_at"]),
         ]
+
+    objects = ClubMembershipQuerySet.as_manager()
 
     def __str__(self) -> str:
         return f"{self.user} - {self.club} ({self.role})"

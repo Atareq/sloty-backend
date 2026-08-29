@@ -475,3 +475,25 @@ class CourtUsageReportTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertLessEqual(len(queries), 8)
+
+    def test_query_count_does_not_grow_with_extra_bookings(self):
+        self.client.force_authenticate(user=self.owner)
+        params = self.params(date_from="2026-07-06", date_to="2026-07-12")
+
+        with CaptureQueriesContext(connection) as first:
+            first_response = self.client.get(self.url(), params)
+
+        for day in range(7, 13):
+            self.create_booking(
+                self.court,
+                start_time=self.time_at(8, day=day),
+                end_time=self.time_at(9, day=day),
+                customer_phone=f"+2010000007{day:02d}",
+            )
+
+        with CaptureQueriesContext(connection) as second:
+            second_response = self.client.get(self.url(), params)
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(first), len(second))

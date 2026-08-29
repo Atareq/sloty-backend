@@ -4,6 +4,24 @@ Sloty is a Django + Django REST Framework backend for a sports court rental
 management system. The default local settings module is
 `config.settings.local`.
 
+## Documentation source of truth
+
+1. `AGENTS.md` — current engineering architecture and conventions.
+2. Locked contracts under `docs/`, currently
+   `docs/recurring-bookings-contract.txt`.
+3. This README — setup and API/operator guidance.
+4. `docs/business-analysis.txt`, `docs/documentation.txt`, and
+   `docs/sprints.txt` — historical planning context only.
+
+Business calendar rules use `TIME_ZONE=Africa/Cairo` with timezone-aware UTC
+storage (`USE_TZ=True`).
+
+JWT access/refresh lifetimes are set with `JWT_ACCESS_TOKEN_MINUTES` (default
+60) and `JWT_REFRESH_TOKEN_DAYS` (default 7). Token claims are unchanged. A
+12-hour working shift is supported when the frontend silently refreshes;
+production must not override refresh lifetime to an incompatible short value.
+Do not set refresh lifetime to exactly 12 hours.
+
 ## Local Setup
 
 Create a local environment file from the safe example values:
@@ -14,6 +32,9 @@ cp .env.example .env
 
 Update `.env` for your machine. The default example uses SQLite; set
 `DB_ENGINE=postgresql` and the `DB_*` values when using PostgreSQL.
+PostgreSQL concurrency tests skip on SQLite; run
+`DB_ENGINE=postgresql pytest tests/test_postgresql_concurrency.py` when a
+PostgreSQL database is available.
 
 Install development dependencies:
 
@@ -33,16 +54,26 @@ Run the development server:
 python manage.py runserver
 ```
 
-Optional local SQL request summaries can be enabled in `.env`:
+Optional SQL request performance logs can be enabled without `DEBUG`:
 
 ```env
 SQL_QUERY_STATS_ENABLED=true
 SQL_QUERY_STATS_VERBOSE=false
+SQL_QUERY_STATS_WARN_QUERY_COUNT=1
 SQL_QUERY_STATS_SLOW_QUERY_MS=100
+SQL_QUERY_STATS_SLOW_REQUEST_MS=500
+SQL_QUERY_STATS_MAX_QUERY_SAMPLES=5
+SQL_QUERY_STATS_MAX_SQL_LENGTH=500
 ```
 
-When enabled, API requests log one terminal line with method, path, status,
-query count, combined SQL time, and total request time.
+When enabled, every API request logs a `[PERF]` summary with method, path,
+status, query count, combined SQL time (`db=`), and total request time.
+A `[PERF:WARN]` line is added when query count exceeds
+`SQL_QUERY_STATS_WARN_QUERY_COUNT` (default `1`). That warning is an
+observability threshold, not a required query budget. Duplicate SQL+params
+and repeated SQL shapes (possible N+1, logged as `[PERF:N+1?]`) are
+reported separately. Verbose mode may include truncated SQL structure
+and never logs parameter values.
 
 Swagger UI is available at:
 
@@ -113,8 +144,9 @@ Useful filters:
 - `is_active`
 - `search`
 
-Platform admins and club owners can list memberships in the selected club.
-Managers and staff cannot list club users.
+Platform admins and club owners can list all memberships in the selected club.
+Managers can list active MANAGER and STAFF employees. Staff cannot list club
+users.
 
 ## Egypt Locations and Club Address Fields
 
@@ -133,6 +165,13 @@ requests.
 
 - `/api/v1/clubs/`
 - `/api/v1/clubs/{club_slug}/memberships/`
+- `DELETE /api/v1/clubs/{club_slug}/memberships/{id}/` soft-deletes a
+  membership. This is permanent removal from the current club membership
+  experience and is distinct from `PATCH {"is_active": false}` (temporary
+  deactivation that can be reversed). Soft-deleted memberships cannot be
+  reactivated, disappear from current membership/user lists, and grant no
+  club access. Recreating the same club, user, role, and court after delete
+  is rejected. The user account and historical operational records remain.
 - `/api/v1/clubs/{club_slug}/courts/`
 - `GET /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
 - `PUT /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
@@ -146,9 +185,6 @@ replaces the weekly schedule and pricing for that court:
   "working_hours": [
     {
       "weekday": 0,
-      "opens_at": "10:00:00",
-      "closes_at": "23:00:00",
-      "is_closed": false,
       "pricing_periods": [
         {
           "starts_at": "10:00:00",
@@ -164,14 +200,15 @@ replaces the weekly schedule and pricing for that court:
     },
     {
       "weekday": 1,
-      "opens_at": null,
-      "closes_at": null,
-      "is_closed": true,
       "pricing_periods": []
     }
   ]
 }
 ```
+
+`opens_at`, `closes_at`, and `is_closed` are not accepted. A weekday with no
+pricing periods is closed. Operating hours come from the child pricing
+periods.
 
 The older `/api/v1/clubs/{club_slug}/court-working-hours/` row-level route is
 kept temporarily for GET compatibility. POST/PATCH writes are rejected with
@@ -197,6 +234,20 @@ Useful booking list filters:
 - `date`
 - `date_from`
 - `date_to`
+- `needs_action`
+- `overdue`
+- `has_remaining_amount`
+- `ended`
+- `hold_expiring`
+- `search` (customer name, mobile, or notes; phone variants such as
+  `01012345678`,
+  spaced digits, and `+201012345678`)
+- `upcoming=true` (`HOLD`/`CONFIRMED` and `end_time > now`, including
+  in-progress bookings)
+
+Booking list and detail include read-only `hold_expires_at`. For `HOLD` it is
+`min(created + court.internal_hold_expiry_hours, booking.start_time)`. For
+other statuses it is `null`.
 
 Booking overlap validation treats `HOLD`, `CONFIRMED`, `COMPLETED`, and
 `NO_SHOW` bookings as blocking historical or active slots. Only `CANCELLED` and
@@ -234,6 +285,12 @@ Useful transaction list filters:
 - `created_by`
 - `is_cancelled`
 - `settlement_status` (`unsettled` or `settled`)
+- `settlement` (exact settlement id; still scoped)
+- `search` (booking customer name/phone variants and payment reference)
+- `ordering` (`-created` newest, `created` oldest; id is the tie-breaker)
+
+Transaction list and detail include `booking_customer_name`,
+`booking_customer_phone`, `booking_start_time`, and `booking_end_time`.
 
 Creating the first valid transaction for a `HOLD` booking confirms it.
 Transactions are immutable financial history: PATCH, PUT, and DELETE are not
@@ -245,10 +302,16 @@ endpoint:
 {"reason": "Wrong amount entered"}
 ```
 
+Staff transaction lists are collector-scoped ("my collections"): Staff see
+only transactions they recorded (`created_by` is the current user) on their
+assigned court. Query parameters cannot expand that to another collector.
+Owners, managers, and platform admins keep club/court-wide lists.
+
 Platform admins may cancel any eligible transaction in the selected club. Owners,
 managers, and staff may cancel only transactions they created and can access;
-staff remain limited to their assigned court. Already cancelled or settled
-transactions and transactions attached to terminal bookings cannot be cancelled.
+staff remain limited to their assigned court and to their own collections.
+Already cancelled or settled transactions and transactions attached to terminal
+bookings cannot be cancelled.
 
 Cancelled transactions remain visible in list/detail responses and can be selected
 with `?is_cancelled=true` or `?is_cancelled=false`. They do not count toward booking
@@ -267,6 +330,8 @@ integration are not implemented.
 - `POST /api/v1/clubs/{club_slug}/bookings/{id}/no-show/`
 - `POST /api/v1/clubs/{club_slug}/bookings/{id}/reschedule/`
 - `POST /api/v1/clubs/{club_slug}/bookings/{id}/expire/`
+- `POST /api/v1/clubs/{club_slug}/bookings/{id}/end-recurrence/`
+- `GET /api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/`
 
 Allowed transitions are `HOLD -> CANCELLED`, `HOLD -> EXPIRED`,
 `CONFIRMED -> CANCELLED`, `CONFIRMED -> COMPLETED`, and
@@ -308,16 +373,31 @@ paid before completion. If a remaining amount exists, the backend returns 409
 with `BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT`; record the missing payment as a
 normal transaction first, then complete the booking.
 
+For an ACTIVE recurring CONFIRMED booking, call
+`GET /api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/` before
+completion to show the next occurrence datetime, slot price, required deposit,
+and whether a digital payment reference will be required
+(`requires_digital_payment_reference`; `requires_payment_reference` is a
+deprecated alias). The preview does not write data. Completing with
+`continue_recurring=true` revalidates the same rules. Clients must not send
+next amounts.
+
 `expire` accepts an empty body and is allowed only for `HOLD` bookings.
 
-To expire due HOLD bookings manually, run:
+To expire due HOLD bookings, run:
 
 ```bash
 python manage.py expire_hold_bookings
 ```
 
-The command uses each court's `internal_hold_expiry_hours`, is idempotent, and
-does not require Celery or a scheduler.
+The command uses each court's effective hold deadline
+`min(created + internal_hold_expiry_hours, booking.start_time)` and is
+idempotent.
+There is no Celery worker. This repository does not ship a cron, systemd
+timer, or other scheduler unit. Production and staging must schedule this
+command (cron or equivalent, typically every 5 minutes) or HOLD bookings
+will not expire automatically. The product UI must not promise automatic
+cancel unless that job is actually running.
 
 ## Sprint 6 Settlement Endpoints
 
@@ -325,12 +405,27 @@ does not require Celery or a scheduler.
 - `POST /api/v1/clubs/{club_slug}/settlements/`
 - `GET /api/v1/clubs/{club_slug}/settlements/{id}/`
 - `GET /api/v1/clubs/{club_slug}/settlements/preview/`
+- `GET /api/v1/clubs/{club_slug}/settlements/unsettled-summary/`
 - `POST /api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`
 
 Settlement is user-based. The owner/admin/allowed manager selects a collector
 from the club users list, previews that user's open balance, then approves a
 settlement for all currently unsettled valid transactions recorded by that user
 in the selected club.
+
+`GET .../settlements/unsettled-summary/` is the management all-collector view of
+current unsettled custody (not persisted Settlement rows). It uses the same
+candidate definition as preview. `period_start` is the earliest unsettled
+transaction for that collector; `period_end` is request time. Staff cannot use
+this endpoint. Managers need `manager_can_settle_transactions=true`, do not see
+OWNER money, and cannot approve their own row. Optional `collected_by` and
+`court` follow preview access rules. POST create remains the receive-money
+mutation. GET list remains settlement history.
+
+Settlement list/detail include `court_name` (`null` when `court` is omitted)
+and `settled_by_name` (full name if present, otherwise username).
+Settlement lines and preview transactions include booking customer name/phone
+and booking start/end times.
 
 Preview:
 
@@ -388,8 +483,11 @@ Create a weekly recurrence through the normal booking endpoint with
 `recurrence_status=ACTIVE`; no future booking rows are generated.
 
 Future schedule slots blocked only by an active weekly recurrence return
-`slot_status=RECURRING_RESERVED`, `booking=null`, and the active anchor booking
-id. Completing an active recurring booking requires a `continue_recurring`
+`slot_status=RECURRING_RESERVED`, `booking=null`, the active anchor booking
+id, and `recurring_context` (anchor id, customer name/phone, recurrence
+status). Selected slot date/time/`slot_price` describe the future occurrence;
+anchor lifecycle and financial state are not copied onto the virtual slot.
+Completing an active recurring booking requires a `continue_recurring`
 decision; continuation creates next week's booking and records any required
 deposit as a normal booking payment transaction.
 
@@ -476,9 +574,13 @@ Summary also returns:
 - `staff_unsettled_money`: grouped current open balance by collector and court.
 
 Completed bookings with remaining amount are not included in normal
-`needs_action_count`; they are treated as data integrity warnings. Hold expiry
-uses each court's `internal_hold_expiry_hours`; `hold_expiring=true` uses a
-30-minute warning window before the calculated expiry time.
+`needs_action_count`; they are treated as data integrity warnings. EXPIRED
+bookings in the selected dashboard date range are included because that
+range is explicit operational date context. Unscoped booking
+`needs_action=true` does not include historical EXPIRED rows. Hold expiry
+uses each court's `internal_hold_expiry_hours` capped by `start_time`;
+`hold_expiring=true` uses a 30-minute warning window before the calculated
+expiry time.
 
 Summary response shape:
 
@@ -509,8 +611,17 @@ Useful booking list filters for dashboard cards:
 
 - `needs_action=true`
 - `overdue=true`
-- `remaining_amount_gt=0&ended=true`
+- `has_remaining_amount=true&status=CONFIRMED&ended=true`
 - `hold_expiring=true`
+
+`has_remaining_amount` is the canonical remaining-amount filter (`true` means
+paid amount is less than `total_price`). Deprecated `remaining_amount_gt`
+still returns CONFIRMED bookings with remaining amount greater than zero when
+the parameter is present.
+
+Completion requires remaining amount already paid.
+`confirm_collect_remaining_cash` is accepted as a deprecated no-op and does
+not create a cash transaction.
 
 ## Reports Endpoints
 

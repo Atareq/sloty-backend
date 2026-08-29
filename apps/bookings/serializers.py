@@ -2,11 +2,13 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.utils.translation import gettext_lazy as _
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
 from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log
+from apps.bookings.filters import compute_booking_hold_expires_at
 from apps.bookings.models import Booking
 from apps.bookings.services import (
     FREE_SLOT_STATUS,
@@ -30,7 +32,9 @@ def get_paid_amount_for_booking(booking):
     annotated_value = getattr(booking, "paid_amount", None)
     if annotated_value is not None:
         return annotated_value
-    return get_booking_paid_amount(booking)
+    paid_amount = get_booking_paid_amount(booking)
+    booking.paid_amount = paid_amount
+    return paid_amount
 
 
 class BookingPaymentSummaryMixin(serializers.Serializer):
@@ -50,7 +54,37 @@ class BookingPaymentSummaryMixin(serializers.Serializer):
         return get_paid_amount_for_booking(obj) >= obj.total_price
 
 
-class BookingListSerializer(BookingPaymentSummaryMixin, serializers.ModelSerializer):
+class BookingHoldExpiresAtMixin(serializers.Serializer):
+    hold_expires_at = serializers.SerializerMethodField()
+
+    @extend_schema_field(serializers.DateTimeField(allow_null=True))
+    def get_hold_expires_at(self, obj):
+        if obj.status != Booking.Status.HOLD:
+            return None
+        annotated_value = getattr(obj, "hold_expires_at", None)
+        if annotated_value is not None:
+            return annotated_value
+        return compute_booking_hold_expires_at(obj)
+
+
+class BookingRecurrenceReadMixin:
+    is_recurring = serializers.SerializerMethodField()
+    next_recurring_booking_id = serializers.SerializerMethodField()
+
+    def get_is_recurring(self, obj):
+        return obj.source == Booking.Source.RECURRING
+
+    def get_next_recurring_booking_id(self, obj):
+        next_booking = getattr(obj, "next_recurring_booking", None)
+        return next_booking.id if next_booking else None
+
+
+class BookingListSerializer(
+    BookingPaymentSummaryMixin,
+    BookingHoldExpiresAtMixin,
+    BookingRecurrenceReadMixin,
+    serializers.ModelSerializer,
+):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     court_name = serializers.CharField(source="court.name", read_only=True)
     is_recurring = serializers.SerializerMethodField()
@@ -77,20 +111,19 @@ class BookingListSerializer(BookingPaymentSummaryMixin, serializers.ModelSeriali
             "recurrence_status",
             "previous_recurring_booking_id",
             "next_recurring_booking_id",
+            "hold_expires_at",
             "created_by",
             "created",
         )
         read_only_fields = fields
 
-    def get_is_recurring(self, obj):
-        return obj.source == Booking.Source.RECURRING
 
-    def get_next_recurring_booking_id(self, obj):
-        next_booking = getattr(obj, "next_recurring_booking", None)
-        return next_booking.id if next_booking else None
-
-
-class BookingDetailSerializer(BookingPaymentSummaryMixin, serializers.ModelSerializer):
+class BookingDetailSerializer(
+    BookingPaymentSummaryMixin,
+    BookingHoldExpiresAtMixin,
+    BookingRecurrenceReadMixin,
+    serializers.ModelSerializer,
+):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     is_recurring = serializers.SerializerMethodField()
     next_recurring_booking_id = serializers.SerializerMethodField()
@@ -123,18 +156,12 @@ class BookingDetailSerializer(BookingPaymentSummaryMixin, serializers.ModelSeria
             "cancelled_at",
             "no_show_at",
             "expired_at",
+            "hold_expires_at",
             "created_by",
             "created",
             "modified",
         )
         read_only_fields = fields
-
-    def get_is_recurring(self, obj):
-        return obj.source == Booking.Source.RECURRING
-
-    def get_next_recurring_booking_id(self, obj):
-        next_booking = getattr(obj, "next_recurring_booking", None)
-        return next_booking.id if next_booking else None
 
 
 class BookingCreateSerializer(serializers.ModelSerializer):
@@ -247,6 +274,27 @@ class BookingCancelSerializer(serializers.Serializer):
     )
 
 
+class BookingRecurrenceNextSerializer(serializers.Serializer):
+    can_continue = serializers.BooleanField()
+    next_start_time = serializers.DateTimeField()
+    next_end_time = serializers.DateTimeField()
+    next_total_price = serializers.CharField()
+    next_required_deposit = serializers.CharField()
+    requires_digital_payment_reference = serializers.BooleanField(
+        help_text=(
+            "If true, this court requires payment_reference when the next "
+            "deposit uses DIGITAL_WALLET or BANK_TRANSFER. CASH does not "
+            "require a reference."
+        )
+    )
+    requires_payment_reference = serializers.BooleanField(
+        help_text=(
+            "Deprecated alias of requires_digital_payment_reference. "
+            "Does not mean CASH requires a reference."
+        )
+    )
+
+
 class BookingCancellationPreviewResponseSerializer(serializers.Serializer):
     booking_id = serializers.IntegerField()
     previewed_at = serializers.DateTimeField()
@@ -284,6 +332,11 @@ class BookingCompleteSerializer(serializers.Serializer):
     confirm_collect_remaining_cash = serializers.BooleanField(
         required=False,
         default=False,
+        help_text=(
+            "Deprecated no-op kept for compatibility. The backend never "
+            "auto-creates a remaining cash transaction. Completion is rejected "
+            "when remaining_amount is greater than zero."
+        ),
     )
     continue_recurring = serializers.BooleanField(
         required=False,
@@ -386,6 +439,15 @@ class BookingSlotBookingSerializer(serializers.Serializer):
     )
 
 
+class BookingSlotRecurringContextSerializer(serializers.Serializer):
+    anchor_booking_id = serializers.IntegerField()
+    customer_name = serializers.CharField()
+    customer_phone = serializers.CharField()
+    recurrence_status = serializers.ChoiceField(
+        choices=Booking.RecurrenceStatus.choices
+    )
+
+
 class BookingSlotSerializer(serializers.Serializer):
     date = serializers.DateField()
     start_time = serializers.DateTimeField()
@@ -406,6 +468,7 @@ class BookingSlotSerializer(serializers.Serializer):
     is_available = serializers.BooleanField()
     booking = BookingSlotBookingSerializer(allow_null=True)
     recurring_anchor_booking_id = serializers.IntegerField(allow_null=True)
+    recurring_context = BookingSlotRecurringContextSerializer(allow_null=True)
     can_start_recurring = serializers.BooleanField(allow_null=True)
     recurring_blocked_reason = serializers.CharField(allow_null=True)
     first_recurring_conflict_start = serializers.DateTimeField(allow_null=True)

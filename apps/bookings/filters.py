@@ -10,10 +10,58 @@ from django.db.models import (
     Q,
     Value,
 )
-from django.db.models.functions import Cast
+from django.db.models.functions import Cast, Least
 from django.utils import timezone
 
 from apps.bookings.models import Booking
+from apps.common.search import customer_phone_search_q
+
+
+def compute_booking_hold_expires_at(booking):
+    policy_expires_at = booking.created + timedelta(
+        hours=booking.court.internal_hold_expiry_hours
+    )
+    return min(policy_expires_at, booking.start_time)
+
+
+def annotate_booking_hold_expires_at(queryset):
+    hold_expiry_duration = ExpressionWrapper(
+        Cast("court__internal_hold_expiry_hours", IntegerField())
+        * Value(timedelta(hours=1)),
+        output_field=DurationField(),
+    )
+    policy_expires_at = ExpressionWrapper(
+        F("created") + hold_expiry_duration,
+        output_field=DateTimeField(),
+    )
+    return queryset.annotate(
+        hold_expires_at=Least(
+            policy_expires_at,
+            F("start_time"),
+            output_field=DateTimeField(),
+        )
+    )
+
+
+def booking_needs_action_q(*, now, include_expired=False):
+    warning_end = now + timedelta(minutes=30)
+    query = (
+        Q(status=Booking.Status.HOLD)
+        | Q(status=Booking.Status.CONFIRMED, end_time__lt=now)
+        | Q(
+            status=Booking.Status.CONFIRMED,
+            end_time__lt=now,
+            paid_amount__lt=F("total_price"),
+        )
+        | Q(
+            status=Booking.Status.HOLD,
+            hold_expires_at__gt=now,
+            hold_expires_at__lte=warning_end,
+        )
+    )
+    if include_expired:
+        query |= Q(status=Booking.Status.EXPIRED)
+    return query
 
 
 def day_bounds(date_value):
@@ -36,10 +84,37 @@ class BookingFilter(django_filters.FilterSet):
     needs_action = django_filters.BooleanFilter(method="filter_needs_action")
     overdue = django_filters.BooleanFilter(method="filter_overdue")
     remaining_amount_gt = django_filters.NumberFilter(
-        method="filter_remaining_amount_gt"
+        method="filter_remaining_amount_gt",
+        help_text=(
+            "Deprecated. Prefer has_remaining_amount. When present, returns "
+            "CONFIRMED bookings with remaining amount greater than zero. The "
+            "numeric value is ignored except as a presence flag."
+        ),
+    )
+    has_remaining_amount = django_filters.BooleanFilter(
+        method="filter_has_remaining_amount",
+        help_text=(
+            "Canonical remaining-amount filter. true returns bookings whose "
+            "paid amount is less than total_price. false returns fully paid "
+            "bookings."
+        ),
     )
     ended = django_filters.BooleanFilter(method="filter_ended")
     hold_expiring = django_filters.BooleanFilter(method="filter_hold_expiring")
+    search = django_filters.CharFilter(
+        method="filter_search",
+        help_text=(
+            "Search customer_name, customer_phone (including Egyptian phone "
+            "variants), and notes."
+        ),
+    )
+    upcoming = django_filters.BooleanFilter(
+        method="filter_upcoming",
+        help_text=(
+            "true returns HOLD and CONFIRMED bookings whose end_time is still "
+            "in the future, including in-progress bookings."
+        ),
+    )
 
     class Meta:
         model = Booking
@@ -53,8 +128,11 @@ class BookingFilter(django_filters.FilterSet):
             "needs_action",
             "overdue",
             "remaining_amount_gt",
+            "has_remaining_amount",
             "ended",
             "hold_expiring",
+            "search",
+            "upcoming",
         )
 
     def filter_date(self, queryset, name, value):
@@ -71,17 +149,7 @@ class BookingFilter(django_filters.FilterSet):
         return queryset.filter(start_time__lt=value)
 
     def with_hold_expiry(self, queryset):
-        hold_expiry_duration = ExpressionWrapper(
-            Cast("court__internal_hold_expiry_hours", IntegerField())
-            * Value(timedelta(hours=1)),
-            output_field=DurationField(),
-        )
-        return queryset.annotate(
-            hold_expires_at=ExpressionWrapper(
-                F("created") + hold_expiry_duration,
-                output_field=DateTimeField(),
-            )
-        )
+        return annotate_booking_hold_expires_at(queryset)
 
     def expiring_hold_query(self):
         now = timezone.now()
@@ -92,20 +160,21 @@ class BookingFilter(django_filters.FilterSet):
             hold_expires_at__lte=warning_end,
         )
 
+    def _has_explicit_date_context(self):
+        data = self.data or {}
+        return any(
+            data.get(key) not in (None, "") for key in ("date", "date_from", "date_to")
+        )
+
     def filter_needs_action(self, queryset, name, value):
         if not value:
             return queryset
         queryset = self.with_hold_expiry(queryset)
-        now = timezone.now()
         return queryset.filter(
-            Q(status=Booking.Status.HOLD)
-            | Q(status=Booking.Status.CONFIRMED, end_time__lt=now)
-            | Q(
-                status=Booking.Status.CONFIRMED,
-                end_time__lt=now,
-                paid_amount__lt=F("total_price"),
+            booking_needs_action_q(
+                now=timezone.now(),
+                include_expired=self._has_explicit_date_context(),
             )
-            | self.expiring_hold_query()
         ).distinct()
 
     def filter_overdue(self, queryset, name, value):
@@ -121,6 +190,13 @@ class BookingFilter(django_filters.FilterSet):
             paid_amount__lt=F("total_price"),
         )
 
+    def filter_has_remaining_amount(self, queryset, name, value):
+        if value is None:
+            return queryset
+        if value:
+            return queryset.filter(paid_amount__lt=F("total_price"))
+        return queryset.filter(paid_amount__gte=F("total_price"))
+
     def filter_ended(self, queryset, name, value):
         if not value:
             return queryset
@@ -130,3 +206,21 @@ class BookingFilter(django_filters.FilterSet):
         if not value:
             return queryset
         return self.with_hold_expiry(queryset).filter(self.expiring_hold_query())
+
+    def filter_search(self, queryset, name, value):
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return queryset
+        return queryset.filter(
+            Q(customer_name__icontains=cleaned)
+            | customer_phone_search_q("customer_phone", cleaned)
+            | Q(notes__icontains=cleaned)
+        )
+
+    def filter_upcoming(self, queryset, name, value):
+        if not value:
+            return queryset
+        return queryset.filter(
+            status__in={Booking.Status.HOLD, Booking.Status.CONFIRMED},
+            end_time__gt=timezone.now(),
+        )

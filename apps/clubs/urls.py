@@ -16,6 +16,7 @@ membership_detail = ClubMembershipViewSet.as_view(
     {
         "get": "retrieve",
         "patch": "partial_update",
+        "delete": "destroy",
     }
 )
 club_user_list = ClubUserListViewSet.as_view({"get": "list"})

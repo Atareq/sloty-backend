@@ -4,12 +4,17 @@ Always read `AGENTS.md` before planning or making code changes.
 
 Treat `AGENTS.md` as the engineering source of truth for this repository.
 
-When relevant to the task, also read:
-- `docs/business-analysis.txt`
-- `docs/documentation.txt`
-- `docs/sprints.txt`
+Source-of-truth order:
 
-Use those docs for business and product context only. Do not violate documented rules, flows, or assumptions unless the task explicitly asks for a change.
+1. `AGENTS.md`
+2. Current locked contracts under `docs/` (currently
+   `docs/recurring-bookings-contract.txt`)
+3. `README.md`
+4. Historical planning documents (`docs/business-analysis.txt`,
+   `docs/documentation.txt`, `docs/sprints.txt`) for product context only
+
+Do not implement or restore architecture from historical planning documents
+when they conflict with `AGENTS.md` or current locked contracts.
 
 After every code change, review whether `AGENTS.md` needs an update.
 

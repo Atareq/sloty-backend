@@ -8,22 +8,28 @@ def has_active_club_membership(user, club) -> bool:
         return False
     if user.is_platform_super_admin():
         return True
-    return ClubMembership.objects.filter(
-        club=club,
-        user=user,
-        is_active=True,
-    ).exists()
+    return (
+        ClubMembership.objects.granting_access()
+        .filter(
+            club=club,
+            user=user,
+        )
+        .exists()
+    )
 
 
 def has_active_owner_membership(user, club) -> bool:
     if not user.is_authenticated:
         return False
-    return ClubMembership.objects.filter(
-        club=club,
-        user=user,
-        role=ClubMembership.Role.OWNER,
-        is_active=True,
-    ).exists()
+    return (
+        ClubMembership.objects.granting_access()
+        .filter(
+            club=club,
+            user=user,
+            role=ClubMembership.Role.OWNER,
+        )
+        .exists()
+    )
 
 
 class CanManageClubs(BasePermission):
@@ -87,7 +93,7 @@ class CanManageClubCourts(BasePermission):
         if request.method in SAFE_METHODS:
             return access.can_access_court(obj)
         if view.action in {"update", "partial_update"}:
-            return access.is_platform_admin or access.is_owner or access.is_manager
+            return access.can_update_court(obj, {})
         return access.can_access_court(obj)
 
 
@@ -117,6 +123,8 @@ class CanManageClubBookings(BasePermission):
 class CanManageClubSettlements(BasePermission):
     def has_permission(self, request, view) -> bool:
         access = view.get_access_context()
+        if view.action == "unsettled_summary":
+            return access.can_manage_settlements()
         if view.action in {"create", "preview"}:
             return access.has_any_club_access()
         if request.method in SAFE_METHODS:

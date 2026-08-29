@@ -20,15 +20,37 @@ def env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 SECRET_KEY = os.environ.get("SECRET_KEY")
 
 DEBUG = env_bool("DEBUG", default=False)
 
 SQL_QUERY_STATS_ENABLED = env_bool("SQL_QUERY_STATS_ENABLED", default=False)
 SQL_QUERY_STATS_VERBOSE = env_bool("SQL_QUERY_STATS_VERBOSE", default=False)
-SQL_QUERY_STATS_SLOW_QUERY_MS = float(
-    os.environ.get("SQL_QUERY_STATS_SLOW_QUERY_MS", "100")
-)
+SQL_QUERY_STATS_SLOW_QUERY_MS = env_float("SQL_QUERY_STATS_SLOW_QUERY_MS", 100)
+SQL_QUERY_STATS_WARN_QUERY_COUNT = env_int("SQL_QUERY_STATS_WARN_QUERY_COUNT", 1)
+SQL_QUERY_STATS_SLOW_REQUEST_MS = env_float("SQL_QUERY_STATS_SLOW_REQUEST_MS", 500)
+SQL_QUERY_STATS_MAX_QUERY_SAMPLES = env_int("SQL_QUERY_STATS_MAX_QUERY_SAMPLES", 5)
+SQL_QUERY_STATS_MAX_SQL_LENGTH = env_int("SQL_QUERY_STATS_MAX_SQL_LENGTH", 500)
 
 ALLOWED_HOSTS = [
     host.strip()
@@ -86,8 +108,12 @@ REST_FRAMEWORK = {
     "PAGE_SIZE": 20,
 }
 
+JWT_ACCESS_TOKEN_MINUTES = env_int("JWT_ACCESS_TOKEN_MINUTES", 60)
+JWT_REFRESH_TOKEN_DAYS = env_int("JWT_REFRESH_TOKEN_DAYS", 7)
+
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=400),
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=JWT_ACCESS_TOKEN_MINUTES),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=JWT_REFRESH_TOKEN_DAYS),
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
@@ -189,7 +215,7 @@ LANGUAGE_CODE = "en-us"
 
 LOCALE_PATHS = [BASE_DIR / "locale"]
 
-TIME_ZONE = "UTC"
+TIME_ZONE = "Africa/Cairo"
 
 USE_I18N = True
 

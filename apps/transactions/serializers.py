@@ -21,6 +21,14 @@ class TransactionListSerializer(serializers.ModelSerializer):
         source="booking.end_time",
         read_only=True,
     )
+    booking_customer_name = serializers.CharField(
+        source="booking.customer_name",
+        read_only=True,
+    )
+    booking_customer_phone = serializers.CharField(
+        source="booking.customer_phone",
+        read_only=True,
+    )
     court_name = serializers.CharField(source="court.name", read_only=True)
     created_by_username = serializers.CharField(
         source="created_by.username",
@@ -33,6 +41,8 @@ class TransactionListSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "booking",
+            "booking_customer_name",
+            "booking_customer_phone",
             "booking_start_time",
             "booking_end_time",
             "club",
@@ -64,6 +74,14 @@ class TransactionDetailSerializer(serializers.ModelSerializer):
         source="booking.end_time",
         read_only=True,
     )
+    booking_customer_name = serializers.CharField(
+        source="booking.customer_name",
+        read_only=True,
+    )
+    booking_customer_phone = serializers.CharField(
+        source="booking.customer_phone",
+        read_only=True,
+    )
     court_name = serializers.CharField(source="court.name", read_only=True)
     created_by_username = serializers.CharField(
         source="created_by.username",
@@ -76,6 +94,8 @@ class TransactionDetailSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "booking",
+            "booking_customer_name",
+            "booking_customer_phone",
             "booking_start_time",
             "booking_end_time",
             "club",

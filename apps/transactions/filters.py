@@ -1,11 +1,13 @@
 from datetime import datetime, time, timedelta
 
 import django_filters
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
+from apps.common.search import customer_phone_search_q
 from apps.transactions.models import Transaction
 
 
@@ -60,6 +62,23 @@ class TransactionFilter(django_filters.FilterSet):
     created_by = django_filters.NumberFilter(field_name="created_by_id")
     is_cancelled = django_filters.BooleanFilter(field_name="is_cancelled")
     settlement_status = django_filters.CharFilter(method="filter_settlement_status")
+    settlement = django_filters.NumberFilter(
+        field_name="settlement_line__settlement_id"
+    )
+    search = django_filters.CharFilter(
+        method="filter_search",
+        help_text=(
+            "Search booking customer_name, booking customer_phone "
+            "(including Egyptian phone variants), and payment_reference."
+        ),
+    )
+    ordering = django_filters.ChoiceFilter(
+        choices=(
+            ("created", "created"),
+            ("-created", "-created"),
+        ),
+        method="filter_ordering",
+    )
 
     class Meta:
         model = Transaction
@@ -74,6 +93,9 @@ class TransactionFilter(django_filters.FilterSet):
             "created_by",
             "is_cancelled",
             "settlement_status",
+            "settlement",
+            "search",
+            "ordering",
         )
 
     def filter_date(self, queryset, name, value):
@@ -110,3 +132,18 @@ class TransactionFilter(django_filters.FilterSet):
                 ]
             }
         )
+
+    def filter_search(self, queryset, name, value):
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return queryset
+        return queryset.filter(
+            Q(booking__customer_name__icontains=cleaned)
+            | customer_phone_search_q("booking__customer_phone", cleaned)
+            | Q(payment_reference__icontains=cleaned)
+        )
+
+    def filter_ordering(self, queryset, name, value):
+        if value == "created":
+            return queryset.order_by("created", "id")
+        return queryset.order_by("-created", "-id")

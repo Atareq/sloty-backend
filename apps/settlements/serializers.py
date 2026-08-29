@@ -7,11 +7,20 @@ from apps.settlements.models import Settlement, SettlementTransaction
 from apps.settlements.services import preview_settlement, process_settlement_request
 
 
+def user_display_name(user):
+    if user is None:
+        return ""
+    full_name = user.get_full_name().strip()
+    return full_name or user.username
+
+
 class SettlementListSerializer(serializers.ModelSerializer):
     collected_by = serializers.PrimaryKeyRelatedField(read_only=True)
     collected_by_name = serializers.SerializerMethodField()
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     settled_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    settled_by_name = serializers.SerializerMethodField()
+    court_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Settlement
@@ -19,6 +28,7 @@ class SettlementListSerializer(serializers.ModelSerializer):
             "id",
             "club",
             "court",
+            "court_name",
             "period_start",
             "period_end",
             "status",
@@ -28,21 +38,43 @@ class SettlementListSerializer(serializers.ModelSerializer):
             "collected_by_name",
             "created_by",
             "settled_by",
+            "settled_by_name",
             "settled_at",
             "created",
         )
         read_only_fields = fields
 
     def get_collected_by_name(self, obj):
-        if obj.collected_by is None:
-            return ""
-        full_name = obj.collected_by.get_full_name().strip()
-        return full_name or obj.collected_by.username
+        return user_display_name(obj.collected_by)
+
+    def get_settled_by_name(self, obj):
+        return user_display_name(obj.settled_by)
+
+    def get_court_name(self, obj):
+        if obj.court_id is None:
+            return None
+        return obj.court.name
 
 
 class SettlementLineSerializer(serializers.ModelSerializer):
     transaction = serializers.PrimaryKeyRelatedField(read_only=True)
     booking = serializers.IntegerField(source="transaction.booking_id", read_only=True)
+    booking_customer_name = serializers.CharField(
+        source="transaction.booking.customer_name",
+        read_only=True,
+    )
+    booking_customer_phone = serializers.CharField(
+        source="transaction.booking.customer_phone",
+        read_only=True,
+    )
+    booking_start_time = serializers.DateTimeField(
+        source="transaction.booking.start_time",
+        read_only=True,
+    )
+    booking_end_time = serializers.DateTimeField(
+        source="transaction.booking.end_time",
+        read_only=True,
+    )
     court = serializers.IntegerField(source="transaction.court_id", read_only=True)
     court_name = serializers.CharField(source="transaction.court.name", read_only=True)
     payment_method = serializers.CharField(
@@ -72,6 +104,10 @@ class SettlementLineSerializer(serializers.ModelSerializer):
             "transaction",
             "transaction_type",
             "booking",
+            "booking_customer_name",
+            "booking_customer_phone",
+            "booking_start_time",
+            "booking_end_time",
             "court",
             "court_name",
             "amount",
@@ -91,6 +127,8 @@ class SettlementDetailSerializer(serializers.ModelSerializer):
     collected_by_name = serializers.SerializerMethodField()
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     settled_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    settled_by_name = serializers.SerializerMethodField()
+    court_name = serializers.SerializerMethodField()
     lines = SettlementLineSerializer(many=True, read_only=True)
     transactions = SettlementLineSerializer(source="lines", many=True, read_only=True)
 
@@ -100,6 +138,7 @@ class SettlementDetailSerializer(serializers.ModelSerializer):
             "id",
             "club",
             "court",
+            "court_name",
             "period_start",
             "period_end",
             "status",
@@ -110,6 +149,7 @@ class SettlementDetailSerializer(serializers.ModelSerializer):
             "collected_by_name",
             "created_by",
             "settled_by",
+            "settled_by_name",
             "settled_at",
             "created",
             "modified",
@@ -119,10 +159,15 @@ class SettlementDetailSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_collected_by_name(self, obj):
-        if obj.collected_by is None:
-            return ""
-        full_name = obj.collected_by.get_full_name().strip()
-        return full_name or obj.collected_by.username
+        return user_display_name(obj.collected_by)
+
+    def get_settled_by_name(self, obj):
+        return user_display_name(obj.settled_by)
+
+    def get_court_name(self, obj):
+        if obj.court_id is None:
+            return None
+        return obj.court.name
 
 
 class SettlementCreateSerializer(serializers.ModelSerializer):
@@ -221,6 +266,10 @@ class SettlementPreviewTransactionSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     kind = serializers.CharField()
     booking = serializers.IntegerField(allow_null=True)
+    booking_customer_name = serializers.CharField()
+    booking_customer_phone = serializers.CharField()
+    booking_start_time = serializers.DateTimeField()
+    booking_end_time = serializers.DateTimeField()
     court = serializers.IntegerField()
     court_name = serializers.CharField()
     amount = serializers.DecimalField(max_digits=10, decimal_places=2)
@@ -249,3 +298,57 @@ class SettlementPreviewResponseSerializer(serializers.Serializer):
         child=serializers.DecimalField(max_digits=10, decimal_places=2)
     )
     transactions = SettlementPreviewTransactionSerializer(many=True)
+
+
+class SettlementUnsettledSummaryRequestSerializer(serializers.Serializer):
+    collected_by = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(),
+        required=False,
+    )
+    court = serializers.PrimaryKeyRelatedField(
+        queryset=Court.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+
+    def create(self, validated_data):
+        raise NotImplementedError
+
+    def update(self, instance, validated_data):
+        raise NotImplementedError
+
+    def validate(self, attrs):
+        access = self.context["club_access"]
+        court = attrs.get("court")
+        if court is not None and court.club_id != access.club.id:
+            raise serializers.ValidationError(
+                {
+                    "court": [
+                        serializers.ErrorDetail(
+                            _("Court must belong to the selected club."),
+                            code="invalid_court",
+                        ),
+                    ],
+                }
+            )
+        return attrs
+
+
+class SettlementUnsettledSummaryRowSerializer(serializers.Serializer):
+    collected_by = serializers.IntegerField()
+    collected_by_name = serializers.CharField()
+    period_start = serializers.DateTimeField()
+    period_end = serializers.DateTimeField()
+    transaction_count = serializers.IntegerField()
+    total_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+    booking_payments = serializers.DecimalField(max_digits=10, decimal_places=2)
+    booking_refunds = serializers.DecimalField(max_digits=10, decimal_places=2)
+    totals_by_payment_method = serializers.DictField(
+        child=serializers.DecimalField(max_digits=10, decimal_places=2)
+    )
+    is_self = serializers.BooleanField()
+    can_approve = serializers.BooleanField()
+
+
+class SettlementUnsettledSummaryResponseSerializer(serializers.Serializer):
+    results = SettlementUnsettledSummaryRowSerializer(many=True)

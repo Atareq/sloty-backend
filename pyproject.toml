@@ -18,3 +18,11 @@ skip = ["migrations", ".venv"]
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings.test"
 python_files = ["tests.py", "test_*.py", "*_tests.py"]
+norecursedirs = [
+    ".*",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+    ".venv",
+]

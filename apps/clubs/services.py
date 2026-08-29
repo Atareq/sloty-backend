@@ -1,9 +1,65 @@
 from django.db import transaction
-from rest_framework import serializers
-from rest_framework.exceptions import PermissionDenied
+from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
+from rest_framework import serializers, status
+from rest_framework.exceptions import ErrorDetail, PermissionDenied
 
 from apps.accounts.models import User
+from apps.audit.models import AuditLog
+from apps.audit.services import record_audit_log
 from apps.clubs.models import ClubMembership
+from apps.common.exceptions import SlotyAPIException
+
+MEMBERSHIP_ALREADY_DELETED_MESSAGE = _("This club membership has already been removed.")
+MEMBERSHIP_DELETED_CANNOT_REACTIVATE_MESSAGE = _(
+    "A permanently removed membership cannot be reactivated."
+)
+MEMBERSHIP_DELETED_CANNOT_RECREATE_MESSAGE = _(
+    "This club, user, role, and court membership was permanently removed "
+    "and cannot be created again."
+)
+
+
+def deleted_membership_identity_exists(*, club, user, role, court=None):
+    queryset = ClubMembership.objects.filter(
+        club=club,
+        user=user,
+        role=role,
+        deleted_at__isnull=False,
+    )
+    if role == ClubMembership.Role.STAFF:
+        queryset = queryset.filter(court=court)
+    else:
+        queryset = queryset.filter(court__isnull=True)
+    return queryset.exists()
+
+
+def validate_membership_identity_not_deleted(
+    *,
+    club,
+    user,
+    role,
+    court=None,
+    field="user",
+):
+    if user is None:
+        return
+    if deleted_membership_identity_exists(
+        club=club,
+        user=user,
+        role=role,
+        court=court,
+    ):
+        raise serializers.ValidationError(
+            {
+                field: [
+                    ErrorDetail(
+                        str(MEMBERSHIP_DELETED_CANNOT_RECREATE_MESSAGE),
+                        code="MEMBERSHIP_DELETED_CANNOT_RECREATE",
+                    )
+                ]
+            }
+        )
 
 
 def create_club_member(
@@ -58,6 +114,14 @@ def create_club_member(
                 created_by=created_by,
                 **user_data,
             )
+        else:
+            validate_membership_identity_not_deleted(
+                club=access.club,
+                user=user,
+                role=role,
+                court=court,
+                field="user",
+            )
 
         membership = ClubMembership.objects.create(
             club=access.club,
@@ -68,5 +132,53 @@ def create_club_member(
             manager_can_change_pricing=manager_can_change_pricing,
             is_active=True,
             created_by=created_by,
+        )
+    return membership
+
+
+def soft_delete_membership(*, access, membership, actor):
+    if membership.club_id != access.club.id:
+        raise PermissionDenied("You cannot manage memberships for this club.")
+    if not access.can_manage_memberships():
+        raise PermissionDenied("You cannot manage memberships for this club.")
+    if not access.is_platform_admin and membership.role == ClubMembership.Role.OWNER:
+        raise PermissionDenied("Club owners cannot manage owner memberships.")
+    if membership.deleted_at is not None:
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="MEMBERSHIP_ALREADY_DELETED",
+            message=MEMBERSHIP_ALREADY_DELETED_MESSAGE,
+        )
+
+    with transaction.atomic():
+        before_data = {
+            "membership_id": membership.id,
+            "user_id": membership.user_id,
+            "role": membership.role,
+            "is_active": membership.is_active,
+            "deleted_at": None,
+        }
+        membership.is_active = False
+        membership.deleted_at = timezone.now()
+        membership.deleted_by = actor
+        membership.save(
+            update_fields=["is_active", "deleted_at", "deleted_by", "modified"]
+        )
+        record_audit_log(
+            club=membership.club,
+            court=membership.court,
+            actor=actor,
+            action=AuditLog.Action.MEMBERSHIP_DELETED,
+            entity_type="ClubMembership",
+            entity_id=membership.id,
+            before_data=before_data,
+            after_data={
+                "membership_id": membership.id,
+                "user_id": membership.user_id,
+                "role": membership.role,
+                "is_active": membership.is_active,
+                "deleted_at": membership.deleted_at.isoformat(),
+                "deleted_by": actor.id if actor else None,
+            },
         )
     return membership

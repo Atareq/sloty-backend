@@ -1,7 +1,3 @@
-from decimal import Decimal
-
-from django.db.models import DecimalField, Q, Sum, Value
-from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
@@ -15,7 +11,7 @@ from rest_framework.mixins import (
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
-from apps.bookings.filters import BookingFilter
+from apps.bookings.filters import BookingFilter, annotate_booking_hold_expires_at
 from apps.bookings.models import Booking
 from apps.bookings.serializers import (
     BookingCancellationPreviewResponseSerializer,
@@ -27,6 +23,7 @@ from apps.bookings.serializers import (
     BookingExpireSerializer,
     BookingListSerializer,
     BookingNoShowSerializer,
+    BookingRecurrenceNextSerializer,
     BookingRescheduleSerializer,
     BookingSlotQuerySerializer,
     BookingSlotsResponseSerializer,
@@ -40,11 +37,12 @@ from apps.bookings.services import (
     expire_booking,
     generate_booking_slots,
     no_show_booking,
+    preview_recurrence_next,
     reschedule_booking,
 )
 from apps.clubs.mixins import ClubScopedAccessMixin
 from apps.clubs.permissions import CanManageClubBookings
-from apps.transactions.models import Transaction
+from apps.transactions.services import annotate_booking_paid_amount
 
 
 @extend_schema_view(
@@ -82,31 +80,19 @@ class BookingViewSet(
             from apps.bookings.models import Booking
 
             return Booking.objects.none()
-        return (
-            self.get_access_context()
-            .scoped_bookings_queryset()
-            .select_related(
-                "club",
-                "court",
-                "created_by",
-                "previous_recurring_booking",
-                "next_recurring_booking",
-            )
-            .annotate(
-                paid_amount=Coalesce(
-                    Sum(
-                        "transactions__amount",
-                        filter=Q(
-                            transactions__is_cancelled=False,
-                            transactions__transaction_type=Transaction.Type.PAYMENT,
-                        ),
-                    ),
-                    Value(Decimal("0.00")),
-                    output_field=DecimalField(max_digits=10, decimal_places=2),
+        return annotate_booking_hold_expires_at(
+            annotate_booking_paid_amount(
+                self.get_access_context()
+                .scoped_bookings_queryset()
+                .select_related(
+                    "club",
+                    "court",
+                    "created_by",
+                    "previous_recurring_booking",
+                    "next_recurring_booking",
                 )
             )
-            .order_by("start_time", "id")
-        )
+        ).order_by("start_time", "id")
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -131,6 +117,8 @@ class BookingViewSet(
             return BookingExpireSerializer
         if self.action == "end_recurrence":
             return BookingEndRecurrenceSerializer
+        if self.action == "recurrence_next":
+            return BookingRecurrenceNextSerializer
         return BookingDetailSerializer
 
     def get_lifecycle_booking(self, access):
@@ -209,6 +197,11 @@ class BookingViewSet(
         tags=["Bookings"],
         request=BookingCompleteSerializer,
         responses=BookingDetailSerializer,
+        description=(
+            "Complete a CONFIRMED booking. Remaining amount must already be "
+            "zero. confirm_collect_remaining_cash is a deprecated no-op and "
+            "does not create a cash transaction."
+        ),
     )
     @action(detail=True, methods=["post"])
     def complete(self, request, *args, **kwargs):
@@ -293,3 +286,21 @@ class BookingViewSet(
             reason=data.get("reason", ""),
         )
         return self.lifecycle_response(booking)
+
+    @extend_schema(
+        tags=["Bookings"],
+        request=None,
+        responses=BookingRecurrenceNextSerializer,
+        description=(
+            "Read-only preview of the next weekly occurrence for an ACTIVE "
+            "recurring CONFIRMED booking. Uses the same date, price, deposit, "
+            "and availability rules as complete with continue_recurring=true. "
+            "Does not mutate. Completion revalidates."
+        ),
+    )
+    @action(detail=True, methods=["get"], url_path="recurrence-next")
+    def recurrence_next(self, request, *args, **kwargs):
+        access, booking = self.get_lifecycle_context()
+        data = preview_recurrence_next(access=access, booking=booking)
+        serializer = BookingRecurrenceNextSerializer(data)
+        return Response(serializer.data)

@@ -27,6 +27,7 @@ class ClubMembershipAdmin(admin.ModelAdmin):
         "manager_can_settle_transactions",
         "manager_can_change_pricing",
         "is_active",
+        "deleted_at",
         "created",
     )
     list_filter = ("role", "is_active")

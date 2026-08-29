@@ -16,10 +16,10 @@ def get_membership_for_token_context(*, user, club):
         ClubMembership.Role.STAFF: 2,
     }
     memberships = list(
-        ClubMembership.objects.filter(
+        ClubMembership.objects.granting_access()
+        .filter(
             user=user,
             club=club,
-            is_active=True,
         )
         .select_related("court")
         .order_by("id")
@@ -185,7 +185,7 @@ class UserMeSerializer(serializers.ModelSerializer):
         memberships = getattr(obj, "active_memberships_for_me", None)
         if memberships is None:
             memberships = (
-                obj.club_memberships.filter(is_active=True)
+                obj.club_memberships.granting_access()
                 .select_related("club", "court")
                 .order_by("club__name", "role", "id")
             )

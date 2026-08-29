@@ -22,6 +22,7 @@ booking_no_show = BookingViewSet.as_view({"post": "no_show"})
 booking_reschedule = BookingViewSet.as_view({"post": "reschedule"})
 booking_expire = BookingViewSet.as_view({"post": "expire"})
 booking_end_recurrence = BookingViewSet.as_view({"post": "end_recurrence"})
+booking_recurrence_next = BookingViewSet.as_view({"get": "recurrence_next"})
 
 urlpatterns = [
     path("clubs/<slug:club_slug>/bookings/", booking_list, name="club-booking-list"),
@@ -69,5 +70,10 @@ urlpatterns = [
         "clubs/<slug:club_slug>/bookings/<int:pk>/end-recurrence/",
         booking_end_recurrence,
         name="club-booking-end-recurrence",
+    ),
+    path(
+        "clubs/<slug:club_slug>/bookings/<int:pk>/recurrence-next/",
+        booking_recurrence_next,
+        name="club-booking-recurrence-next",
     ),
 ]

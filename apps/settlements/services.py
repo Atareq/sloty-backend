@@ -1,12 +1,14 @@
 from decimal import Decimal
 
 from django.db import IntegrityError, transaction
-from django.db.models import Sum
+from django.db.models import Count, DecimalField, Min, Q, Sum, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
+from apps.accounts.models import User
 from apps.common.exceptions import SlotyAPIException
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
@@ -146,6 +148,10 @@ def serialize_preview_transactions(transactions):
             "id": transaction_obj.id,
             "kind": transaction_obj.transaction_type,
             "booking": transaction_obj.booking_id,
+            "booking_customer_name": transaction_obj.booking.customer_name,
+            "booking_customer_phone": transaction_obj.booking.customer_phone,
+            "booking_start_time": transaction_obj.booking.start_time,
+            "booking_end_time": transaction_obj.booking.end_time,
             "court": transaction_obj.court_id,
             "court_name": transaction_obj.court.name,
             "amount": transaction_obj.amount,
@@ -256,6 +262,136 @@ def preview_settlement(*, access, collected_by, actor, court=None):
         actor=actor,
         court=court,
     )
+
+
+ZERO = Decimal("0.00")
+MONEY_FIELD = DecimalField(max_digits=10, decimal_places=2)
+
+
+def empty_payment_method_totals():
+    return {
+        str(payment_method): ZERO
+        for payment_method, _label in Transaction.PaymentMethod.choices
+    }
+
+
+def money_total(expression, *, filter=None):
+    return Coalesce(
+        Sum(expression, filter=filter),
+        Value(ZERO),
+        output_field=MONEY_FIELD,
+    )
+
+
+def unsettled_candidate_queryset(*, access, collected_by=None, court=None):
+    if court is not None and not access.can_access_court(court):
+        raise PermissionDenied("You cannot access this court.")
+    queryset = access.scoped_transactions_queryset().filter(
+        club=access.club,
+        settlement_line__isnull=True,
+        is_cancelled=False,
+        created_by__isnull=False,
+    )
+    if collected_by is not None:
+        queryset = queryset.filter(created_by=collected_by)
+    if court is not None:
+        queryset = queryset.filter(court=court)
+    return queryset
+
+
+def build_unsettled_collector_summaries(
+    *,
+    access,
+    actor,
+    collected_by=None,
+    court=None,
+):
+    if collected_by is not None:
+        validate_preview_collected_by(
+            access=access,
+            collected_by=collected_by,
+            actor=actor,
+        )
+    queryset = unsettled_candidate_queryset(
+        access=access,
+        collected_by=collected_by,
+        court=court,
+    )
+    period_end = timezone.now()
+    grouped_rows = list(
+        queryset.values("created_by")
+        .annotate(
+            transaction_count=Count("id"),
+            total_amount=money_total("amount"),
+            booking_payments=money_total(
+                "amount",
+                filter=Q(transaction_type=Transaction.Type.PAYMENT),
+            ),
+            booking_refunds=money_total(
+                "amount",
+                filter=Q(transaction_type=Transaction.Type.REFUND),
+            ),
+            period_start=Min("created"),
+        )
+        .order_by("created_by")
+    )
+    collector_ids = [row["created_by"] for row in grouped_rows]
+    method_totals_by_collector = {
+        collector_id: empty_payment_method_totals() for collector_id in collector_ids
+    }
+    if collector_ids:
+        for item in (
+            queryset.filter(created_by_id__in=collector_ids)
+            .values("created_by", "payment_method")
+            .annotate(total=money_total("amount"))
+        ):
+            method_totals_by_collector[item["created_by"]][
+                str(item["payment_method"])
+            ] = (item["total"] or ZERO)
+    users = {
+        user.id: user
+        for user in User.objects.filter(id__in=collector_ids).only(
+            "id",
+            "first_name",
+            "last_name",
+            "username",
+        )
+    }
+    roles_by_user_id = access.active_roles_by_user_ids(collector_ids)
+    results = []
+    for row in grouped_rows:
+        collector_id = row["created_by"]
+        roles = roles_by_user_id.get(collector_id, set())
+        if not access.can_preview_settlement_for_roles(
+            user_id=collector_id,
+            roles=roles,
+        ):
+            continue
+        collector = users.get(collector_id)
+        if collector is None:
+            continue
+        results.append(
+            {
+                "collected_by": collector_id,
+                "collected_by_name": get_user_display_name(collector),
+                "period_start": row["period_start"],
+                "period_end": period_end,
+                "transaction_count": row["transaction_count"],
+                "total_amount": row["total_amount"] or ZERO,
+                "booking_payments": row["booking_payments"] or ZERO,
+                "booking_refunds": row["booking_refunds"] or ZERO,
+                "totals_by_payment_method": method_totals_by_collector[collector_id],
+                "is_self": bool(actor and collector_id == actor.id),
+                "can_approve": access.can_approve_settlement_for_roles(
+                    user_id=collector_id,
+                    roles=roles,
+                ),
+            }
+        )
+    results.sort(
+        key=lambda item: (item["collected_by_name"].casefold(), item["collected_by"])
+    )
+    return {"results": results}
 
 
 def create_approved_settlement(*, access, collected_by, notes="", actor, court=None):
