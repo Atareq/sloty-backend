@@ -8,7 +8,8 @@ management system. The default local settings module is
 
 1. `AGENTS.md` — current engineering architecture and conventions.
 2. Locked contracts under `docs/`, currently
-   `docs/recurring-bookings-contract.txt`.
+   `docs/recurring-bookings-contract.txt` and
+   `docs/financial-consistency-contract.txt`.
 3. This README — setup and API/operator guidance.
 4. `docs/business-analysis.txt`, `docs/documentation.txt`, and
    `docs/sprints.txt` — historical planning context only.
@@ -248,6 +249,8 @@ Useful booking list filters:
 Booking list and detail include read-only `hold_expires_at`. For `HOLD` it is
 `min(created + court.internal_hold_expiry_hours, booking.start_time)`. For
 other statuses it is `null`.
+Booking list rows also include `notes` (an empty string when unset), so list
+cards do not need a Booking detail request.
 
 Booking overlap validation treats `HOLD`, `CONFIRMED`, `COMPLETED`, and
 `NO_SHOW` bookings as blocking historical or active slots. Only `CANCELLED` and
@@ -422,6 +425,14 @@ OWNER money, and cannot approve their own row. Optional `collected_by` and
 `court` follow preview access rules. POST create remains the receive-money
 mutation. GET list remains settlement history.
 
+Current Custody is all-time state: every authorized, non-cancelled signed
+Transaction with no settlement line. It is not restricted by Transaction age,
+Booking date, dashboard/report ranges, payment method, or an analytical
+settlement-status filter. The default covers all Courts accessible to the actor;
+`court` narrows it only when explicitly supplied. Main totals include all
+payment methods, while `totals_by_payment_method` gives signed per-method nets.
+Zero-net and negative-net collectors remain visible when candidate rows exist.
+
 Settlement list/detail include `court_name` (`null` when `court` is omitted)
 and `settled_by_name` (full name if present, otherwise username).
 Settlement lines and preview transactions include booking customer name/phone
@@ -508,6 +519,13 @@ localized display label for the UI:
 }
 ```
 
+List and detail responses also include `actor_name`, `court_name`, source labels
+for those names, and an entity-specific `summary`. New events preserve display
+facts at event time in existing Audit JSON, so later user/Court/customer changes
+do not rewrite history. Older rows are not backfilled; current actor/Court
+relations may be used only as explicitly labeled display fallbacks. No per-row
+Booking, Transaction, or Settlement lookup is needed.
+
 Platform admins, owners, and managers can view audit logs for the selected
 club. Staff cannot access audit logs in Sprint 7.
 
@@ -546,11 +564,12 @@ the current club-level manager architecture. Staff can access summary for their
 assigned court only and receive operational counts with
 `financial_visible=false`; financial fields are returned as `null`.
 
-Dashboard transaction cards are period-scoped to the selected summary/overview
-date range. Dashboard unsettled money cards represent current open balance by
-default, so old unsettled money is not hidden just because today's date is
-selected. They still respect optional `court`, `collected_by`, and
-`payment_method` filters.
+Dashboard Transaction activity cards are period-scoped to the selected
+summary/overview date range. Dashboard unsettled/current-custody cards are
+all-time state, so old unsettled money is not hidden just because today's date
+is selected. They respect explicit authorized `court` and `collected_by`
+filters. `payment_method` and `settlement_status` filter period activity only;
+they never redefine Current Custody.
 
 - `unsettled_transaction_count`: number of eligible unsettled transactions.
 - `unsettled_transaction_total_amount`: total money amount of those eligible
@@ -558,7 +577,7 @@ selected. They still respect optional `court`, `collected_by`, and
 - `staff_with_unsettled_transactions_count`: number of distinct users who
   currently have eligible unsettled transactions.
 
-Eligible unsettled transactions are non-cancelled, positive-amount transactions
+Eligible unsettled transactions are non-cancelled, signed transactions
 inside the selected club/court access scope with no settlement line. Dashboard
 settlement-related metrics are derived from unsettled transactions and their
 `created_by` users, not from `Settlement.status=PENDING`. The previous
@@ -571,7 +590,8 @@ Summary also returns:
 - `needs_action_breakdown`: hold waiting payment, overdue confirmed, remaining
   after slot end, and expiring hold counts.
 - `payment_method_totals`: grouped period transaction totals.
-- `staff_unsettled_money`: grouped current open balance by collector and court.
+- `staff_unsettled_money`: grouped current signed balance by collector across
+  all accessible Courts by default, or for one Court when explicitly filtered.
 
 Completed bookings with remaining amount are not included in normal
 `needs_action_count`; they are treated as data integrity warnings. EXPIRED

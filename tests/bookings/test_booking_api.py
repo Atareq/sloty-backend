@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
 from django.core.management import call_command
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
@@ -2639,10 +2640,13 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             entity_id=due_hold.id,
         )
         self.assertEqual(audit_logs.count(), 1)
-        self.assertIsNone(audit_logs.get().actor)
+        audit_log = audit_logs.get()
+        self.assertIsNone(audit_log.actor)
+        self.assertEqual(audit_log.metadata["source"], "automatic_hold_expiry")
+        self.assertFalse(audit_log.metadata["recurrence_ended"])
         self.assertEqual(
-            audit_logs.get().metadata,
-            {"source": "automatic_hold_expiry", "recurrence_ended": False},
+            audit_log.metadata["display_snapshot"],
+            {"actor_name": "", "court_name": self.court.name},
         )
 
     def test_due_hold_candidates_respect_per_court_expiry_hours(self):
@@ -2904,6 +2908,18 @@ class BookingFilterTests(BookingAPITestCase):
             status=Booking.Status.HOLD,
         )
         self.client.force_authenticate(user=self.platform_admin)
+
+    def test_booking_list_includes_notes(self):
+        self.booking.notes = "Bring tournament equipment"
+        self.booking.save(update_fields=["notes"])
+
+        response = self.client.get(self.booking_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking_data = next(
+            item for item in response.data["results"] if item["id"] == self.booking.id
+        )
+        self.assertEqual(booking_data["notes"], "Bring tournament equipment")
 
     def test_filter_by_court_inside_selected_club(self):
         response = self.client.get(
@@ -3400,8 +3416,13 @@ class BookingFilterPatternTests(BookingAPITestCase):
     def test_openapi_documents_new_booking_contract_fields(self):
         response = self.client.get(reverse("schema"))
         schema = response.content.decode()
+        schema_doc = yaml.safe_load(schema)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking_list_fields = schema_doc["components"]["schemas"]["BookingList"][
+            "properties"
+        ]
+        self.assertIn("notes", booking_list_fields)
         self.assertIn("hold_expires_at", schema)
         self.assertIn("recurrence-next", schema)
         self.assertIn("search", schema)

@@ -107,6 +107,11 @@ class DashboardOverviewAPIView(DashboardAPIView):
         tags=["Dashboard"],
         parameters=[DashboardOverviewQuerySerializer],
         responses=DashboardOverviewSerializer,
+        description=(
+            "Period booking and transaction activity plus all-time current "
+            "custody. Current custody is the signed sum of currently unsettled, "
+            "non-cancelled transactions and is not limited by the date range."
+        ),
     )
     def get(self, request, *args, **kwargs):
         query = self.validate_query()
@@ -129,6 +134,12 @@ class DashboardSummaryAPIView(DashboardAPIView):
         tags=["Dashboard"],
         parameters=[DashboardSummaryQuerySerializer],
         responses=DashboardSummaryResponseSerializer,
+        description=(
+            "Period analytics plus all-time current custody. Date, payment_method, "
+            "and settlement_status filter period activity only; they do not change "
+            "current-custody totals or collector rows. An explicit court or "
+            "collected_by filter still narrows authorized custody."
+        ),
     )
     def get(self, request, *args, **kwargs):
         query = self.validate_query()

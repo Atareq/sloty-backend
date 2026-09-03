@@ -2,7 +2,10 @@ from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import yaml
 from django.core.management import call_command
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import resolve, reverse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -12,7 +15,12 @@ from rest_framework.test import APITestCase
 from apps.accounts.models import User
 from apps.audit.filters import AuditLogFilter
 from apps.audit.models import AuditLog
-from apps.audit.services import record_audit_log
+from apps.audit.services import (
+    booking_audit_snapshot,
+    record_audit_log,
+    settlement_audit_snapshot,
+    transaction_audit_snapshot,
+)
 from apps.audit.views import AuditLogViewSet
 from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
@@ -230,7 +238,14 @@ class AuditModelServiceTests(AuditAPITestCase):
         self.assertEqual(audit_log.entity_id, 15)
         self.assertEqual(audit_log.before_data, {"old": "value"})
         self.assertEqual(audit_log.after_data, {"new": "value"})
-        self.assertEqual(audit_log.metadata, {"source": "test"})
+        self.assertEqual(audit_log.metadata["source"], "test")
+        self.assertEqual(
+            audit_log.metadata["display_snapshot"],
+            {
+                "actor_name": self.actor.username,
+                "court_name": self.court.name,
+            },
+        )
 
     def test_record_audit_log_accepts_actor_none(self):
         audit_log = record_audit_log(
@@ -364,6 +379,121 @@ class AuditAccessAPITests(AuditAPITestCase):
             detail_ar_response.data["action_label"],
             "تم إلغاء عملية الدفع",
         )
+
+    def test_list_and_detail_include_event_snapshot_names_and_entity_summaries(self):
+        self.owner.first_name = "Ahmed"
+        self.owner.last_name = "Ali"
+        self.owner.save(update_fields=["first_name", "last_name"])
+        booking = self.create_booking(
+            self.court,
+            customer_name="Original Customer",
+        )
+        transaction_obj = self.create_transaction(
+            booking,
+            created_by=self.owner,
+            payment_method=Transaction.PaymentMethod.BANK_TRANSFER,
+        )
+        settlement = Settlement.objects.create(
+            club=self.club,
+            court=self.court,
+            collected_by=self.owner,
+            period_start=self.time_at(10),
+            period_end=self.time_at(11),
+            status=Settlement.Status.SETTLED,
+            total_amount=Decimal("50.00"),
+            transaction_count=1,
+            settled_by=self.platform_admin,
+            settled_at=self.time_at(11),
+        )
+        logs = (
+            record_audit_log(
+                club=self.club,
+                court=self.court,
+                actor=self.owner,
+                action=AuditLog.Action.BOOKING_CREATED,
+                entity_type="Booking",
+                entity_id=booking.id,
+                after_data=booking_audit_snapshot(booking),
+            ),
+            record_audit_log(
+                club=self.club,
+                court=self.court,
+                actor=self.owner,
+                action=AuditLog.Action.TRANSACTION_CREATED,
+                entity_type="Transaction",
+                entity_id=transaction_obj.id,
+                after_data=transaction_audit_snapshot(transaction_obj),
+            ),
+            record_audit_log(
+                club=self.club,
+                court=self.court,
+                actor=self.platform_admin,
+                action=AuditLog.Action.SETTLEMENT_CREATED,
+                entity_type="Settlement",
+                entity_id=settlement.id,
+                after_data=settlement_audit_snapshot(settlement),
+            ),
+        )
+        original_court_name = self.court.name
+        self.owner.first_name = "Renamed"
+        self.owner.last_name = "Collector"
+        self.owner.save(update_fields=["first_name", "last_name"])
+        self.court.name = "Renamed Court"
+        self.court.save(update_fields=["name"])
+        booking.customer_name = "Renamed Customer"
+        booking.save(update_fields=["customer_name"])
+        self.client.force_authenticate(user=self.platform_admin)
+
+        list_response = self.client.get(self.audit_list_url(self.club))
+        detail_response = self.client.get(self.audit_detail_url(self.club, logs[0]))
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        rows = {
+            (row["entity_type"], row["entity_id"]): row
+            for row in list_response.data["results"]
+        }
+        booking_row = rows[("Booking", booking.id)]
+        transaction_row = rows[("Transaction", transaction_obj.id)]
+        settlement_row = rows[("Settlement", settlement.id)]
+        self.assertEqual(booking_row["actor_name"], "Ahmed Ali")
+        self.assertEqual(booking_row["actor_name_source"], "EVENT_SNAPSHOT")
+        self.assertEqual(booking_row["court_name"], original_court_name)
+        self.assertEqual(booking_row["court_name_source"], "EVENT_SNAPSHOT")
+        self.assertEqual(booking_row["summary"]["customer_name"], "Original Customer")
+        self.assertEqual(transaction_row["summary"]["collector_name"], "Ahmed Ali")
+        self.assertEqual(transaction_row["summary"]["court_name"], original_court_name)
+        self.assertEqual(settlement_row["summary"]["collected_by_name"], "Ahmed Ali")
+        self.assertEqual(settlement_row["summary"]["total_amount"], "50.00")
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data["summary"], booking_row["summary"])
+
+    def test_old_row_uses_labeled_current_fallback_without_inventing_summary(self):
+        old_log = self.create_audit_log(
+            self.club,
+            court=self.court,
+            actor=self.owner,
+            entity_type="Booking",
+            entity_id=998,
+        )
+        self.owner.first_name = "Current"
+        self.owner.last_name = "Owner"
+        self.owner.save(update_fields=["first_name", "last_name"])
+        self.court.name = "Current Court Name"
+        self.court.save(update_fields=["name"])
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(self.audit_detail_url(self.club, old_log))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["actor_name"], "Current Owner")
+        self.assertEqual(
+            response.data["actor_name_source"], "CURRENT_RELATION_FALLBACK"
+        )
+        self.assertEqual(response.data["court_name"], "Current Court Name")
+        self.assertEqual(
+            response.data["court_name_source"], "CURRENT_RELATION_FALLBACK"
+        )
+        self.assertEqual(response.data["summary"], {})
 
     def test_read_only_methods(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -547,6 +677,41 @@ class AuditFilterRegressionTests(AuditAPITestCase):
         self.assertFalse(
             (repo_root / "apps" / "transactions" / "permissions.py").exists()
         )
+
+
+class AuditQueryScalingTests(AuditAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("audit-query-admin")
+        self.actor = self.create_user("audit-query-actor")
+        self.club = self.create_club("Audit Query Club", slug="audit-query")
+        self.court = self.create_court(self.club, "Audit Query Court")
+        self.client.force_authenticate(user=self.platform_admin)
+
+    def capture_list_queries(self):
+        with CaptureQueriesContext(connection) as captured:
+            response = self.client.get(self.audit_list_url(self.club))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return len(captured)
+
+    def test_human_readable_audit_fields_are_query_bounded_for_one_vs_twenty_rows(self):
+        self.create_audit_log(
+            self.club,
+            court=self.court,
+            actor=self.actor,
+            entity_id=1,
+        )
+        one_row_queries = self.capture_list_queries()
+        for entity_id in range(2, 21):
+            self.create_audit_log(
+                self.club,
+                court=self.court,
+                actor=self.actor,
+                entity_id=entity_id,
+            )
+
+        twenty_row_queries = self.capture_list_queries()
+
+        self.assertEqual(twenty_row_queries, one_row_queries)
 
 
 class AuditBusinessLoggingTests(AuditAPITestCase):
@@ -854,10 +1019,28 @@ class AuditSeedSchemaTests(AuditAPITestCase):
     def test_schema_and_docs_return_200_and_include_audit_endpoints(self):
         schema_response = self.client.get(reverse("schema"))
         docs_response = self.client.get(reverse("swagger-ui"))
+        schema = schema_response.content.decode()
+        schema_doc = yaml.safe_load(schema)
 
         self.assertEqual(schema_response.status_code, status.HTTP_200_OK)
         self.assertEqual(docs_response.status_code, status.HTTP_200_OK)
         self.assertIn(
             "/api/v1/clubs/{club_slug}/audit-logs/",
-            schema_response.content.decode(),
+            schema,
         )
+        audit_list_fields = schema_doc["components"]["schemas"]["AuditLogList"][
+            "properties"
+        ]
+        audit_detail_fields = schema_doc["components"]["schemas"]["AuditLogDetail"][
+            "properties"
+        ]
+        for field_name in (
+            "actor_name",
+            "actor_name_source",
+            "court_name",
+            "court_name_source",
+            "summary",
+        ):
+            self.assertIn(field_name, audit_list_fields)
+            self.assertIn(field_name, audit_detail_fields)
+        self.assertEqual(audit_list_fields["summary"]["type"], "object")

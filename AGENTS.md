@@ -13,15 +13,16 @@ when they conflict.
 1. `AGENTS.md` — current engineering architecture, coding conventions, and
    repository workflow.
 2. Locked contracts under `docs/` that describe implemented behavior, currently
-   `docs/recurring-bookings-contract.txt`.
+   `docs/recurring-bookings-contract.txt` and
+   `docs/financial-consistency-contract.txt`.
 3. `README.md` — current setup and API/operator guidance.
 4. Historical planning documents such as `docs/business-analysis.txt`,
    `docs/documentation.txt`, and `docs/sprints.txt` — product/planning context
    only. They may describe an earlier implementation state and must not be used
    as the current backend source of truth.
 
-For booking-native recurrence work, also read the locked contract in
-`docs/recurring-bookings-contract.txt`. Update this file whenever the
+For booking-native recurrence or financial-consistency work, also read the
+corresponding locked contract in `docs/`. Update this file whenever the
 repository's backend structure, conventions, or workflow changes.
 
 The goal is to keep this Django backend moving toward a disciplined
@@ -228,6 +229,8 @@ Current implemented app:
   `01012345678`, spaced digits, and `+201012345678`, and `notes`. It runs on
   the already authorized/scoped queryset and composes with pagination and
   other filters. Do not add a separate `notes_search` parameter.
+- Booking list responses expose `notes` so operational cards do not require a
+  follow-up detail request.
 - `upcoming=true` means `status` in `HOLD`/`CONFIRMED` and `end_time > now`,
   so an in-progress booking remains upcoming. Terminal statuses are excluded.
 - Booking list/detail expose read-only `hold_expires_at`: for `HOLD` this is
@@ -694,6 +697,17 @@ pricing periods.
   and `court` follow preview access validation. This is grouped ORM
   aggregation, not one preview per employee. POST create and GET list remain
   the mutation and history APIs; do not add a second receive/history route.
+- `apps.settlements.services.get_current_unsettled_transactions()` is the one
+  authoritative Current Custody candidate rule used by summary, preview,
+  create, and dashboard current-money fields. It contains no date,
+  payment-method, or settlement-status parameters. Current Custody includes all
+  non-cancelled signed Transactions with no settlement line, regardless of
+  age. Optional `court` filtering applies only when explicitly selected and
+  authorized; the default is all Courts accessible to the actor.
+- Current Custody summaries expose candidate count, signed net, payment total,
+  refund total, signed payment-method breakdown, earliest candidate time, and
+  request time. Zero-net and negative-net collectors remain visible when they
+  have candidates. A zero candidate set is a distinct state.
 - Settlement list/detail include `court_name` (`Court.name` or `null` when
   `court` is null) and `settled_by_name` using the same display-name rule as
   `collected_by_name` (full name if present, otherwise username). Settlement
@@ -724,6 +738,8 @@ pricing periods.
   collector in the selected club and accessible court scope, computes
   `period_start` from the earliest selected transaction, and sets `period_end`
   to creation time.
+- Settlement Create re-queries and locks the same authoritative candidate rule.
+  Never accept Preview rows or client-provided Transaction IDs as authoritative.
 - New API-approved settlements are created directly as `SETTLED` with
   `created_by`, `settled_by`, and `settled_at` set to the approving actor. The
   `PENDING` status and mark-settled endpoint remain only for legacy pending
@@ -735,8 +751,9 @@ pricing periods.
 - Settlements include non-cancelled already-recorded signed booking
   transactions by club, collected_by user, and unsettled state. Booking
   lifecycle status is not used to decide settlement inclusion in Sprint 6.
-- Settlements do not implement refunds, reversals, corrections, commission,
-  payout automation, dashboards, or automatic settlement jobs.
+- Settlements include signed refund Transactions created by the Booking
+  cancellation lifecycle. They do not implement gateway reversals, commission,
+  payout automation, or automatic settlement jobs.
 - Settlement filters live in `apps/settlements/filters.py` and must follow the
   standard FilterSet pattern.
 - `seed_demo_data` maintains multi-club settlement examples: unsettled
@@ -767,6 +784,16 @@ pricing periods.
   translated or renamed. API serializers expose localized `action_label` from
   `get_action_display()` for UI display while keeping `action` for filtering
   and frontend logic.
+- Audit list/detail expose human-readable `actor_name`, `court_name`, their
+  source labels, and an entity-specific `summary`. Booking summaries contain
+  customer/Court/time/status context; Transaction summaries contain
+  customer/signed amount/method/collector/Court context; Settlement summaries
+  contain collector/amount/count/approver/time context.
+- New audited Booking, Transaction, and Settlement events use small snapshot
+  helpers to persist event-time display facts in existing JSON. Old rows are not
+  backfilled. Existing JSON is preferred; already-selected current actor/Court
+  relations are labeled `CURRENT_RELATION_FALLBACK`, and serializers must never
+  query the underlying business entity per audit row.
 - Audited Sprint 7 actions are booking create/update/lifecycle transitions,
   transaction creation, settlement creation, and mark-settled.
 - Sprint 9 adds `BOOKING_RESCHEDULED` and requires audit logs for cancellation,
@@ -806,18 +833,25 @@ pricing periods.
 - Dashboard metric names must match their meaning. Do not put counts in fields
   named `amount`.
 - Dashboard booking metrics use booking occurrence dates (`Booking.start_time`).
-  Dashboard transaction count, total, payment-method, settled/unsettled, and
-  staff-unsettled-money metrics use `Transaction.created` as the date authority.
+  Period Transaction counts/totals, payments/refunds, payment-method totals,
+  settled activity, revenue, and historical Settlement activity use
+  `Transaction.created` or the documented historical event date as their date
+  authority. Current-custody fields (`unsettled_transaction_count`,
+  `unsettled_transaction_total_amount`,
+  `staff_with_unsettled_transactions_count`, and `staff_unsettled_money`) are
+  all-time state and ignore dashboard date, payment-method, and
+  settlement-status activity filters.
   Date-only dashboard ranges mean complete local calendar days with an exclusive
   next-day upper bound. Do not mix booking dates into transaction financial
   filters.
 - Dashboard `payment_method_totals` returns every supported payment method with
   signed net `amount`, positive absolute `refund`, and active financial row
   `count`.
-- Dashboard settlement-related metrics are derived from eligible unsettled
-  transactions, not from `Settlement.status=PENDING`. Use
+- Dashboard Current Custody metrics are derived from the canonical signed
+  unsettled candidate rule, not from `Settlement.status=PENDING`. Use
   `staff_with_unsettled_transactions_count` for the distinct collector count;
-  do not use `pending_settlement_user_count`.
+  do not use `pending_settlement_user_count`. Default collector rows combine all
+  accessible Courts; an explicit Court filter narrows them.
 - Dashboard views must stay thin and use service functions plus
   `ClubAccessContext`; do not query `ClubMembership` in dashboard views,
   serializers, or services.
@@ -920,6 +954,11 @@ A transaction is considered unsettled when:
 is_cancelled = false
 AND transaction is not linked to any settlement line
 ```
+
+Current Custody is the signed sum of all such authorized Transactions and is
+not date-filtered. It includes every payment method and negative REFUND rows.
+No candidates and candidates with a zero signed net are different states;
+zero-net and negative-net collectors must not disappear.
 
 A settlement record should only be created when an authorized user confirms
 settlement.
