@@ -1,0 +1,92 @@
+Sloty Financial Consistency Contract
+====================================
+
+Status: LOCKED AND IMPLEMENTED
+
+Current Custody
+---------------
+
+Current Custody is the signed net of all currently unsettled, non-cancelled
+Transaction rows inside the authorized Club scope. The authoritative candidate
+rule is `apps.settlements.services.get_current_unsettled_transactions()`:
+
+- `club` is the selected authorized Club;
+- `settlement_line IS NULL`;
+- `is_cancelled = false`;
+- `created_by` is the collector when one is selected;
+- `court` narrows the result only when explicitly selected and authorized.
+
+Transaction age, Booking date, dashboard/report periods, payment method, and a
+requested settlement status never redefine Current Custody.
+
+Period Activity
+---------------
+
+Period Financial Activity is a separate concept. Booking occurrence metrics,
+Transaction activity counts/totals, payments, refunds, revenue, historical
+Settlement activity, and report analytics remain date-scoped. Dashboard date,
+payment-method, and settlement-status filters apply to period activity, not to
+Current Custody fields.
+
+One Concept / One Truth
+-----------------------
+
+Staff, Owner, Manager, unsettled-summary, Settlement Preview, Settlement
+Create, and Dashboard current-custody consumers use the same authoritative
+candidate definition. Roles change visibility and permitted actions, not the
+mathematics for an equivalent Club, collector, Court scope, and point in time.
+Settlement Create re-queries and locks current authoritative candidates; it
+does not trust preview data or client-supplied Transaction IDs.
+
+Court
+-----
+
+The default management scope includes all Courts accessible to the actor in the
+selected Club. Court filtering is applied only when a Court is explicitly
+selected. Existing Staff Court restrictions remain unchanged.
+
+Payment Method
+--------------
+
+The main Current Custody total always includes every payment method. The
+payment-method breakdown is the signed net impact per method and does not act as
+a hidden filter on the main total.
+
+Refund
+------
+
+PAYMENT amounts are positive and REFUND amounts are negative. Current Custody,
+per-method breakdowns, previews, settlements, dashboards, and audit snapshots
+preserve that signed truth. Amounts are never converted to absolute values.
+
+Zero States
+-----------
+
+`transaction_count = 0` means there are no current candidates.
+`transaction_count > 0` with `net_amount = 0` means candidates exist and their
+signed net is zero. Zero-net collectors remain visible. Negative-net collectors
+also remain visible; Product UX interpretation for negative custody is still a
+Product decision.
+
+Audit
+-----
+
+The Audit Log is business history. List and detail responses include
+human-readable `actor_name`, `court_name`, and an entity-specific `summary`
+without per-row entity lookups. New Booking, Transaction, and Settlement events
+store event-time display facts in the existing Audit JSON fields. No Audit
+columns or generic event-sourcing framework are introduced.
+
+Historical Integrity
+--------------------
+
+New event-time snapshots remain stable if a user, Court, customer, Booking, or
+financial entity later changes. Old logs without snapshots are not backfilled.
+Their top-level actor/Court names may use already-loaded current relations only
+as explicitly labeled `CURRENT_RELATION_FALLBACK`; unavailable values remain
+empty/null rather than being fabricated as historical truth.
+
+Offline Scope
+-------------
+
+NOT APPLICABLE — NO BACKEND OFFLINE CUSTODY SURFACE.

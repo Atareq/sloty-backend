@@ -10,7 +10,11 @@ from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
 from apps.audit.models import AuditLog
-from apps.audit.services import record_audit_log
+from apps.audit.services import (
+    booking_audit_snapshot,
+    record_audit_log,
+    transaction_audit_snapshot,
+)
 from apps.bookings.filters import (
     annotate_booking_hold_expires_at,
     compute_booking_hold_expires_at,
@@ -83,23 +87,6 @@ NEXT_OCCURRENCE_PLAN_ERROR_CODES = {
     "BOOKING_MULTIDAY_NOT_SUPPORTED",
     "BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID",
 }
-
-
-def booking_audit_snapshot(booking):
-    return {
-        "booking_id": booking.id,
-        "customer_name": booking.customer_name,
-        "customer_phone": str(booking.customer_phone),
-        "status": booking.status,
-        "source": booking.source,
-        "recurrence_status": booking.recurrence_status,
-        "previous_recurring_booking_id": booking.previous_recurring_booking_id,
-        "court_id": booking.court_id,
-        "court_name": booking.court.name if booking.court_id else "",
-        "start_time": booking.start_time.isoformat(),
-        "end_time": booking.end_time.isoformat(),
-        "total_price": str(booking.total_price),
-    }
 
 
 def calculate_booking_price(court, start_time, end_time) -> Decimal:
@@ -853,17 +840,7 @@ def create_booking_refund_transaction(
         action=AuditLog.Action.TRANSACTION_CREATED,
         entity_type="Transaction",
         entity_id=refund_transaction.id,
-        after_data={
-            "transaction_id": refund_transaction.id,
-            "transaction_type": refund_transaction.transaction_type,
-            "amount": str(refund_transaction.amount),
-            "payment_method": refund_transaction.payment_method,
-            "payment_reference": refund_transaction.payment_reference,
-            "booking_id": refund_transaction.booking_id,
-            "customer_name": booking.customer_name,
-            "court": {"id": booking.court_id, "name": booking.court.name},
-            "collector": actor.id if actor else None,
-        },
+        after_data=transaction_audit_snapshot(refund_transaction),
     )
     return refund_transaction
 
@@ -1341,13 +1318,7 @@ def complete_booking(
                     action=AuditLog.Action.TRANSACTION_CREATED,
                     entity_type="Transaction",
                     entity_id=next_payment.id,
-                    after_data={
-                        "transaction_id": next_payment.id,
-                        "booking_id": next_payment.booking_id,
-                        "amount": str(next_payment.amount),
-                        "payment_method": next_payment.payment_method,
-                        "payment_reference": next_payment.payment_reference,
-                    },
+                    after_data=transaction_audit_snapshot(next_payment),
                     metadata={"source": "recurrence_renewal"},
                 )
             else:

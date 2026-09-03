@@ -291,9 +291,9 @@ class SettlementPreviewResponseSerializer(serializers.Serializer):
     period_end = serializers.DateTimeField()
     transaction_count = serializers.IntegerField()
     total_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+    net_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
     booking_payments = serializers.DecimalField(max_digits=10, decimal_places=2)
     booking_refunds = serializers.DecimalField(max_digits=10, decimal_places=2)
-    net_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
     totals_by_payment_method = serializers.DictField(
         child=serializers.DecimalField(max_digits=10, decimal_places=2)
     )
@@ -341,6 +341,7 @@ class SettlementUnsettledSummaryRowSerializer(serializers.Serializer):
     period_end = serializers.DateTimeField()
     transaction_count = serializers.IntegerField()
     total_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+    net_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
     booking_payments = serializers.DecimalField(max_digits=10, decimal_places=2)
     booking_refunds = serializers.DecimalField(max_digits=10, decimal_places=2)
     totals_by_payment_method = serializers.DictField(

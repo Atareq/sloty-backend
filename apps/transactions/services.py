@@ -9,7 +9,11 @@ from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
 from apps.audit.models import AuditLog
-from apps.audit.services import record_audit_log
+from apps.audit.services import (
+    booking_audit_snapshot,
+    record_audit_log,
+    transaction_audit_snapshot,
+)
 from apps.bookings.models import Booking
 from apps.common.exceptions import SlotyAPIException
 from apps.transactions.models import Transaction
@@ -207,14 +211,7 @@ def create_booking_transaction(
                 action=AuditLog.Action.TRANSACTION_CREATED,
                 entity_type="Transaction",
                 entity_id=created_transaction.id,
-                after_data={
-                    "transaction_id": created_transaction.id,
-                    "booking_id": created_transaction.booking_id,
-                    "court_id": created_transaction.court_id,
-                    "amount": str(created_transaction.amount),
-                    "payment_method": created_transaction.payment_method,
-                    "payment_reference": created_transaction.payment_reference,
-                },
+                after_data=transaction_audit_snapshot(created_transaction),
             )
 
             if locked_booking.status == Booking.Status.HOLD:
@@ -288,6 +285,9 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
                 message=PAYMENT_TERMINAL_BOOKING_CANNOT_BE_CANCELLED_MESSAGE,
             )
 
+        transaction_before_data = transaction_audit_snapshot(locked_transaction)
+        transaction_before_data["is_cancelled"] = False
+        booking_before_data = booking_audit_snapshot(locked_booking)
         old_booking_status = locked_booking.status
         locked_transaction.is_cancelled = True
         locked_transaction.cancelled_by = actor
@@ -313,11 +313,10 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
             action=AuditLog.Action.TRANSACTION_CANCELLED,
             entity_type="Transaction",
             entity_id=locked_transaction.id,
-            before_data={
-                "is_cancelled": False,
-                "booking_status": old_booking_status,
-            },
-            after_data={
+            before_data=transaction_before_data
+            | {"booking_status": old_booking_status},
+            after_data=transaction_audit_snapshot(locked_transaction)
+            | {
                 "is_cancelled": True,
                 "cancelled_by": actor.id,
                 "cancelled_at": locked_transaction.cancelled_at.isoformat(),
@@ -336,8 +335,8 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
                 action=AuditLog.Action.BOOKING_UPDATED,
                 entity_type="Booking",
                 entity_id=locked_booking.id,
-                before_data={"status": old_booking_status},
-                after_data={"status": new_booking_status},
+                before_data=booking_before_data,
+                after_data=booking_audit_snapshot(locked_booking),
                 metadata={
                     "source": "transaction_cancel",
                     "transaction_id": locked_transaction.id,

@@ -177,10 +177,18 @@ class DashboardSummaryQuerySerializer(AccessScopedCourtMixin, serializers.Serial
         choices=Transaction.PaymentMethod.choices,
         required=False,
         allow_blank=True,
+        help_text=(
+            "Filters period transaction activity only; it does not change "
+            "all-method current custody."
+        ),
     )
     settlement_status = serializers.CharField(
         required=False,
         allow_blank=True,
+        help_text=(
+            "Filters period transaction activity only; current custody is "
+            "always inherently unsettled."
+        ),
     )
 
     def validate(self, attrs):
@@ -344,8 +352,8 @@ class AvailabilityResponseSerializer(serializers.Serializer):
 
 class CalendarItemSerializer(serializers.Serializer):
     id = serializers.IntegerField()
-    court = serializers.IntegerField()
-    court_name = serializers.CharField()
+    court = serializers.IntegerField(allow_null=True)
+    court_name = serializers.CharField(allow_blank=True)
     title = serializers.CharField()
     customer_name = serializers.CharField()
     customer_phone = serializers.CharField()
@@ -379,9 +387,16 @@ class DashboardOverviewSerializer(serializers.Serializer):
     unsettled_transaction_total_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
+        help_text=(
+            "All-time signed current custody; independent of the response date range."
+        ),
     )
-    unsettled_transaction_count = serializers.IntegerField()
-    staff_with_unsettled_transactions_count = serializers.IntegerField()
+    unsettled_transaction_count = serializers.IntegerField(
+        help_text="All-time current candidate count, independent of date range."
+    )
+    staff_with_unsettled_transactions_count = serializers.IntegerField(
+        help_text="Collectors with current candidates, including zero-net collectors."
+    )
     settled_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
     settled_transaction_count = serializers.IntegerField()
     settled_settlement_amount = serializers.DecimalField(
@@ -440,10 +455,16 @@ class DashboardPaymentMethodTotalSerializer(serializers.Serializer):
 class DashboardStaffUnsettledMoneySerializer(serializers.Serializer):
     collected_by = serializers.IntegerField(allow_null=True)
     collected_by_name = serializers.CharField(allow_blank=True)
-    court = serializers.IntegerField()
-    court_name = serializers.CharField()
-    total_unsettled_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
-    unsettled_transaction_count = serializers.IntegerField()
+    court = serializers.IntegerField(allow_null=True)
+    court_name = serializers.CharField(allow_blank=True)
+    total_unsettled_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        help_text="All-time signed current custody for this collector.",
+    )
+    unsettled_transaction_count = serializers.IntegerField(
+        help_text="Current candidate count; zero-net rows remain present."
+    )
     totals_by_payment_method = serializers.DictField(
         child=serializers.DecimalField(max_digits=12, decimal_places=2)
     )
@@ -490,13 +511,23 @@ class DashboardSummaryMetricsSerializer(serializers.Serializer):
         decimal_places=2,
         allow_null=True,
     )
-    unsettled_transaction_count = serializers.IntegerField(allow_null=True)
+    unsettled_transaction_count = serializers.IntegerField(
+        allow_null=True,
+        help_text="All-time current candidate count, independent of date range.",
+    )
     unsettled_transaction_total_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
         allow_null=True,
+        help_text=(
+            "All-time signed current custody; independent of date, payment method, "
+            "and settlement-status activity filters."
+        ),
     )
-    staff_with_unsettled_transactions_count = serializers.IntegerField(allow_null=True)
+    staff_with_unsettled_transactions_count = serializers.IntegerField(
+        allow_null=True,
+        help_text="Collectors with current candidates, including zero-net collectors.",
+    )
     settled_transaction_count = serializers.IntegerField(allow_null=True)
     settled_transaction_amount = serializers.DecimalField(
         max_digits=12,
@@ -544,11 +575,15 @@ class DashboardSummaryCourtSerializer(serializers.Serializer):
         decimal_places=2,
         allow_null=True,
     )
-    unsettled_transaction_count = serializers.IntegerField(allow_null=True)
+    unsettled_transaction_count = serializers.IntegerField(
+        allow_null=True,
+        help_text="All-time current candidate count for this court.",
+    )
     unsettled_transaction_total_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
         allow_null=True,
+        help_text="All-time signed current custody for this court.",
     )
     settled_transaction_count = serializers.IntegerField(allow_null=True)
     settled_transaction_amount = serializers.DecimalField(

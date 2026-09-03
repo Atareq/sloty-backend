@@ -7,7 +7,7 @@ from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
 from apps.audit.models import AuditLog
-from apps.audit.services import record_audit_log
+from apps.audit.services import booking_audit_snapshot, record_audit_log
 from apps.bookings.filters import compute_booking_hold_expires_at
 from apps.bookings.models import Booking
 from apps.bookings.services import (
@@ -112,6 +112,7 @@ class BookingListSerializer(
             "previous_recurring_booking_id",
             "next_recurring_booking_id",
             "hold_expires_at",
+            "notes",
             "created_by",
             "created",
         )
@@ -502,17 +503,14 @@ class BookingUpdateSerializer(serializers.ModelSerializer):
         return attrs
 
     def update(self, instance, validated_data):
-        before_data = {}
-        after_data = {}
-        for field, value in validated_data.items():
-            old_value = getattr(instance, field)
-            if old_value != value:
-                before_data[field] = str(old_value)
-                after_data[field] = str(value)
+        changed = any(
+            getattr(instance, field) != value for field, value in validated_data.items()
+        )
+        before_data = booking_audit_snapshot(instance) if changed else {}
 
         with transaction.atomic():
             updated_booking = super().update(instance, validated_data)
-            if before_data:
+            if changed:
                 request = self.context.get("request")
                 actor = getattr(request, "user", None)
                 record_audit_log(
@@ -523,7 +521,7 @@ class BookingUpdateSerializer(serializers.ModelSerializer):
                     entity_type="Booking",
                     entity_id=updated_booking.id,
                     before_data=before_data,
-                    after_data=after_data,
+                    after_data=booking_audit_snapshot(updated_booking),
                 )
             return updated_booking
 

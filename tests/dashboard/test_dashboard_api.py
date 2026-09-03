@@ -2,6 +2,7 @@ from datetime import time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import yaml
 from django.core.management import call_command
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
@@ -902,7 +903,8 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(len(response.data["staff_unsettled_money"]), 1)
         staff_money = response.data["staff_unsettled_money"][0]
         self.assertEqual(staff_money["collected_by"], self.staff.id)
-        self.assertEqual(staff_money["court"], self.other_court.id)
+        self.assertIsNone(staff_money["court"])
+        self.assertEqual(staff_money["court_name"], "")
         self.assertEqual(staff_money["total_unsettled_amount"], "80.00")
         self.assertEqual(staff_money["unsettled_transaction_count"], 1)
         self.assertEqual(
@@ -978,6 +980,13 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(response.data["summary"]["transaction_total"], "600.00")
 
     def test_summary_filters_transaction_metrics_without_filtering_booking_counts(self):
+        self.create_transaction(
+            self.confirmed,
+            amount=Decimal("20.00"),
+            payment_method=Transaction.PaymentMethod.CASH,
+            created_by=self.staff,
+            created=self.time_at(13) - timedelta(days=2),
+        )
         self.client.force_authenticate(user=self.platform_admin)
 
         response = self.client.get(
@@ -995,8 +1004,8 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(summary["total_bookings"], 7)
         self.assertEqual(summary["transaction_count"], 1)
         self.assertEqual(summary["transaction_total"], "80.00")
-        self.assertEqual(summary["unsettled_transaction_count"], 1)
-        self.assertEqual(summary["unsettled_transaction_total_amount"], "80.00")
+        self.assertEqual(summary["unsettled_transaction_count"], 2)
+        self.assertEqual(summary["unsettled_transaction_total_amount"], "100.00")
         self.assertEqual(summary["staff_with_unsettled_transactions_count"], 1)
         self.assertEqual(response.data["context"]["collected_by"], self.staff.id)
         self.assertEqual(
@@ -1005,7 +1014,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         )
         self.assertEqual(response.data["context"]["settlement_status"], "unsettled")
 
-    def test_summary_unsettled_metrics_use_transaction_created_period(self):
+    def test_summary_current_custody_is_all_time_while_activity_uses_period(self):
         old_unsettled = self.create_transaction(
             self.confirmed,
             amount=Decimal("20.00"),
@@ -1020,13 +1029,97 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         summary = response.data["summary"]
         self.assertEqual(summary["transaction_count"], 3)
         self.assertEqual(summary["transaction_total"], "480.00")
-        self.assertEqual(summary["unsettled_transaction_count"], 1)
-        self.assertEqual(summary["unsettled_transaction_total_amount"], "80.00")
-        self.assertEqual(summary["staff_with_unsettled_transactions_count"], 1)
-        self.assertNotIn(
+        self.assertEqual(summary["unsettled_transaction_count"], 2)
+        self.assertEqual(summary["unsettled_transaction_total_amount"], "100.00")
+        self.assertEqual(summary["staff_with_unsettled_transactions_count"], 2)
+        self.assertIn(
             old_unsettled.created_by_id,
             {item["collected_by"] for item in response.data["staff_unsettled_money"]},
         )
+
+    def test_locked_mohamed_dataset_separates_period_activity_from_current_custody(
+        self,
+    ):
+        mohamed = self.create_user("dashboard-mohamed")
+        self.create_membership(
+            mohamed,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        booking = self.create_booking(
+            self.court,
+            customer_name="Mohamed custody dataset",
+            customer_phone="+201000000333",
+            status=Booking.Status.CONFIRMED,
+        )
+        self.create_transaction(
+            booking,
+            amount=Decimal("500.00"),
+            created_by=mohamed,
+            created=self.time_at(12) - timedelta(days=10),
+        )
+        self.create_transaction(
+            booking,
+            amount=Decimal("900.00"),
+            created_by=mohamed,
+            created=self.time_at(12),
+        )
+        self.create_transaction(
+            booking,
+            transaction_type=Transaction.Type.REFUND,
+            amount=Decimal("-150.00"),
+            created_by=mohamed,
+            created=self.time_at(12, 5),
+        )
+        self.create_transaction(
+            booking,
+            amount=Decimal("300.00"),
+            created_by=mohamed,
+            created=self.time_at(12, 10),
+            is_cancelled=True,
+            cancelled_by=self.platform_admin,
+            cancelled_at=self.time_at(12, 11),
+            cancellation_reason="Excluded correction",
+        )
+        settled_payment = self.create_transaction(
+            booking,
+            amount=Decimal("400.00"),
+            created_by=mohamed,
+            created=self.time_at(12, 15),
+        )
+        settlement = self.create_settlement(
+            self.club,
+            court=self.court,
+            collected_by=mohamed,
+            status=Settlement.Status.SETTLED,
+            total_amount=settled_payment.amount,
+            transaction_count=1,
+            settled_by=self.platform_admin,
+            settled_at=self.time_at(14),
+        )
+        SettlementTransaction.objects.create(
+            settlement=settlement,
+            transaction=settled_payment,
+            amount=settled_payment.amount,
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(self.summary_url(self.club), self.range_params())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        summary = response.data["summary"]
+        self.assertEqual(summary["transaction_count"], 6)
+        self.assertEqual(summary["transaction_total"], "1630.00")
+        self.assertEqual(summary["unsettled_transaction_count"], 4)
+        self.assertEqual(summary["unsettled_transaction_total_amount"], "1330.00")
+        mohamed_row = next(
+            item
+            for item in response.data["staff_unsettled_money"]
+            if item["collected_by"] == mohamed.id
+        )
+        self.assertEqual(mohamed_row["unsettled_transaction_count"], 3)
+        self.assertEqual(mohamed_row["total_unsettled_amount"], "1250.00")
 
     def test_summary_needs_action_breakdown_excludes_completed_remaining_amount(self):
         completed_with_remaining = self.create_booking(
@@ -1249,6 +1342,7 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
         schema_response = self.client.get(reverse("schema"))
         docs_response = self.client.get(reverse("swagger-ui"))
         schema = schema_response.content.decode()
+        schema_doc = yaml.safe_load(schema)
 
         self.assertEqual(schema_response.status_code, status.HTTP_200_OK)
         self.assertEqual(docs_response.status_code, status.HTTP_200_OK)
@@ -1263,6 +1357,25 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertIn(
             "/api/v1/clubs/{club_slug}/courts/{court_id}/availability/",
             schema,
+        )
+        summary_fields = schema_doc["components"]["schemas"]["DashboardSummaryMetrics"][
+            "properties"
+        ]
+        staff_fields = schema_doc["components"]["schemas"][
+            "DashboardStaffUnsettledMoney"
+        ]["properties"]
+        self.assertIn(
+            "All-time signed current custody",
+            summary_fields["unsettled_transaction_total_amount"]["description"],
+        )
+        self.assertIn(
+            "zero-net collectors",
+            summary_fields["staff_with_unsettled_transactions_count"]["description"],
+        )
+        self.assertTrue(staff_fields["court"]["nullable"])
+        self.assertIn(
+            "All-time signed current custody",
+            staff_fields["total_unsettled_amount"]["description"],
         )
 
     def test_regression_boundaries(self):
@@ -1347,4 +1460,39 @@ class DashboardQueryScalingTests(DashboardDataMixin, DashboardAPITestCase):
 
         self.assertEqual(first_response.status_code, status.HTTP_200_OK)
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(first), len(second))
+
+    def test_current_custody_query_count_is_bounded_for_one_vs_thirty_collectors(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        params = self.range_params()
+
+        with CaptureQueriesContext(connection) as first:
+            first_response = self.client.get(self.summary_url(self.club), params)
+
+        for index in range(1, 30):
+            collector = self.create_user(f"dashboard-custody-collector-{index}")
+            self.create_membership(
+                collector,
+                self.club,
+                ClubMembership.Role.STAFF,
+                court=self.court,
+            )
+            booking = self.create_booking(
+                self.court,
+                customer_phone=f"+201000007{index:03d}",
+                status=Booking.Status.CONFIRMED,
+            )
+            self.create_transaction(
+                booking,
+                amount=Decimal("10.00"),
+                created_by=collector,
+            )
+
+        with CaptureQueriesContext(connection) as second:
+            second_response = self.client.get(self.summary_url(self.club), params)
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(first_response.data["staff_unsettled_money"]), 1)
+        self.assertEqual(len(second_response.data["staff_unsettled_money"]), 30)
         self.assertEqual(len(first), len(second))

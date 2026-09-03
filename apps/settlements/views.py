@@ -82,6 +82,13 @@ class SettlementViewSet(
         tags=["Settlements"],
         parameters=[SettlementPreviewRequestSerializer],
         responses=SettlementPreviewResponseSerializer,
+        description=(
+            "Preview the exact current-custody candidates for one collector. "
+            "Candidates are all currently unsettled, non-cancelled signed "
+            "transactions in the authorized club, across all payment methods "
+            "and all accessible courts unless court is explicitly supplied. "
+            "Transaction dates do not limit current custody."
+        ),
     )
     @action(detail=False, methods=["get"])
     def preview(self, request, *args, **kwargs):
@@ -103,7 +110,9 @@ class SettlementViewSet(
             "club, is_cancelled=false, no settlement line, collector="
             "Transaction.created_by. period_start is the earliest unsettled "
             "transaction for that collector; period_end is request time. "
-            "This is not persisted Settlement history."
+            "Transaction dates and payment methods do not limit current "
+            "custody. Signed zero and negative totals remain visible. This is "
+            "not persisted Settlement history."
         ),
     )
     @action(detail=False, methods=["get"], url_path="unsettled-summary")
