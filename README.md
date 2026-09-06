@@ -100,6 +100,15 @@ Login is global and does not require a club slug. After login, clients call
 `/api/v1/me/`, choose one of the returned membership clubs, then call the
 club-scoped endpoints with that club's slug.
 
+Expired access tokens return stable API code `SESSION_EXPIRED`. A stale token
+for an inactive user returns `USER_INACTIVE`; a stale token for a deleted user
+returns `USER_DELETED`. Frontend recovery logic should branch on `code`, not on
+localized `message` text.
+Club-scoped endpoints return `CLUB_ACCESS_REVOKED` with `details.club_slug`
+when an authenticated user no longer has active access to that selected club.
+Token obtain returns the same code when a valid optional `club_slug` is supplied
+but the user has no active membership in that club.
+
 Token obtain accepts an optional `club_slug` for frontend convenience claims.
 These claims are derived at token issue time and are not stored on `User`:
 
@@ -173,6 +182,9 @@ requests.
   reactivated, disappear from current membership/user lists, and grant no
   club access. Recreating the same club, user, role, and court after delete
   is rejected. The user account and historical operational records remain.
+  Deactivating or deleting an operational STAFF membership is rejected with
+  `MEMBERSHIP_CURRENT_CUSTODY_NOT_SETTLED` while that user's canonical Current
+  Custody in the selected club is non-zero.
 - `/api/v1/clubs/{club_slug}/courts/`
 - `GET /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
 - `PUT /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
@@ -262,6 +274,16 @@ hours, pricing periods, and slot duration. It accepts `court` plus either
 `slot_price`, the current configured price for that specific slot. `FREE` and
 `UNAVAILABLE` may appear as response-level slot states for UI display, but they
 are not persisted booking statuses.
+Starting a recurring booking can return `RECURRING_UNAVAILABLE` when the
+selected base slot is free but the weekly recurrence pattern conflicts later.
+
+Booking create accepts optional `client_request_id` as a UUID idempotency key.
+Online clients may omit it, but offline/retry clients should send it. The key is
+unique inside the selected club and is stored on the Booking row. Replaying the
+same key with the same logical booking request returns the original Booking with
+HTTP 200. Reusing the same key for a different logical request returns HTTP 409
+with `BOOKING_CLIENT_REQUEST_MISMATCH`. Idempotency is retained for as long as
+the Booking row exists.
 
 New booking and reschedule prices are calculated from working-hour pricing
 periods and stored in `Booking.total_price` as a historical snapshot. Existing
@@ -542,6 +564,7 @@ Useful audit log filters:
 
 ## Sprint 8 Dashboard and Availability Endpoints
 
+- `GET /api/v1/public/clubs/{club_slug}/courts/{court_id}/availability/`
 - `GET /api/v1/clubs/{club_slug}/courts/{court_id}/availability/`
 - `GET /api/v1/clubs/{club_slug}/calendar/`
 - `GET /api/v1/clubs/{club_slug}/dashboard/overview/`
@@ -552,6 +575,12 @@ Useful audit log filters:
 Availability returns generated slots for one court and date. `HOLD`,
 `CONFIRMED`, `COMPLETED`, and `NO_SHOW` bookings block slots. Only `CANCELLED`
 and `EXPIRED` bookings release their slots.
+
+Public availability is deliberately sanitized and anonymous. It exposes only
+public club/court identity, the requested date/window, and per-slot
+`AVAILABLE`/`UNAVAILABLE` state. It does not expose booking IDs, customer data,
+notes, staff, payment/transaction data, recurrence context, or internal booking
+statuses.
 
 Calendar returns frontend-friendly booking items with payment summary fields.
 Staff can use availability and calendar only for their assigned court. Platform

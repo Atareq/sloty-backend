@@ -7,6 +7,7 @@ from apps.clubs.services import (
     MEMBERSHIP_DELETED_CANNOT_REACTIVATE_MESSAGE,
     create_club_member,
     validate_membership_identity_not_deleted,
+    validate_membership_offboarding_current_custody,
 )
 from apps.common.egypt_locations import (
     get_all_city_choices,
@@ -288,6 +289,11 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
                 and self.instance.role == self.Meta.model.Role.OWNER
             ):
                 raise PermissionDenied("Club owners cannot manage owner memberships.")
+            if "is_active" in attrs and self.instance.is_active and is_active is False:
+                validate_membership_offboarding_current_custody(
+                    access=access,
+                    membership=self.instance,
+                )
 
         if is_active:
             duplicate_membership = ClubMembership.objects.filter(

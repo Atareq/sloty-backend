@@ -16,13 +16,20 @@ Status: Implemented as the active recurrence contract.
    occurrence; it is not a root or series model.
 6. Create recurrence through `POST /api/v1/clubs/{club_slug}/bookings/` with
    `is_recurring=true`. Direct client `source=RECURRING` is rejected.
+   Booking create accepts optional `client_request_id` idempotency for retrying
+   offline/reconnect requests. A same-key/same-payload replay returns the
+   original Booking; a same-key/different-payload replay returns
+   `BOOKING_CLIENT_REQUEST_MISMATCH`.
 7. Weekly matching uses local date delta modulo 7 plus interval overlap.
    Future booking rows are not generated. Schedule slots blocked only by an
    ACTIVE recurrence return `RECURRING_RESERVED` with `booking=null`,
    `recurring_anchor_booking_id`, and `recurring_context` (customer/recurrence
    identity from the anchor). Selected slot date/time remain authoritative.
 8. Existing future concrete blocking bookings take priority over starting a new
-   recurrence.
+   recurrence. If the base appointment is free but a later weekly occurrence is
+   blocked, create returns HTTP 409 `RECURRING_UNAVAILABLE` with structured
+   conflict details. If the selected base appointment itself is unavailable, the
+   canonical code remains `BOOKING_SLOT_UNAVAILABLE`.
 9. Completing an ACTIVE recurring booking requires `continue_recurring`.
    `false` ends recurrence; `true` creates next week's booking and records the
    required next deposit as an ordinary booking PAYMENT transaction.

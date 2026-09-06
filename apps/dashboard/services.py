@@ -44,14 +44,7 @@ def datetime_for_date(date_value, time_value):
     return timezone.make_aware(naive, timezone.get_current_timezone())
 
 
-def get_court_availability(*, access, court, date):
-    if not access.can_view_court_availability(court):
-        raise PermissionDenied("You cannot access availability for this court.")
-    if not access.club.is_active:
-        raise serializers.ValidationError({"club": "Club is inactive."})
-    if not court.is_active:
-        raise serializers.ValidationError({"court": "Court is inactive."})
-
+def build_court_availability_payload(*, club, court, date):
     working_hour = (
         CourtWorkingHour.objects.filter(
             court=court,
@@ -62,9 +55,9 @@ def get_court_availability(*, access, court, date):
     )
     base_response = {
         "club": {
-            "id": access.club.id,
-            "slug": access.club.slug,
-            "name": access.club.name,
+            "id": club.id,
+            "slug": club.slug,
+            "name": club.name,
         },
         "court": {
             "id": court.id,
@@ -127,6 +120,42 @@ def get_court_availability(*, access, court, date):
         )
         current = slot_end
     return base_response
+
+
+def get_court_availability(*, access, court, date):
+    if not access.can_view_court_availability(court):
+        raise PermissionDenied("You cannot access availability for this court.")
+    if not access.club.is_active:
+        raise serializers.ValidationError({"club": "Club is inactive."})
+    if not court.is_active:
+        raise serializers.ValidationError({"court": "Court is inactive."})
+    return build_court_availability_payload(
+        club=access.club,
+        court=court,
+        date=date,
+    )
+
+
+def get_public_court_availability(*, club, court, date):
+    if not club.is_active:
+        raise serializers.ValidationError({"club": "Club is inactive."})
+    if not court.is_active:
+        raise serializers.ValidationError({"court": "Court is inactive."})
+
+    availability = build_court_availability_payload(
+        club=club,
+        court=court,
+        date=date,
+    )
+    availability["slots"] = [
+        {
+            "start_time": slot["start_time"],
+            "end_time": slot["end_time"],
+            "availability": "AVAILABLE" if slot["is_available"] else "UNAVAILABLE",
+        }
+        for slot in availability["slots"]
+    ]
+    return availability
 
 
 def validate_dashboard_access(access):

@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db import transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -9,6 +11,10 @@ from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log
 from apps.clubs.models import ClubMembership
 from apps.common.exceptions import SlotyAPIException
+from apps.settlements.services import (
+    aggregate_current_custody,
+    get_current_unsettled_transactions,
+)
 
 MEMBERSHIP_ALREADY_DELETED_MESSAGE = _("This club membership has already been removed.")
 MEMBERSHIP_DELETED_CANNOT_REACTIVATE_MESSAGE = _(
@@ -17,6 +23,9 @@ MEMBERSHIP_DELETED_CANNOT_REACTIVATE_MESSAGE = _(
 MEMBERSHIP_DELETED_CANNOT_RECREATE_MESSAGE = _(
     "This club, user, role, and court membership was permanently removed "
     "and cannot be created again."
+)
+MEMBERSHIP_CURRENT_CUSTODY_NOT_SETTLED_MESSAGE = _(
+    "Settle this staff member's current custody before deactivation or removal."
 )
 
 
@@ -136,6 +145,32 @@ def create_club_member(
     return membership
 
 
+def validate_membership_offboarding_current_custody(*, access, membership):
+    if membership.role != ClubMembership.Role.STAFF:
+        return
+
+    current_custody = aggregate_current_custody(
+        get_current_unsettled_transactions(
+            access=access,
+            collected_by=membership.user,
+        )
+    )
+    if current_custody["net_amount"] == Decimal("0.00"):
+        return
+
+    raise SlotyAPIException(
+        status_code=status.HTTP_409_CONFLICT,
+        code="MEMBERSHIP_CURRENT_CUSTODY_NOT_SETTLED",
+        message=MEMBERSHIP_CURRENT_CUSTODY_NOT_SETTLED_MESSAGE,
+        details={
+            "membership_id": membership.id,
+            "user_id": membership.user_id,
+            "current_custody": f'{current_custody["net_amount"]:.2f}',
+            "transaction_count": current_custody["transaction_count"],
+        },
+    )
+
+
 def soft_delete_membership(*, access, membership, actor):
     if membership.club_id != access.club.id:
         raise PermissionDenied("You cannot manage memberships for this club.")
@@ -149,6 +184,10 @@ def soft_delete_membership(*, access, membership, actor):
             code="MEMBERSHIP_ALREADY_DELETED",
             message=MEMBERSHIP_ALREADY_DELETED_MESSAGE,
         )
+    validate_membership_offboarding_current_custody(
+        access=access,
+        membership=membership,
+    )
 
     with transaction.atomic():
         before_data = {

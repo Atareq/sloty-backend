@@ -1,8 +1,13 @@
 from django.shortcuts import get_object_or_404
 from django.utils.functional import cached_property
+from django.utils.translation import gettext_lazy as _
+from rest_framework import status
 from rest_framework.exceptions import NotAuthenticated
 
 from apps.clubs.models import Club, ClubMembership
+from apps.common.exceptions import SlotyAPIException
+
+CLUB_ACCESS_REVOKED_MESSAGE = _("Your access to the selected club is no longer active.")
 
 
 class ClubAccessContext:
@@ -16,7 +21,17 @@ class ClubAccessContext:
         if not request.user.is_authenticated:
             raise NotAuthenticated("Authentication credentials were not provided.")
         club = get_object_or_404(Club, slug=club_slug)
-        return cls(request=request, club=club)
+        access = cls(request=request, club=club)
+        if not access.has_any_club_access():
+            raise SlotyAPIException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                code="CLUB_ACCESS_REVOKED",
+                message=CLUB_ACCESS_REVOKED_MESSAGE,
+                details={
+                    "club_slug": club.slug,
+                },
+            )
+        return access
 
     @cached_property
     def active_memberships(self):

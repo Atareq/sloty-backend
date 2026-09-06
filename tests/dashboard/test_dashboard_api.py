@@ -160,6 +160,12 @@ class DashboardAPITestCase(APITestCase):
             kwargs={"club_slug": club.slug, "court_id": court.id},
         )
 
+    def public_availability_url(self, club, court):
+        return reverse(
+            "public-court-availability",
+            kwargs={"club_slug": club.slug, "court_id": court.id},
+        )
+
     def calendar_url(self, club):
         return reverse("club-calendar", kwargs={"club_slug": club.slug})
 
@@ -342,6 +348,39 @@ class DashboardDataMixin:
 
 
 class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
+    def test_public_availability_is_anonymous_and_sanitized(self):
+        response = self.client.get(
+            self.public_availability_url(self.club, self.court),
+            {"date": "2026-07-06"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["slots"]), 4)
+        slot = response.data["slots"][0]
+        self.assertEqual(set(slot), {"start_time", "end_time", "availability"})
+        self.assertEqual(slot["availability"], "UNAVAILABLE")
+        payload = response.content.decode()
+        for private_value in (
+            "blocking_booking",
+            "blocking_status",
+            "booking",
+            "customer_name",
+            "customer_phone",
+            "notes",
+            "payment",
+            "transaction",
+            "staff",
+            "recurring_context",
+            "HOLD",
+            "CONFIRMED",
+            "COMPLETED",
+            "NO_SHOW",
+            "Hold Customer",
+            "+201000000101",
+            "DASH-CASH-001",
+        ):
+            self.assertNotIn(private_value, payload)
+
     def test_anonymous_rejected(self):
         response = self.client.get(
             self.availability_url(self.club, self.court),
@@ -1358,6 +1397,11 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
             "/api/v1/clubs/{club_slug}/courts/{court_id}/availability/",
             schema,
         )
+        self.assertIn(
+            "/api/v1/public/clubs/{club_slug}/courts/{court_id}/availability/",
+            schema,
+        )
+        self.assertIn("PublicAvailabilityResponse", schema_doc["components"]["schemas"])
         summary_fields = schema_doc["components"]["schemas"]["DashboardSummaryMetrics"][
             "properties"
         ]

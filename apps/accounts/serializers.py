@@ -1,8 +1,9 @@
-from rest_framework import serializers
+from rest_framework import serializers, status
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from apps.accounts.models import User
 from apps.clubs.models import Club, ClubMembership
+from apps.common.exceptions import SlotyAPIException
 
 
 def get_token_name(user):
@@ -55,8 +56,13 @@ def build_token_claims(*, user, club_slug=None):
 
     membership = get_membership_for_token_context(user=user, club=club)
     if membership is None:
-        raise serializers.ValidationError(
-            {"club_slug": "User has no active membership in this club."}
+        raise SlotyAPIException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="CLUB_ACCESS_REVOKED",
+            message="Your access to the selected club is no longer active.",
+            details={
+                "club_slug": club.slug,
+            },
         )
 
     claims["role"] = membership.role

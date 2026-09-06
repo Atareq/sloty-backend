@@ -53,6 +53,12 @@ BOOKING_STATUS_TRANSITIONS = {
     },
 }
 BOOKING_SLOT_UNAVAILABLE_MESSAGE = _("The selected booking slot is not available.")
+RECURRING_UNAVAILABLE_MESSAGE = _(
+    "The selected recurring booking pattern is not available."
+)
+BOOKING_CLIENT_REQUEST_MISMATCH_MESSAGE = _(
+    "This client request id was already used for a different booking request."
+)
 BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT_MESSAGE = _(
     "This booking cannot be completed until the remaining amount is paid."
 )
@@ -232,6 +238,83 @@ def raise_slot_unavailable(*, details=None):
     )
 
 
+def raise_recurring_unavailable(*, details=None):
+    raise SlotyAPIException(
+        status_code=status.HTTP_409_CONFLICT,
+        code="RECURRING_UNAVAILABLE",
+        message=RECURRING_UNAVAILABLE_MESSAGE,
+        details=details or {},
+    )
+
+
+def booking_matches_client_request(
+    booking,
+    *,
+    court,
+    start_time,
+    end_time,
+    booking_data,
+):
+    expected_source = booking_data.get("source", Booking.Source.MANUAL)
+    expected_notes = booking_data.get("notes", "") or ""
+    expected_phone = booking_data.get("customer_phone")
+
+    return (
+        booking.court_id == court.id
+        and booking.start_time == start_time
+        and booking.end_time == end_time
+        and booking.source == expected_source
+        and booking.customer_name == booking_data.get("customer_name")
+        and str(booking.customer_phone) == str(expected_phone)
+        and (booking.notes or "") == expected_notes
+    )
+
+
+def resolve_idempotent_booking_request(
+    *,
+    club,
+    court,
+    start_time,
+    end_time,
+    booking_data,
+):
+    client_request_id = booking_data.get("client_request_id")
+    if client_request_id is None:
+        return None
+
+    existing_booking = (
+        Booking.objects.select_for_update()
+        .filter(
+            club=club,
+            client_request_id=client_request_id,
+        )
+        .select_related("club", "court")
+        .first()
+    )
+    if existing_booking is None:
+        return None
+
+    if booking_matches_client_request(
+        existing_booking,
+        court=court,
+        start_time=start_time,
+        end_time=end_time,
+        booking_data=booking_data,
+    ):
+        existing_booking._sloty_idempotency_reused = True
+        return existing_booking
+
+    raise SlotyAPIException(
+        status_code=status.HTTP_409_CONFLICT,
+        code="BOOKING_CLIENT_REQUEST_MISMATCH",
+        message=BOOKING_CLIENT_REQUEST_MISMATCH_MESSAGE,
+        details={
+            "client_request_id": str(client_request_id),
+            "existing_booking_id": existing_booking.id,
+        },
+    )
+
+
 def validate_no_active_recurrence_overlap(
     court,
     start_time,
@@ -383,7 +466,7 @@ def validate_can_start_recurrence(
         future_blockers=future_blockers,
     )
     if conflict is not None:
-        raise_slot_unavailable(
+        raise_recurring_unavailable(
             details=recurrence_conflict_details(
                 conflict_type=conflict["blocked_reason"],
                 start_time=conflict["first_conflict_start"],
@@ -634,9 +717,24 @@ def create_booking(*, created_by, court, start_time, end_time, **booking_data):
     with transaction.atomic():
         locked_court = (
             court.__class__.objects.select_for_update()
+            .select_related("club")
             .prefetch_related("working_hours__pricing_periods")
             .get(pk=court.pk)
         )
+        if booking_data.get("client_request_id") is not None:
+            locked_court.club.__class__.objects.select_for_update().get(
+                pk=locked_court.club_id
+            )
+            existing_booking = resolve_idempotent_booking_request(
+                club=locked_court.club,
+                court=locked_court,
+                start_time=start_time,
+                end_time=end_time,
+                booking_data=booking_data,
+            )
+            if existing_booking is not None:
+                return existing_booking
+
         validate_booking_duration(locked_court, start_time, end_time)
         total_price = calculate_booking_price(
             locked_court,
@@ -664,6 +762,7 @@ def create_booking(*, created_by, court, start_time, end_time, **booking_data):
             created_by=created_by,
             **booking_data,
         )
+        created_booking._sloty_idempotency_reused = False
         record_audit_log(
             club=created_booking.club,
             court=created_booking.court,

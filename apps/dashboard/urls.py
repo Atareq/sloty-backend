@@ -7,9 +7,15 @@ from apps.dashboard.views import (
     DashboardOverviewAPIView,
     DashboardRevenueAPIView,
     DashboardSummaryAPIView,
+    PublicCourtAvailabilityAPIView,
 )
 
 urlpatterns = [
+    path(
+        "public/clubs/<slug:club_slug>/courts/<int:court_id>/availability/",
+        PublicCourtAvailabilityAPIView.as_view(),
+        name="public-court-availability",
+    ),
     path(
         "clubs/<slug:club_slug>/courts/<int:court_id>/availability/",
         CourtAvailabilityAPIView.as_view(),

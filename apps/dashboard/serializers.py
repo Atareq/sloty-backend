@@ -350,6 +350,23 @@ class AvailabilityResponseSerializer(serializers.Serializer):
     slots = AvailabilitySlotSerializer(many=True)
 
 
+class PublicAvailabilitySlotSerializer(serializers.Serializer):
+    start_time = serializers.DateTimeField()
+    end_time = serializers.DateTimeField()
+    availability = serializers.ChoiceField(choices=("AVAILABLE", "UNAVAILABLE"))
+
+
+class PublicAvailabilityResponseSerializer(serializers.Serializer):
+    club = AvailabilityClubSerializer()
+    court = AvailabilityCourtSerializer()
+    date = serializers.DateField()
+    is_closed = serializers.BooleanField()
+    opens_at = serializers.TimeField(allow_null=True)
+    closes_at = serializers.TimeField(allow_null=True)
+    slot_duration_minutes = serializers.IntegerField()
+    slots = PublicAvailabilitySlotSerializer(many=True)
+
+
 class CalendarItemSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     court = serializers.IntegerField(allow_null=True)

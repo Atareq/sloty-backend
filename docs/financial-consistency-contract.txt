@@ -44,6 +44,36 @@ Court
 The default management scope includes all Courts accessible to the actor in the
 selected Club. Court filtering is applied only when a Court is explicitly
 selected. Existing Staff Court restrictions remain unchanged.
+Clients request the all-Courts custody scope by omitting the `court` query
+parameter. They must not send `court=null`, choose `courts[0]`, or infer a
+default Court on behalf of the backend.
+
+Current Custody API Shape
+-------------------------
+
+`GET /api/v1/clubs/{club_slug}/settlements/unsettled-summary/` returns
+`results`, one row per visible collector. Each row includes `collected_by`,
+`collected_by_name`, `transaction_count`, signed `net_amount`,
+`totals_by_payment_method`, `period_start`, `period_end`, signed
+`total_amount`, signed `booking_payments`, signed `booking_refunds`, `is_self`,
+and `can_approve`.
+
+`GET /api/v1/clubs/{club_slug}/settlements/preview/` returns the same
+collector-level custody fields for one collector plus optional `court` /
+`court_name`, `is_self_preview`, `approval_required`, and the candidate
+`transactions` page. Settlement Create never accepts client-supplied
+Transaction IDs, totals, periods, or payment-method breakdowns.
+
+Settlement Races
+----------------
+
+Settlement Preview is read-only and may become stale. Settlement Create
+re-queries and locks the canonical current candidates at confirm time. If there
+are no candidates, it returns `NO_UNSETTLED_TRANSACTIONS`. If another request
+settles candidates concurrently between selection and insert, it returns
+`SETTLEMENT_CONFLICT`. If the actor cannot approve that collector/scope, it
+returns `SELF_SETTLEMENT_APPROVAL_FORBIDDEN` or a standard permission error.
+Successful create returns the newly created Settlement.
 
 Payment Method
 --------------
@@ -67,6 +97,17 @@ Zero States
 signed net is zero. Zero-net collectors remain visible. Negative-net collectors
 also remain visible; Product UX interpretation for negative custody is still a
 Product decision.
+
+Offboarding
+-----------
+
+Operational STAFF deactivation and soft delete are rejected while canonical
+Current Custody for that user in the selected Club is non-zero. The blocker uses
+the same current-unsettled candidate definition as money management,
+unsettled-summary, Settlement Preview/Create, and Dashboard current-custody
+fields. Zero-net candidates (`transaction_count > 0`, `net_amount = 0`) remain
+distinct from no candidates; the offboarding blocker is based on non-zero net
+Current Custody.
 
 Audit
 -----

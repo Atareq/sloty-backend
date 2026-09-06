@@ -1,9 +1,11 @@
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema
 from rest_framework.generics import GenericAPIView
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from apps.clubs.mixins import ClubScopedAccessMixin
+from apps.clubs.models import Club
 from apps.clubs.permissions import (
     CanViewClubDashboard,
     CanViewDashboardSummary,
@@ -21,6 +23,7 @@ from apps.dashboard.serializers import (
     DashboardOverviewSerializer,
     DashboardSummaryQuerySerializer,
     DashboardSummaryResponseSerializer,
+    PublicAvailabilityResponseSerializer,
     RevenueQuerySerializer,
     RevenueSummarySerializer,
 )
@@ -30,6 +33,7 @@ from apps.dashboard.services import (
     get_court_utilization,
     get_dashboard_overview,
     get_dashboard_summary,
+    get_public_court_availability,
     get_revenue_summary,
 )
 
@@ -73,6 +77,38 @@ class CourtAvailabilityAPIView(DashboardAPIView):
                 date=query["date"],
             )
         )
+
+
+class PublicCourtAvailabilityAPIView(GenericAPIView):
+    permission_classes = (AllowAny,)
+    query_serializer_class = AvailabilityQuerySerializer
+    response_serializer_class = PublicAvailabilityResponseSerializer
+
+    @extend_schema(
+        tags=["Public"],
+        parameters=[AvailabilityQuerySerializer],
+        responses=PublicAvailabilityResponseSerializer,
+        description=(
+            "Sanitized public court availability. Exposes only public club/court "
+            "identity, date/window, and AVAILABLE/UNAVAILABLE slot state."
+        ),
+    )
+    def get(self, request, *args, **kwargs):
+        query_serializer = self.query_serializer_class(data=request.query_params)
+        query_serializer.is_valid(raise_exception=True)
+        club = get_object_or_404(Club, slug=kwargs["club_slug"])
+        court = get_object_or_404(
+            Court.objects.select_related("club"),
+            pk=kwargs["court_id"],
+            club=club,
+        )
+        data = get_public_court_availability(
+            club=club,
+            court=court,
+            date=query_serializer.validated_data["date"],
+        )
+        serializer = self.response_serializer_class(data)
+        return Response(serializer.data)
 
 
 class ClubCalendarAPIView(DashboardAPIView):

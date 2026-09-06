@@ -254,6 +254,40 @@ class JWTAPITests(AccountAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    def test_expired_access_token_returns_session_expired_code(self):
+        user = self.create_user(username="expired-access-user")
+        token = AccessToken.for_user(user)
+        token.set_exp(lifetime=timedelta(seconds=-1))
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        response = self.client.get(reverse("me"))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["code"], "SESSION_EXPIRED")
+
+    def test_stale_token_for_inactive_user_returns_user_inactive_code(self):
+        user = self.create_user(username="stale-inactive-user")
+        token = AccessToken.for_user(user)
+        user.is_active = False
+        user.save(update_fields=["is_active"])
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        response = self.client.get(reverse("me"))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["code"], "USER_INACTIVE")
+
+    def test_stale_token_for_deleted_user_returns_user_deleted_code(self):
+        user = self.create_user(username="stale-deleted-user")
+        token = AccessToken.for_user(user)
+        user.delete()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        response = self.client.get(reverse("me"))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["code"], "USER_DELETED")
+
     def test_global_normal_token_contains_base_custom_claims(self):
         user = self.create_user(
             username="claims-user",
@@ -349,10 +383,10 @@ class JWTAPITests(AccountAPITestCase):
 
         response = self.obtain_token(user.username, club_slug=club.slug)
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.data["success"], False)
-        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
-        self.assertIn("club_slug", response.data["field_errors"])
+        self.assertEqual(response.data["code"], "CLUB_ACCESS_REVOKED")
+        self.assertEqual(response.data["details"]["club_slug"], club.slug)
 
     def test_refresh_preserves_custom_claims(self):
         staff = self.create_user(username="refresh-claims-staff")

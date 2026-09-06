@@ -233,6 +233,91 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(booking.customer_name, "Ahmed Hassan")
         self.assertEqual(str(booking.customer_phone), "+201000000002")
 
+    def test_booking_create_accepts_optional_client_request_id(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        client_request_id = "1d4df864-f5f0-48b1-b5ce-cd3217424e6f"
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            client_request_id=client_request_id,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        booking = Booking.objects.get(id=response.data["id"])
+        self.assertEqual(str(booking.client_request_id), client_request_id)
+        self.assertEqual(response.data["client_request_id"], client_request_id)
+
+    def test_booking_create_replays_same_client_request_id_and_payload(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        client_request_id = "40eb1a39-139e-479f-a3ee-58c119785584"
+        payload = self.booking_payload(
+            self.court,
+            client_request_id=client_request_id,
+            notes="offline customer note",
+        )
+
+        first_response = self.client.post(
+            self.booking_list_url(self.club),
+            payload,
+            format="json",
+        )
+        replay_response = self.client.post(
+            self.booking_list_url(self.club),
+            payload,
+            format="json",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(replay_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(replay_response.data["id"], first_response.data["id"])
+        self.assertEqual(Booking.objects.count(), 1)
+        self.assertEqual(AuditLog.objects.count(), 1)
+
+    def test_booking_create_rejects_same_client_request_id_different_payload(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        client_request_id = "40f39ff6-b6bf-4e37-8854-ee53bf8dc14c"
+
+        first_response = self.post_booking(
+            self.club,
+            self.court,
+            client_request_id=client_request_id,
+        )
+        mismatch_response = self.post_booking(
+            self.club,
+            self.court,
+            client_request_id=client_request_id,
+            customer_name="Different Customer",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(mismatch_response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(mismatch_response, "BOOKING_CLIENT_REQUEST_MISMATCH")
+        self.assertEqual(
+            mismatch_response.data["details"]["existing_booking_id"],
+            first_response.data["id"],
+        )
+        self.assertEqual(Booking.objects.count(), 1)
+
+    def test_booking_client_request_id_is_scoped_to_selected_club(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        client_request_id = "f4f908ff-58d4-4b4c-a2c0-f89cd2f272bb"
+
+        first_response = self.post_booking(
+            self.club,
+            self.court,
+            client_request_id=client_request_id,
+        )
+        second_response = self.post_booking(
+            self.other_club,
+            self.other_court,
+            client_request_id=client_request_id,
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Booking.objects.count(), 2)
+
     def test_booking_defaults_to_hold_and_manual_source(self):
         self.client.force_authenticate(user=self.platform_admin)
 
@@ -485,7 +570,7 @@ class BookingCreationTests(BookingAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-        self.assert_api_error(response, "BOOKING_SLOT_UNAVAILABLE")
+        self.assert_api_error(response, "RECURRING_UNAVAILABLE")
         self.assertEqual(response.data["details"]["conflict_type"], "FUTURE_CONFLICT")
         self.assertEqual(
             response.data["details"]["conflicting_booking_id"],
@@ -1185,6 +1270,22 @@ class BookingCreationPermissionTests(BookingAPITestCase):
         response = self.post_booking(self.other_club, self.other_court)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assert_api_error(response, "CLUB_ACCESS_REVOKED")
+        self.assertEqual(response.data["details"]["club_slug"], self.other_club.slug)
+
+    def test_inactive_membership_returns_club_access_revoked_code(self):
+        ClubMembership.objects.filter(
+            user=self.owner,
+            club=self.club,
+            role=ClubMembership.Role.OWNER,
+        ).update(is_active=False)
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.post_booking(self.club, self.court)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assert_api_error(response, "CLUB_ACCESS_REVOKED")
+        self.assertEqual(response.data["details"]["club_slug"], self.club.slug)
 
     def test_manager_can_create_booking_inside_assigned_club(self):
         self.client.force_authenticate(user=self.manager)

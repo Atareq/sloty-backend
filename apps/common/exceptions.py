@@ -1,7 +1,12 @@
 from django.utils.translation import gettext_lazy as _
 from rest_framework import status
-from rest_framework.exceptions import APIException, ValidationError
+from rest_framework.exceptions import (
+    APIException,
+    AuthenticationFailed,
+    ValidationError,
+)
 from rest_framework.views import exception_handler as drf_exception_handler
+from rest_framework_simplejwt.exceptions import InvalidToken
 
 
 class SlotyAPIException(APIException):
@@ -61,9 +66,40 @@ def _normalize_validation_detail(detail):
     return {"non_field_errors": _normalize_error_list(detail)}
 
 
+def _first_detail_code(detail):
+    code = getattr(detail, "code", None)
+    if code is not None:
+        return str(code)
+    if isinstance(detail, dict):
+        for value in detail.values():
+            nested_code = _first_detail_code(value)
+            if nested_code:
+                return nested_code
+    if isinstance(detail, (list, tuple)):
+        for value in detail:
+            nested_code = _first_detail_code(value)
+            if nested_code:
+                return nested_code
+    return ""
+
+
 def _api_exception_code(exc, response):
     if hasattr(exc, "api_code"):
         return exc.api_code
+    if isinstance(exc, InvalidToken):
+        messages = getattr(exc, "detail", {}).get("messages", [])
+        for message in messages:
+            if str(message.get("message", "")).lower() == "token is expired":
+                return "SESSION_EXPIRED"
+        return "TOKEN_NOT_VALID"
+    if isinstance(exc, AuthenticationFailed):
+        detail = getattr(exc, "detail", None)
+        detail_code = _first_detail_code(detail)
+        detail_text = str(detail).lower()
+        if detail_code == "user_inactive" or "user is inactive" in detail_text:
+            return "USER_INACTIVE"
+        if detail_code == "user_not_found" or "user not found" in detail_text:
+            return "USER_DELETED"
     status_code = getattr(exc, "status_code", response.status_code)
     if status_code == status.HTTP_404_NOT_FOUND:
         return "NOT_FOUND"

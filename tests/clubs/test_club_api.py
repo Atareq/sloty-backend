@@ -1,17 +1,21 @@
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.db import IntegrityError, transaction
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
 from apps.audit.models import AuditLog
+from apps.bookings.models import Booking
 from apps.clubs.access import ClubAccessContext
 from apps.clubs.models import Club, ClubMembership
 from apps.clubs.services import create_club_member
 from apps.courts.models import Court
+from apps.transactions.models import Transaction
 
 
 class ClubAPITestCase(APITestCase):
@@ -64,6 +68,39 @@ class ClubAPITestCase(APITestCase):
             is_active=is_active,
             **extra_fields,
         )
+
+    def time_at(self, hour: int):
+        return timezone.datetime(
+            2026,
+            7,
+            2,
+            hour,
+            tzinfo=timezone.get_current_timezone(),
+        )
+
+    def create_booking(self, court: Court, **extra_fields) -> Booking:
+        data = {
+            "club": court.club,
+            "court": court,
+            "customer_name": "Club Customer",
+            "customer_phone": "+201000000001",
+            "start_time": self.time_at(20),
+            "end_time": self.time_at(21),
+            "total_price": Decimal("250.00"),
+            "status": Booking.Status.CONFIRMED,
+            "source": Booking.Source.MANUAL,
+        }
+        data.update(extra_fields)
+        return Booking.objects.create(**data)
+
+    def create_transaction(self, booking: Booking, **extra_fields) -> Transaction:
+        data = {
+            "booking": booking,
+            "amount": Decimal("50.00"),
+            "payment_method": Transaction.PaymentMethod.CASH,
+        }
+        data.update(extra_fields)
+        return Transaction.objects.create(**data)
 
     def list_ids(self, response):
         return {item["id"] for item in response.data["results"]}
@@ -878,6 +915,66 @@ class ClubMembershipAPITests(ClubAPITestCase):
         self.client.force_authenticate(user=self.owner)
         scoped_response = self.client.get(reverse("club-list"))
         self.assertEqual(self.list_ids(scoped_response), set())
+
+    def test_staff_membership_deactivation_is_blocked_by_nonzero_current_custody(self):
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        staff_membership = self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        booking = self.create_booking(self.court)
+        self.create_transaction(
+            booking,
+            created_by=self.staff,
+            payment_reference="OFFBOARD-PATCH",
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.patch(
+            self.membership_detail_url(self.club, staff_membership),
+            {"is_active": False},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            response.data["code"], "MEMBERSHIP_CURRENT_CUSTODY_NOT_SETTLED"
+        )
+        self.assertEqual(response.data["details"]["current_custody"], "50.00")
+        staff_membership.refresh_from_db()
+        self.assertTrue(staff_membership.is_active)
+        self.assertIsNone(staff_membership.deleted_at)
+
+    def test_staff_membership_soft_delete_is_blocked_by_nonzero_current_custody(self):
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        staff_membership = self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        booking = self.create_booking(self.court)
+        self.create_transaction(
+            booking,
+            created_by=self.staff,
+            payment_reference="OFFBOARD-DELETE",
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.delete(
+            self.membership_detail_url(self.club, staff_membership)
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            response.data["code"], "MEMBERSHIP_CURRENT_CUSTODY_NOT_SETTLED"
+        )
+        self.assertEqual(response.data["details"]["transaction_count"], 1)
+        staff_membership.refresh_from_db()
+        self.assertTrue(staff_membership.is_active)
+        self.assertIsNone(staff_membership.deleted_at)
 
     def test_soft_delete_is_distinct_from_deactivate_and_blocks_reactivation(self):
         owner_membership = self.create_membership(

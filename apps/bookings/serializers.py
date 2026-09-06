@@ -111,6 +111,7 @@ class BookingListSerializer(
             "recurrence_status",
             "previous_recurring_booking_id",
             "next_recurring_booking_id",
+            "client_request_id",
             "hold_expires_at",
             "notes",
             "created_by",
@@ -149,6 +150,7 @@ class BookingDetailSerializer(
             "recurrence_status",
             "previous_recurring_booking_id",
             "next_recurring_booking_id",
+            "client_request_id",
             "notes",
             "cancellation_reason",
             "no_show_reason",
@@ -183,6 +185,7 @@ class BookingCreateSerializer(serializers.ModelSerializer):
             "end_time",
             "source",
             "is_recurring",
+            "client_request_id",
             "notes",
         )
         read_only_fields = ("id",)

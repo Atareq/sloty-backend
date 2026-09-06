@@ -59,6 +59,8 @@ Current repo reality:
   `/api/v1/docs/`, `/api/v1/auth/token/`, and
   `/api/v1/auth/token/refresh/`
 - Current public utility endpoints include `/api/v1/egypt-locations/`
+- Current deliberate public availability endpoint is
+  `/api/v1/public/clubs/{club_slug}/courts/{court_id}/availability/`
 - Current account endpoints include `/api/v1/me/` and platform-admin-only
   `/api/v1/users/`
 - Current club users endpoint is `/api/v1/clubs/{club_slug}/users/`
@@ -169,14 +171,18 @@ Current implemented app:
   `apps/clubs/services.py`.
 - `PATCH` `is_active` deactivates or reactivates a current membership. This is
   temporary: the row remains in current membership lists and can be turned
-  back on.
+  back on. Deactivating an operational STAFF membership is blocked with
+  `MEMBERSHIP_CURRENT_CUSTODY_NOT_SETTLED` when that user's canonical Current
+  Custody in the selected club is non-zero.
 - `DELETE /api/v1/clubs/{club_slug}/memberships/{id}/` soft-deletes a
   membership (`deleted_at` / `deleted_by`, `is_active=false`). Soft-deleted
   rows are excluded from current membership and club-user lists, grant no
   club access, and cannot be reactivated with PATCH. The `User` account and
   historical bookings/transactions/settlements/audit rows are preserved.
   Audit action is `MEMBERSHIP_DELETED`. Owners cannot delete OWNER
-  memberships. Recreating the same club + user + role + court identity after
+  memberships. Deleting an operational STAFF membership is blocked with
+  `MEMBERSHIP_CURRENT_CUSTODY_NOT_SETTLED` while canonical Current Custody is
+  non-zero. Recreating the same club + user + role + court identity after
   soft delete is rejected with `MEMBERSHIP_DELETED_CANNOT_RECREATE`. Whether
   a deleted user may later be added with a different role or court is
   unresolved. Implementation uses custom `deleted_at` / `deleted_by` fields,
@@ -237,6 +243,15 @@ Current implemented app:
   `min(Booking.created + Court.internal_hold_expiry_hours, Booking.start_time)`
   (the same rule used by `expire_hold_bookings`); for every other status it is
   `null`.
+- Booking create accepts optional `client_request_id` as a UUID idempotency key.
+  Normal online bookings may omit it. When present, uniqueness is scoped to the
+  selected Club and retained on the Booking row for the life of that row. The
+  same `client_request_id` plus the same logical request returns the original
+  Booking with HTTP 200 and does not create another Booking or Audit event.
+  Reusing the same `client_request_id` for a different logical request returns
+  HTTP 409 with `BOOKING_CLIENT_REQUEST_MISMATCH`. Concurrent requests with the
+  same Club/key are serialized by row locks and the database uniqueness
+  constraint.
 - New booking creation and rescheduling must be inside configured court working
   hours and fully covered by pricing periods. No `outside_working_hours` flag is
   stored.
@@ -248,7 +263,9 @@ Current implemented app:
   and `NO_SHOW` bookings as blocking. `CANCELLED` and `EXPIRED` bookings release
   their slots.
 - The standard unavailable-slot business error code is
-  `BOOKING_SLOT_UNAVAILABLE`.
+  `BOOKING_SLOT_UNAVAILABLE`. Starting a new recurring booking whose selected
+  base slot is free but whose weekly pattern conflicts later returns
+  `RECURRING_UNAVAILABLE` with recurrence conflict details.
 - Sprint 9 booking lifecycle actions are manual endpoints on the existing
   `BookingViewSet`: cancel, complete, no-show, reschedule, and expire.
   Automatic hold expiry is exposed through the `expire_hold_bookings`
@@ -375,6 +392,16 @@ Rules for the flow:
 - `/api/v1/me/` exposes `account_created_by` as a stable nested object from
   `User.created_by`, or `null` when the creator is unknown. This is the account
   creator, not the membership creator.
+- Auth failures expose stable top-level codes through the shared exception
+  handler: expired JWT access tokens return `SESSION_EXPIRED`; stale tokens for
+  inactive users return `USER_INACTIVE`; stale tokens for deleted users return
+  `USER_DELETED`.
+- Club-scoped authenticated endpoints use `CLUB_ACCESS_REVOKED` with
+  `details.club_slug` when the user has a valid account but no longer has
+  active access to the selected Club. Token obtain uses the same code when an
+  optional valid `club_slug` is supplied but the user has no active membership
+  there. This lets clients purge only the affected Club scope instead of all
+  user data.
 - `MeAPIView` must load `created_by` with `select_related()` and active
   memberships with a `Prefetch(..., to_attr=...)` that selects `club` and
   `court`; `UserMeSerializer` should consume the prefetched attribute instead
@@ -405,6 +432,9 @@ Rules for the flow:
   `deleted_at` null), deactivated (`is_active=false`, `deleted_at` null,
   reactivatable), and soft-deleted (`deleted_at` set, not reactivatable).
   Access-granting queries use active non-deleted memberships only.
+  Operational STAFF deactivation and soft delete are blocked when canonical
+  Current Custody for that user in the selected club is non-zero; settle current
+  money first.
   Recreating the same club + user + role + court after soft delete is rejected
   with `MEMBERSHIP_DELETED_CANNOT_RECREATE`. Soft delete uses custom
   `deleted_at` / `deleted_by` fields rather than `SafeDeleteModel`.
@@ -820,6 +850,12 @@ pricing periods.
   operational/financial summary, overview, revenue, and court utilization.
 - Availability and calendar are operational APIs. Staff can access only their
   assigned court through `ClubAccessContext`.
+- `/api/v1/public/clubs/{club_slug}/courts/{court_id}/availability/` is the
+  deliberate sanitized public availability contract. It uses the same slot
+  calculation as authenticated availability but exposes only public club/court
+  identity, date/window, and `AVAILABLE`/`UNAVAILABLE`; it must not expose
+  booking IDs, customer data, notes, staff, transactions, payment data,
+  recurrence context, or internal booking statuses.
 - Dashboard summary uses `ClubAccessContext.can_view_dashboard_summary()` and
   `scoped_dashboard_summary_courts_queryset()`. Staff may access this summary
   for their assigned court only.

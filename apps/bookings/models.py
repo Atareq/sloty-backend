@@ -89,6 +89,7 @@ class Booking(models.Model):
         on_delete=models.SET_NULL,
         related_name="next_recurring_booking",
     )
+    client_request_id = models.UUIDField(blank=True, null=True, db_index=True)
     notes = models.TextField(blank=True)
     cancellation_reason = models.TextField(blank=True)
     no_show_reason = models.TextField(blank=True)
@@ -122,6 +123,11 @@ class Booking(models.Model):
                     Q(source="RECURRING") | Q(previous_recurring_booking__isnull=True)
                 ),
                 name="booking_non_recurring_previous_null",
+            ),
+            models.UniqueConstraint(
+                fields=["club", "client_request_id"],
+                condition=Q(client_request_id__isnull=False),
+                name="booking_client_request_once_per_club",
             ),
         ]
         indexes = [
