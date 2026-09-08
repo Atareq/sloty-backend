@@ -9,7 +9,7 @@ from rest_framework.exceptions import PermissionDenied
 from apps.audit.models import AuditLog
 from apps.audit.services import booking_audit_snapshot, record_audit_log
 from apps.bookings.filters import compute_booking_hold_expires_at
-from apps.bookings.models import Booking
+from apps.bookings.models import Booking, BookingAttempt
 from apps.bookings.services import (
     FREE_SLOT_STATUS,
     MAX_SLOT_PERIOD_DAYS,
@@ -173,6 +173,7 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         default=False,
         write_only=True,
     )
+    requested_at = serializers.DateTimeField(required=False, write_only=True)
 
     class Meta:
         model = Booking
@@ -186,6 +187,7 @@ class BookingCreateSerializer(serializers.ModelSerializer):
             "source",
             "is_recurring",
             "client_request_id",
+            "requested_at",
             "notes",
         )
         read_only_fields = ("id",)
@@ -238,6 +240,7 @@ class BookingCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         request = self.context["request"]
         validated_data.pop("is_recurring", None)
+        requested_at = validated_data.pop("requested_at", None)
         court = validated_data.pop("court")
         start_time = validated_data.pop("start_time")
         end_time = validated_data.pop("end_time")
@@ -246,11 +249,76 @@ class BookingCreateSerializer(serializers.ModelSerializer):
             court=court,
             start_time=start_time,
             end_time=end_time,
+            requested_at=requested_at,
             **validated_data,
         )
 
     def to_representation(self, instance):
         return BookingDetailSerializer(instance, context=self.context).data
+
+
+class BookingAttemptStatusMixin(serializers.Serializer):
+    status = serializers.SerializerMethodField()
+    resolved_booking = serializers.PrimaryKeyRelatedField(
+        source="booking",
+        read_only=True,
+    )
+
+    def get_status(self, obj) -> str:
+        if obj.resolution == BookingAttempt.Resolution.DISMISSED:
+            return "DISMISSED"
+        if obj.outcome == BookingAttempt.Outcome.SUCCESS:
+            return "ACCEPTED"
+        return "REJECTED"
+
+
+class BookingAttemptListSerializer(
+    BookingAttemptStatusMixin,
+    serializers.ModelSerializer,
+):
+    court_name = serializers.CharField(source="court.name", read_only=True)
+    attempted_by_username = serializers.CharField(
+        source="attempted_by.username",
+        read_only=True,
+        default="",
+    )
+
+    class Meta:
+        model = BookingAttempt
+        fields = (
+            "id",
+            "club",
+            "court",
+            "court_name",
+            "attempted_by",
+            "attempted_by_username",
+            "client_request_id",
+            "customer_name",
+            "customer_phone",
+            "notes",
+            "requested_start",
+            "requested_end",
+            "requested_at",
+            "requested_source",
+            "requested_recurring",
+            "outcome",
+            "resolution",
+            "status",
+            "failure_code",
+            "resolved_booking",
+            "created",
+            "modified",
+        )
+        read_only_fields = fields
+
+
+class BookingAttemptDetailSerializer(BookingAttemptListSerializer):
+    class Meta(BookingAttemptListSerializer.Meta):
+        fields = BookingAttemptListSerializer.Meta.fields + ("failure_details",)
+
+
+class BookingAttemptDismissSerializer(serializers.Serializer):
+    pass
 
 
 class BookingCancelSerializer(serializers.Serializer):

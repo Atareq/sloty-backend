@@ -1,6 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, connection, transaction
@@ -13,16 +14,22 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
+from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.clubs.access import ClubAccessContext
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court
 from apps.settlements.models import Settlement, SettlementTransaction
+from apps.settlements.services import (
+    get_current_unsettled_transactions,
+    summarize_current_custody_transactions,
+)
 from apps.transactions.filters import TransactionFilter
-from apps.transactions.models import Transaction
+from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.services import (
     DUPLICATE_PAYMENT_REFERENCE_MESSAGE,
     create_booking_transaction,
+    get_booking_paid_amount,
 )
 from apps.transactions.views import TransactionViewSet
 
@@ -118,6 +125,21 @@ class TransactionAPITestCase(APITestCase):
         return reverse(
             "club-transaction-detail",
             kwargs={"club_slug": club.slug, "pk": transaction_obj.pk},
+        )
+
+    def transaction_attempt_list_url(self, club):
+        return reverse("club-transaction-attempt-list", kwargs={"club_slug": club.slug})
+
+    def transaction_attempt_detail_url(self, club, attempt):
+        return reverse(
+            "club-transaction-attempt-detail",
+            kwargs={"club_slug": club.slug, "pk": attempt.pk},
+        )
+
+    def transaction_attempt_dismiss_url(self, club, attempt):
+        return reverse(
+            "club-transaction-attempt-dismiss",
+            kwargs={"club_slug": club.slug, "pk": attempt.pk},
         )
 
     def transaction_payload(self, booking: Booking, **extra_fields):
@@ -563,6 +585,719 @@ class TransactionCreateTests(TransactionAPITestCase):
         response = self.post_transaction(self.club, self.booking, amount="200.00")
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_historical_offline_payment_preserves_event_time_and_server_created(self):
+        occurred_at = self.time_at(9) - timedelta(days=3)
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=str(uuid4()),
+            occurred_at=occurred_at.isoformat(),
+            payment_reference="OFFLINE-HISTORICAL-1",
+            amount="75.00",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        transaction_obj = Transaction.objects.get(id=response.data["id"])
+        self.assertEqual(transaction_obj.created_by, self.staff)
+        self.assertEqual(transaction_obj.occurred_at, occurred_at)
+        self.assertEqual(
+            str(transaction_obj.client_request_id),
+            response.data["client_request_id"],
+        )
+        self.assertNotEqual(transaction_obj.created, occurred_at)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, Booking.Status.CONFIRMED)
+
+    def test_transaction_occurred_at_requires_timezone_aware_value(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=str(uuid4()),
+            occurred_at="2026-05-18T09:00:00",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "occurred_at")
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_idempotent_retry_returns_existing_transaction_without_duplicate_audit(
+        self,
+    ):
+        client_request_id = str(uuid4())
+        occurred_at = self.time_at(9) - timedelta(days=1)
+        payload = {
+            "client_request_id": client_request_id,
+            "occurred_at": occurred_at.isoformat(),
+            "amount": "100.00",
+            "payment_reference": "IDEMPOTENT-TX-1",
+            "notes": "offline retry",
+        }
+        self.client.force_authenticate(user=self.staff)
+
+        first_response = self.post_transaction(self.club, self.booking, **payload)
+        retry_response = self.post_transaction(self.club, self.booking, **payload)
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(retry_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data["id"], retry_response.data["id"])
+        self.assertEqual(
+            Transaction.objects.filter(client_request_id=client_request_id).count(),
+            1,
+        )
+        self.assertEqual(
+            TransactionAttempt.objects.filter(client_request_id=client_request_id)
+            .filter(outcome=TransactionAttempt.Outcome.SUCCESS)
+            .count(),
+            1,
+        )
+        self.assertEqual(self.booking.transactions.count(), 1)
+        self.assertEqual(
+            AuditLog.objects.filter(
+                action=AuditLog.Action.TRANSACTION_CREATED,
+                entity_type="Transaction",
+                entity_id=first_response.data["id"],
+            ).count(),
+            1,
+        )
+
+    def test_idempotency_conflict_rejects_different_logical_transaction(self):
+        client_request_id = str(uuid4())
+        self.client.force_authenticate(user=self.platform_admin)
+
+        first_response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=client_request_id,
+            amount="50.00",
+            payment_reference="IDEMPOTENT-CONFLICT-1",
+        )
+        mismatch_response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=client_request_id,
+            amount="60.00",
+            payment_reference="IDEMPOTENT-CONFLICT-1",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(mismatch_response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(
+            mismatch_response,
+            "TRANSACTION_CLIENT_REQUEST_MISMATCH",
+        )
+        self.assertEqual(
+            Transaction.objects.filter(client_request_id=client_request_id).count(),
+            1,
+        )
+        self.assertEqual(
+            TransactionAttempt.objects.filter(client_request_id=client_request_id)
+            .filter(outcome=TransactionAttempt.Outcome.SUCCESS)
+            .count(),
+            1,
+        )
+
+    def test_idempotency_conflict_includes_different_occurred_at(self):
+        client_request_id = str(uuid4())
+        occurred_at = self.time_at(9) - timedelta(days=1)
+        self.client.force_authenticate(user=self.platform_admin)
+
+        first_response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=client_request_id,
+            occurred_at=occurred_at.isoformat(),
+            payment_reference="IDEMPOTENT-CONFLICT-TIME",
+        )
+        mismatch_response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=client_request_id,
+            occurred_at=(occurred_at + timedelta(minutes=5)).isoformat(),
+            payment_reference="IDEMPOTENT-CONFLICT-TIME",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(mismatch_response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(
+            mismatch_response,
+            "TRANSACTION_CLIENT_REQUEST_MISMATCH",
+        )
+
+    def test_historical_payment_uses_existing_current_custody_semantics(self):
+        occurred_at = self.time_at(7) - timedelta(days=10)
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=str(uuid4()),
+            occurred_at=occurred_at.isoformat(),
+            amount="125.00",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        access = self.make_access(self.staff, self.club)
+        custody_transactions = list(
+            get_current_unsettled_transactions(access=access, collected_by=self.staff)
+        )
+        summary = summarize_current_custody_transactions(custody_transactions)
+        transaction_obj = Transaction.objects.get(id=response.data["id"])
+        self.assertEqual(custody_transactions, [transaction_obj])
+        self.assertEqual(summary["net_amount"], Decimal("125.00"))
+        self.assertEqual(summary["period_start"], transaction_obj.created)
+        self.assertNotEqual(summary["period_start"], transaction_obj.occurred_at)
+
+    def test_revoked_staff_access_cannot_sync_transaction(self):
+        membership = ClubMembership.objects.get(user=self.staff, club=self.club)
+        membership.is_active = False
+        membership.save(update_fields=["is_active"])
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=str(uuid4()),
+            occurred_at=(self.time_at(8) - timedelta(days=1)).isoformat(),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assert_api_error(response, "CLUB_ACCESS_REVOKED")
+        self.assertEqual(Transaction.objects.count(), 0)
+        self.assertEqual(TransactionAttempt.objects.count(), 0)
+
+
+class TransactionAttemptTraceabilityAPITests(TransactionAPITestCase):
+    def setUp(self):
+        self.owner = self.create_user("tx-attempt-owner")
+        self.manager = self.create_user("tx-attempt-manager")
+        self.staff = self.create_user("tx-attempt-staff")
+        self.other_staff = self.create_user("tx-attempt-other-staff")
+        self.external_user = self.create_user("tx-attempt-external")
+        self.club = self.create_club("Transaction Attempt Club", slug="tx-attempt")
+        self.other_club = self.create_club("Other Tx Attempt", slug="other-tx-attempt")
+        self.court = self.create_court(self.club, "Transaction Attempt Court")
+        self.other_court = self.create_court(self.club, "Other Attempt Court")
+        self.external_court = self.create_court(self.other_club, "External Court")
+        self.booking = self.create_booking(self.court)
+        self.other_booking = self.create_booking(
+            self.other_court,
+            start_time=self.time_at(21),
+            end_time=self.time_at(22),
+        )
+        self.external_booking = self.create_booking(self.external_court)
+        self.owner_membership = self.create_membership(
+            self.owner,
+            self.club,
+            ClubMembership.Role.OWNER,
+        )
+        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
+        self.staff_membership = self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.create_membership(
+            self.other_staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.create_membership(
+            self.external_user,
+            self.other_club,
+            ClubMembership.Role.OWNER,
+        )
+
+    def create_attempt(self, booking, attempted_by, **extra_fields):
+        data = {
+            "club": booking.club,
+            "court": booking.court,
+            "booking": booking,
+            "attempted_by": attempted_by,
+            "client_request_id": uuid4(),
+            "amount": Decimal("500.00"),
+            "payment_method": Transaction.PaymentMethod.CASH,
+            "payment_reference": "ATTEMPT-REF",
+            "notes": "original payment attempt",
+            "occurred_at": self.time_at(19),
+            "outcome": TransactionAttempt.Outcome.REJECTED,
+            "failure_code": "PAYMENT_AMOUNT_EXCEEDS_REMAINING",
+            "failure_details": {"amount": ["Too much"]},
+        }
+        data.update(extra_fields)
+        return TransactionAttempt.objects.create(**data)
+
+    def attempt_ids(self, response):
+        return {item["id"] for item in response.data["results"]}
+
+    def test_accepted_payment_records_attempt_and_resolved_transaction(self):
+        client_request_id = str(uuid4())
+        occurred_at = self.time_at(18) - timedelta(days=2)
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=client_request_id,
+            occurred_at=occurred_at.isoformat(),
+            amount="100.00",
+            payment_reference="ACCEPTED-ATTEMPT",
+            notes="offline payment",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn("attempt", response.data)
+        transaction_obj = Transaction.objects.get(pk=response.data["id"])
+        attempt = TransactionAttempt.objects.get(client_request_id=client_request_id)
+        self.assertEqual(attempt.outcome, TransactionAttempt.Outcome.SUCCESS)
+        self.assertEqual(attempt.resolution, TransactionAttempt.Resolution.RESOLVED)
+        self.assertEqual(attempt.transaction, transaction_obj)
+        self.assertEqual(attempt.booking, self.booking)
+        self.assertEqual(attempt.attempted_by, self.staff)
+        self.assertEqual(attempt.amount, Decimal("100.00"))
+        self.assertEqual(attempt.payment_reference, "ACCEPTED-ATTEMPT")
+        self.assertEqual(attempt.notes, "offline payment")
+        self.assertEqual(attempt.occurred_at, occurred_at)
+        self.assertEqual(attempt.failure_code, "")
+
+    def test_rejected_payment_records_attempt_without_fake_transaction(self):
+        self.create_transaction(
+            self.booking,
+            amount=Decimal("275.00"),
+            created_by=self.staff,
+        )
+        client_request_id = str(uuid4())
+        occurred_at = self.time_at(18) - timedelta(days=1)
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=client_request_id,
+            occurred_at=occurred_at.isoformat(),
+            amount="50.00",
+            payment_reference="REJECTED-ATTEMPT",
+            notes="too much",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "amount")
+        self.assertEqual(Transaction.objects.count(), 1)
+        attempt = TransactionAttempt.objects.get(client_request_id=client_request_id)
+        self.assertEqual(attempt.outcome, TransactionAttempt.Outcome.REJECTED)
+        self.assertEqual(attempt.resolution, TransactionAttempt.Resolution.UNRESOLVED)
+        self.assertEqual(attempt.transaction, None)
+        self.assertEqual(attempt.failure_code, "PAYMENT_AMOUNT_EXCEEDS_REMAINING")
+        self.assertEqual(attempt.amount, Decimal("50.00"))
+        self.assertEqual(attempt.payment_reference, "REJECTED-ATTEMPT")
+        self.assertEqual(attempt.occurred_at, occurred_at)
+
+    def test_rejected_attempt_retry_does_not_duplicate_attempt_or_transaction(self):
+        self.create_transaction(
+            self.booking,
+            amount=Decimal("275.00"),
+            created_by=self.staff,
+        )
+        client_request_id = str(uuid4())
+        payload = {
+            "client_request_id": client_request_id,
+            "amount": "50.00",
+            "payment_reference": "RETRY-REJECTED",
+            "notes": "same rejected retry",
+        }
+        self.client.force_authenticate(user=self.staff)
+
+        first_response = self.post_transaction(self.club, self.booking, **payload)
+        retry_response = self.post_transaction(self.club, self.booking, **payload)
+
+        self.assertEqual(first_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(retry_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(retry_response, "amount")
+        self.assertEqual(Transaction.objects.count(), 1)
+        self.assertEqual(TransactionAttempt.objects.count(), 1)
+        self.assertEqual(
+            TransactionAttempt.objects.get().failure_code,
+            "PAYMENT_AMOUNT_EXCEEDS_REMAINING",
+        )
+
+    def test_rejected_attempt_client_request_mismatch_does_not_overwrite(self):
+        self.create_transaction(
+            self.booking,
+            amount=Decimal("275.00"),
+            created_by=self.staff,
+        )
+        client_request_id = str(uuid4())
+        self.client.force_authenticate(user=self.staff)
+
+        first_response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=client_request_id,
+            amount="50.00",
+            payment_reference="REJECTED-MISMATCH",
+        )
+        mismatch_response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=client_request_id,
+            amount="60.00",
+            payment_reference="REJECTED-MISMATCH",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(mismatch_response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(
+            mismatch_response,
+            "TRANSACTION_CLIENT_REQUEST_MISMATCH",
+        )
+        self.assertEqual(Transaction.objects.count(), 1)
+        self.assertEqual(TransactionAttempt.objects.count(), 1)
+        self.assertEqual(TransactionAttempt.objects.get().amount, Decimal("50.00"))
+
+    def test_owner_and_manager_can_list_club_attempts(self):
+        own_attempt = self.create_attempt(self.booking, self.staff)
+        other_attempt = self.create_attempt(
+            self.booking,
+            self.other_staff,
+            occurred_at=self.time_at(18),
+        )
+        external_attempt = self.create_attempt(
+            self.external_booking,
+            self.external_user,
+        )
+
+        for actor in (self.owner, self.manager):
+            with self.subTest(actor=actor.username):
+                self.client.force_authenticate(user=actor)
+                response = self.client.get(self.transaction_attempt_list_url(self.club))
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(
+                    self.attempt_ids(response),
+                    {own_attempt.id, other_attempt.id},
+                )
+                self.assertNotIn(external_attempt.id, self.attempt_ids(response))
+
+    def test_staff_lists_only_own_attempts_in_assigned_scope(self):
+        own_attempt = self.create_attempt(self.booking, self.staff)
+        other_staff_attempt = self.create_attempt(
+            self.booking,
+            self.other_staff,
+            occurred_at=self.time_at(18),
+        )
+        other_court_attempt = self.create_attempt(
+            self.other_booking,
+            self.staff,
+            occurred_at=self.time_at(17),
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(self.transaction_attempt_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.attempt_ids(response), {own_attempt.id})
+        self.assertNotIn(other_staff_attempt.id, self.attempt_ids(response))
+        self.assertNotIn(other_court_attempt.id, self.attempt_ids(response))
+
+    def test_attempt_filters_by_status_court_employee_method_and_paid_date(self):
+        transaction_obj = self.create_transaction(
+            self.booking,
+            amount=Decimal("75.00"),
+            created_by=self.staff,
+            payment_reference="FILTER-ACCEPTED-TX",
+        )
+        accepted_attempt = self.create_attempt(
+            self.booking,
+            self.staff,
+            transaction=transaction_obj,
+            amount=Decimal("75.00"),
+            payment_reference="FILTER-ACCEPTED-TX",
+            outcome=TransactionAttempt.Outcome.SUCCESS,
+            failure_code="",
+            failure_details={},
+            resolution=TransactionAttempt.Resolution.RESOLVED,
+        )
+        dismissed_attempt = self.create_attempt(
+            self.booking,
+            self.staff,
+            payment_method=Transaction.PaymentMethod.BANK_TRANSFER,
+            resolution=TransactionAttempt.Resolution.DISMISSED,
+        )
+        self.create_attempt(
+            self.other_booking,
+            self.other_staff,
+            occurred_at=self.time_at(22),
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        accepted_response = self.client.get(
+            self.transaction_attempt_list_url(self.club),
+            {"status": "ACCEPTED"},
+        )
+        dismissed_response = self.client.get(
+            self.transaction_attempt_list_url(self.club),
+            {"status": "DISMISSED"},
+        )
+        scoped_response = self.client.get(
+            self.transaction_attempt_list_url(self.club),
+            {
+                "court": self.court.id,
+                "attempted_by": self.staff.id,
+                "payment_method": Transaction.PaymentMethod.BANK_TRANSFER,
+                "date": "2026-05-20",
+            },
+        )
+
+        self.assertEqual(self.attempt_ids(accepted_response), {accepted_attempt.id})
+        self.assertEqual(self.attempt_ids(dismissed_response), {dismissed_attempt.id})
+        self.assertEqual(self.attempt_ids(scoped_response), {dismissed_attempt.id})
+
+    def test_attempt_detail_exposes_original_request_and_backend_decision(self):
+        attempt = self.create_attempt(
+            self.booking,
+            self.staff,
+            amount=Decimal("275.00"),
+            payment_method=Transaction.PaymentMethod.DIGITAL_WALLET,
+            payment_reference="DETAIL-REF",
+            notes="original detail",
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(
+            self.transaction_attempt_detail_url(self.club, attempt)
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "REJECTED")
+        self.assertEqual(response.data["outcome"], TransactionAttempt.Outcome.REJECTED)
+        self.assertEqual(
+            response.data["resolution"],
+            TransactionAttempt.Resolution.UNRESOLVED,
+        )
+        self.assertEqual(
+            response.data["failure_code"],
+            "PAYMENT_AMOUNT_EXCEEDS_REMAINING",
+        )
+        self.assertEqual(response.data["failure_details"], {"amount": ["Too much"]})
+        self.assertEqual(response.data["amount"], "275.00")
+        self.assertEqual(
+            response.data["payment_method"],
+            Transaction.PaymentMethod.DIGITAL_WALLET,
+        )
+        self.assertEqual(response.data["payment_reference"], "DETAIL-REF")
+        self.assertEqual(response.data["notes"], "original detail")
+        self.assertIsNone(response.data["resolved_transaction"])
+
+    def test_staff_can_dismiss_own_rejected_attempt_without_fake_transaction(self):
+        attempt = self.create_attempt(self.booking, self.staff)
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.post(
+            self.transaction_attempt_dismiss_url(self.club, attempt),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "DISMISSED")
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.resolution, TransactionAttempt.Resolution.DISMISSED)
+        self.assertEqual(Transaction.objects.count(), 0)
+        self.assertEqual(get_booking_paid_amount(self.booking), Decimal("0.00"))
+        self.assertEqual(Settlement.objects.count(), 0)
+
+    def test_accepted_attempt_cannot_be_dismissed(self):
+        transaction_obj = self.create_transaction(
+            self.booking,
+            amount=Decimal("75.00"),
+            created_by=self.staff,
+        )
+        attempt = self.create_attempt(
+            self.booking,
+            self.staff,
+            transaction=transaction_obj,
+            amount=Decimal("75.00"),
+            outcome=TransactionAttempt.Outcome.SUCCESS,
+            failure_code="",
+            failure_details={},
+            resolution=TransactionAttempt.Resolution.RESOLVED,
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.post(
+            self.transaction_attempt_dismiss_url(self.club, attempt),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "TRANSACTION_ATTEMPT_CANNOT_BE_DISMISSED")
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.outcome, TransactionAttempt.Outcome.SUCCESS)
+        self.assertEqual(attempt.resolution, TransactionAttempt.Resolution.RESOLVED)
+        self.assertTrue(Transaction.objects.filter(pk=transaction_obj.pk).exists())
+
+    def test_staff_cannot_view_or_dismiss_another_staff_attempt(self):
+        attempt = self.create_attempt(self.booking, self.other_staff)
+        self.client.force_authenticate(user=self.staff)
+
+        detail_response = self.client.get(
+            self.transaction_attempt_detail_url(self.club, attempt)
+        )
+        dismiss_response = self.client.post(
+            self.transaction_attempt_dismiss_url(self.club, attempt),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(detail_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(dismiss_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_accepted_attempt_remains_accepted_after_transaction_cancel(self):
+        self.client.force_authenticate(user=self.staff)
+        create_response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=str(uuid4()),
+            amount="100.00",
+            payment_reference="CANCEL-LATER",
+            notes="original payment",
+        )
+        transaction_obj = Transaction.objects.get(pk=create_response.data["id"])
+        attempt = TransactionAttempt.objects.get(transaction=transaction_obj)
+
+        cancel_response = self.client.post(
+            reverse(
+                "club-transaction-cancel",
+                kwargs={"club_slug": self.club.slug, "pk": transaction_obj.pk},
+            ),
+            {"reason": "Wrong payment entered"},
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(cancel_response.status_code, status.HTTP_200_OK)
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.outcome, TransactionAttempt.Outcome.SUCCESS)
+        self.assertEqual(attempt.resolution, TransactionAttempt.Resolution.RESOLVED)
+        self.assertEqual(attempt.transaction, transaction_obj)
+        self.assertEqual(attempt.amount, Decimal("100.00"))
+        self.assertEqual(attempt.payment_reference, "CANCEL-LATER")
+        self.assertEqual(attempt.notes, "original payment")
+
+    def test_rejected_attempts_have_zero_custody_settlement_and_payment_effect(self):
+        real_payment = self.create_transaction(
+            self.booking,
+            amount=Decimal("300.00"),
+            created_by=self.staff,
+            payment_reference="REAL-CUSTODY",
+        )
+        rejected_attempt = self.create_attempt(
+            self.booking,
+            self.staff,
+            amount=Decimal("500.00"),
+            payment_reference="REJECTED-CUSTODY",
+        )
+        access = self.make_access(self.owner, self.club)
+        self.client.force_authenticate(user=self.owner)
+
+        custody_transactions = list(
+            get_current_unsettled_transactions(access=access, collected_by=self.staff)
+        )
+        custody = summarize_current_custody_transactions(custody_transactions)
+        preview_response = self.client.get(
+            reverse("club-settlement-preview", kwargs={"club_slug": self.club.slug}),
+            {"collected_by": self.staff.id},
+        )
+        settlement_response = self.client.post(
+            reverse("club-settlement-list", kwargs={"club_slug": self.club.slug}),
+            {"collected_by": self.staff.id},
+            format="json",
+        )
+
+        self.assertEqual(TransactionAttempt.objects.count(), 1)
+        self.assertEqual(rejected_attempt.transaction, None)
+        self.assertEqual(custody_transactions, [real_payment])
+        self.assertEqual(custody["net_amount"], Decimal("300.00"))
+        self.assertEqual(get_booking_paid_amount(self.booking), Decimal("300.00"))
+        self.assertEqual(preview_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(preview_response.data["transaction_count"], 1)
+        self.assertEqual(preview_response.data["total_amount"], "300.00")
+        self.assertEqual(settlement_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(settlement_response.data["transaction_count"], 1)
+        self.assertEqual(SettlementTransaction.objects.count(), 1)
+        self.assertEqual(SettlementTransaction.objects.get().transaction, real_payment)
+
+    def test_rejected_attempts_do_not_appear_in_transaction_list(self):
+        attempt = self.create_attempt(self.booking, self.staff)
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.transaction_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 0)
+        self.assertEqual(self.list_ids(response), set())
+        self.assertTrue(TransactionAttempt.objects.filter(pk=attempt.pk).exists())
+
+    def test_membership_soft_delete_preserves_attempt_transaction_and_user(self):
+        transaction_obj = self.create_transaction(
+            self.booking,
+            amount=Decimal("75.00"),
+            created_by=self.staff,
+            payment_reference="DELETE-MEMBERSHIP-TX",
+        )
+        attempt = self.create_attempt(
+            self.booking,
+            self.staff,
+            transaction=transaction_obj,
+            amount=Decimal("75.00"),
+            payment_reference="DELETE-MEMBERSHIP-TX",
+            outcome=TransactionAttempt.Outcome.SUCCESS,
+            failure_code="",
+            failure_details={},
+            resolution=TransactionAttempt.Resolution.RESOLVED,
+        )
+        settlement = Settlement.objects.create(
+            club=self.club,
+            court=self.court,
+            collected_by=self.staff,
+            period_start=self.time_at(8),
+            period_end=self.time_at(14),
+            status=Settlement.Status.SETTLED,
+            total_amount=transaction_obj.amount,
+            transaction_count=1,
+            created_by=self.owner,
+            settled_by=self.owner,
+            settled_at=self.time_at(14),
+        )
+        SettlementTransaction.objects.create(
+            settlement=settlement,
+            transaction=transaction_obj,
+            amount=transaction_obj.amount,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        delete_response = self.client.delete(
+            reverse(
+                "club-membership-detail",
+                kwargs={"club_slug": self.club.slug, "pk": self.staff_membership.pk},
+            )
+        )
+
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        self.staff_membership.refresh_from_db()
+        attempt.refresh_from_db()
+        self.assertIsNotNone(self.staff_membership.deleted_at)
+        self.assertEqual(attempt.attempted_by, self.staff)
+        self.assertEqual(attempt.transaction, transaction_obj)
+        self.assertTrue(User.objects.filter(pk=self.staff.pk).exists())
+        self.assertTrue(Transaction.objects.filter(pk=transaction_obj.pk).exists())
 
 
 class TransactionBookingConfirmationTests(TransactionAPITestCase):

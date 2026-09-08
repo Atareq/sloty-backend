@@ -12,9 +12,17 @@ from rest_framework.mixins import (
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
-from apps.bookings.filters import BookingFilter, annotate_booking_hold_expires_at
-from apps.bookings.models import Booking
+from apps.bookings.filters import (
+    BookingAttemptFilter,
+    BookingFilter,
+    annotate_booking_hold_expires_at,
+)
+from apps.bookings.models import Booking, BookingAttempt
+from apps.bookings.permissions import CanManageBookingAttempts
 from apps.bookings.serializers import (
+    BookingAttemptDetailSerializer,
+    BookingAttemptDismissSerializer,
+    BookingAttemptListSerializer,
     BookingCancellationPreviewResponseSerializer,
     BookingCancelSerializer,
     BookingCompleteSerializer,
@@ -34,6 +42,7 @@ from apps.bookings.services import (
     build_cancellation_preview,
     cancel_booking,
     complete_booking,
+    dismiss_booking_attempt,
     end_booking_recurrence,
     expire_booking,
     generate_booking_slots,
@@ -317,3 +326,65 @@ class BookingViewSet(
         data = preview_recurrence_next(access=access, booking=booking)
         serializer = BookingRecurrenceNextSerializer(data)
         return Response(serializer.data)
+
+
+@extend_schema_view(
+    list=extend_schema(
+        tags=["Booking Attempts"],
+        responses=BookingAttemptListSerializer,
+    ),
+    retrieve=extend_schema(
+        tags=["Booking Attempts"],
+        responses=BookingAttemptDetailSerializer,
+    ),
+)
+class BookingAttemptViewSet(
+    ClubScopedAccessMixin,
+    ListModelMixin,
+    RetrieveModelMixin,
+    GenericViewSet,
+):
+    permission_classes = (CanManageBookingAttempts,)
+    filter_backends = (DjangoFilterBackend,)
+    filterset_class = BookingAttemptFilter
+    http_method_names = ("get", "post", "head", "options")
+
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return BookingAttempt.objects.none()
+        return (
+            self.get_access_context()
+            .scoped_booking_attempts_queryset()
+            .select_related("club", "court", "attempted_by", "booking")
+            .order_by("-created", "-id")
+        )
+
+    def get_serializer_class(self):
+        if self.action == "list":
+            return BookingAttemptListSerializer
+        if self.action == "dismiss":
+            return BookingAttemptDismissSerializer
+        return BookingAttemptDetailSerializer
+
+    @extend_schema(
+        tags=["Booking Attempts"],
+        request=BookingAttemptDismissSerializer,
+        responses=BookingAttemptDetailSerializer,
+    )
+    @action(detail=True, methods=["post"])
+    def dismiss(self, request, *args, **kwargs):
+        access = self.get_access_context()
+        attempt = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        attempt = dismiss_booking_attempt(
+            access=access,
+            attempt=attempt,
+            actor=request.user,
+        )
+        return Response(
+            BookingAttemptDetailSerializer(
+                attempt,
+                context=self.get_serializer_context(),
+            ).data
+        )

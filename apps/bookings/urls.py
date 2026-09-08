@@ -1,6 +1,6 @@
 from django.urls import path
 
-from apps.bookings.views import BookingViewSet
+from apps.bookings.views import BookingAttemptViewSet, BookingViewSet
 
 booking_list = BookingViewSet.as_view(
     {
@@ -23,8 +23,26 @@ booking_reschedule = BookingViewSet.as_view({"post": "reschedule"})
 booking_expire = BookingViewSet.as_view({"post": "expire"})
 booking_end_recurrence = BookingViewSet.as_view({"post": "end_recurrence"})
 booking_recurrence_next = BookingViewSet.as_view({"get": "recurrence_next"})
+booking_attempt_list = BookingAttemptViewSet.as_view({"get": "list"})
+booking_attempt_detail = BookingAttemptViewSet.as_view({"get": "retrieve"})
+booking_attempt_dismiss = BookingAttemptViewSet.as_view({"post": "dismiss"})
 
 urlpatterns = [
+    path(
+        "clubs/<slug:club_slug>/booking-attempts/",
+        booking_attempt_list,
+        name="club-booking-attempt-list",
+    ),
+    path(
+        "clubs/<slug:club_slug>/booking-attempts/<int:pk>/",
+        booking_attempt_detail,
+        name="club-booking-attempt-detail",
+    ),
+    path(
+        "clubs/<slug:club_slug>/booking-attempts/<int:pk>/dismiss/",
+        booking_attempt_dismiss,
+        name="club-booking-attempt-dismiss",
+    ),
     path("clubs/<slug:club_slug>/bookings/", booking_list, name="club-booking-list"),
     path(
         "clubs/<slug:club_slug>/bookings/slots/",

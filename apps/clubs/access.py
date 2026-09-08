@@ -223,6 +223,23 @@ class ClubAccessContext:
             and self.can_access_court(booking.court)
         )
 
+    def can_access_booking_attempt(self, attempt):
+        if not (
+            attempt is not None
+            and attempt.club_id == self.club.id
+            and self.can_access_court(attempt.court)
+        ):
+            return False
+        if self.is_staff_only:
+            return attempt.attempted_by_id == self.user.id
+        return True
+
+    def can_dismiss_booking_attempt(self, attempt):
+        return (
+            self.can_access_booking_attempt(attempt)
+            and attempt.attempted_by_id == self.user.id
+        )
+
     def can_create_transaction_for_booking(self, booking):
         return (
             booking is not None
@@ -254,6 +271,23 @@ class ClubAccessContext:
         if not self.can_access_transaction(transaction):
             return False
         return self.is_platform_admin or transaction.created_by_id == self.user.id
+
+    def can_access_transaction_attempt(self, attempt):
+        if not (
+            attempt is not None
+            and attempt.club_id == self.club.id
+            and self.can_access_court(attempt.court)
+        ):
+            return False
+        if self.is_staff_only:
+            return attempt.attempted_by_id == self.user.id
+        return True
+
+    def can_dismiss_transaction_attempt(self, attempt):
+        return (
+            self.can_access_transaction_attempt(attempt)
+            and attempt.attempted_by_id == self.user.id
+        )
 
     def can_manage_settlements(self):
         if self.is_platform_admin or self.is_owner:
@@ -343,6 +377,17 @@ class ClubAccessContext:
 
         return Booking.objects.filter(court__in=self.scoped_courts_queryset())
 
+    def scoped_booking_attempts_queryset(self):
+        from apps.bookings.models import BookingAttempt
+
+        queryset = BookingAttempt.objects.filter(
+            club=self.club,
+            court__in=self.scoped_courts_queryset(),
+        )
+        if self.is_staff_only:
+            queryset = queryset.filter(attempted_by=self.user)
+        return queryset
+
     def scoped_calendar_bookings_queryset(self):
         return self.scoped_bookings_queryset()
 
@@ -379,6 +424,17 @@ class ClubAccessContext:
         queryset = Transaction.objects.filter(court__in=self.scoped_courts_queryset())
         if self.is_staff_only:
             queryset = queryset.filter(created_by=self.user)
+        return queryset
+
+    def scoped_transaction_attempts_queryset(self):
+        from apps.transactions.models import TransactionAttempt
+
+        queryset = TransactionAttempt.objects.filter(
+            club=self.club,
+            court__in=self.scoped_courts_queryset(),
+        )
+        if self.is_staff_only:
+            queryset = queryset.filter(attempted_by=self.user)
         return queryset
 
     def scoped_settlements_queryset(self):

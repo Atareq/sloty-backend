@@ -13,7 +13,7 @@ from django.db.models import (
 from django.db.models.functions import Cast, Least
 from django.utils import timezone
 
-from apps.bookings.models import Booking
+from apps.bookings.models import Booking, BookingAttempt
 from apps.common.search import customer_phone_search_q
 
 
@@ -224,3 +224,62 @@ class BookingFilter(django_filters.FilterSet):
             status__in={Booking.Status.HOLD, Booking.Status.CONFIRMED},
             end_time__gt=timezone.now(),
         )
+
+
+class BookingAttemptFilter(django_filters.FilterSet):
+    STATUS_CHOICES = (
+        ("ACCEPTED", "Accepted"),
+        ("REJECTED", "Rejected"),
+        ("DISMISSED", "Dismissed"),
+    )
+
+    court = django_filters.NumberFilter(field_name="court_id")
+    attempted_by = django_filters.NumberFilter(field_name="attempted_by_id")
+    outcome = django_filters.ChoiceFilter(choices=BookingAttempt.Outcome.choices)
+    resolution = django_filters.ChoiceFilter(choices=BookingAttempt.Resolution.choices)
+    requested_source = django_filters.ChoiceFilter(choices=Booking.Source.choices)
+    status = django_filters.ChoiceFilter(choices=STATUS_CHOICES, method="filter_status")
+    date = django_filters.DateFilter(method="filter_date")
+    date_from = django_filters.IsoDateTimeFilter(method="filter_date_from")
+    date_to = django_filters.IsoDateTimeFilter(method="filter_date_to")
+
+    class Meta:
+        model = BookingAttempt
+        fields = (
+            "court",
+            "attempted_by",
+            "outcome",
+            "resolution",
+            "requested_source",
+            "status",
+            "date",
+            "date_from",
+            "date_to",
+        )
+
+    def filter_status(self, queryset, name, value):
+        normalized = (value or "").strip().upper()
+        if normalized == "ACCEPTED":
+            return queryset.filter(
+                outcome=BookingAttempt.Outcome.SUCCESS,
+            ).exclude(resolution=BookingAttempt.Resolution.DISMISSED)
+        if normalized == "REJECTED":
+            return queryset.filter(
+                outcome=BookingAttempt.Outcome.REJECTED,
+            ).exclude(resolution=BookingAttempt.Resolution.DISMISSED)
+        if normalized == "DISMISSED":
+            return queryset.filter(resolution=BookingAttempt.Resolution.DISMISSED)
+        return queryset.none()
+
+    def filter_date(self, queryset, name, value):
+        start_of_day, end_of_day = day_bounds(value)
+        return queryset.filter(
+            requested_start__lt=end_of_day,
+            requested_end__gt=start_of_day,
+        )
+
+    def filter_date_from(self, queryset, name, value):
+        return queryset.filter(requested_end__gt=value)
+
+    def filter_date_to(self, queryset, name, value):
+        return queryset.filter(requested_start__lt=value)

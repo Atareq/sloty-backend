@@ -3,6 +3,7 @@ from datetime import date, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
+from uuid import uuid4
 
 import yaml
 from django.core.management import call_command
@@ -18,15 +19,17 @@ from rest_framework.test import APITestCase
 from apps.accounts.models import User
 from apps.audit.models import AuditLog
 from apps.bookings.filters import (
+    BookingAttemptFilter,
     BookingFilter,
     annotate_booking_hold_expires_at,
     compute_booking_hold_expires_at,
 )
-from apps.bookings.models import Booking
-from apps.bookings.views import BookingViewSet
+from apps.bookings.models import Booking, BookingAttempt
+from apps.bookings.views import BookingAttemptViewSet, BookingViewSet
 from apps.clubs.models import Club, ClubMembership
 from apps.common.middleware import SQLQueryStats
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
+from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
 
 
@@ -152,6 +155,21 @@ class BookingAPITestCase(APITestCase):
     def booking_slots_url(self, club):
         return reverse("club-booking-slots", kwargs={"club_slug": club.slug})
 
+    def booking_attempt_list_url(self, club):
+        return reverse("club-booking-attempt-list", kwargs={"club_slug": club.slug})
+
+    def booking_attempt_detail_url(self, club, attempt):
+        return reverse(
+            "club-booking-attempt-detail",
+            kwargs={"club_slug": club.slug, "pk": attempt.pk},
+        )
+
+    def booking_attempt_dismiss_url(self, club, attempt):
+        return reverse(
+            "club-booking-attempt-dismiss",
+            kwargs={"club_slug": club.slug, "pk": attempt.pk},
+        )
+
     def post_booking(self, club: Club, court: Court, **extra_fields):
         return self.client.post(
             self.booking_list_url(club),
@@ -248,6 +266,49 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(str(booking.client_request_id), client_request_id)
         self.assertEqual(response.data["client_request_id"], client_request_id)
 
+    def test_booking_create_records_successful_attempt(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        client_request_id = "91f2f96a-8997-49a3-9bf7-96c2d3a0d922"
+        requested_at = self.time_at(18).isoformat()
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            client_request_id=client_request_id,
+            requested_at=requested_at,
+            notes="captured offline",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        booking = Booking.objects.get(id=response.data["id"])
+        attempt = BookingAttempt.objects.get()
+        self.assertEqual(attempt.club, self.club)
+        self.assertEqual(attempt.court, self.court)
+        self.assertEqual(attempt.attempted_by, self.platform_admin)
+        self.assertEqual(str(attempt.client_request_id), client_request_id)
+        self.assertEqual(attempt.customer_name, "Ahmed Hassan")
+        self.assertEqual(str(attempt.customer_phone), "+201000000002")
+        self.assertEqual(attempt.notes, "captured offline")
+        self.assertEqual(attempt.requested_start, self.time_at(20))
+        self.assertEqual(attempt.requested_end, self.time_at(21))
+        self.assertEqual(attempt.requested_at, self.time_at(18))
+        self.assertFalse(attempt.requested_recurring)
+        self.assertEqual(attempt.outcome, BookingAttempt.Outcome.SUCCESS)
+        self.assertEqual(attempt.resolution, BookingAttempt.Resolution.RESOLVED)
+        self.assertEqual(attempt.failure_code, "")
+        self.assertEqual(attempt.booking, booking)
+
+    def test_booking_create_without_client_request_id_still_records_attempt(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.post_booking(self.club, self.court)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        attempt = BookingAttempt.objects.get()
+        self.assertIsNone(attempt.client_request_id)
+        self.assertEqual(attempt.outcome, BookingAttempt.Outcome.SUCCESS)
+        self.assertEqual(attempt.booking_id, response.data["id"])
+
     def test_booking_create_replays_same_client_request_id_and_payload(self):
         self.client.force_authenticate(user=self.platform_admin)
         client_request_id = "40eb1a39-139e-479f-a3ee-58c119785584"
@@ -272,6 +333,10 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(replay_response.status_code, status.HTTP_200_OK)
         self.assertEqual(replay_response.data["id"], first_response.data["id"])
         self.assertEqual(Booking.objects.count(), 1)
+        self.assertEqual(BookingAttempt.objects.count(), 1)
+        attempt = BookingAttempt.objects.get()
+        self.assertEqual(attempt.outcome, BookingAttempt.Outcome.SUCCESS)
+        self.assertEqual(attempt.booking_id, first_response.data["id"])
         self.assertEqual(AuditLog.objects.count(), 1)
 
     def test_booking_create_rejects_same_client_request_id_different_payload(self):
@@ -298,6 +363,11 @@ class BookingCreationTests(BookingAPITestCase):
             first_response.data["id"],
         )
         self.assertEqual(Booking.objects.count(), 1)
+        self.assertEqual(BookingAttempt.objects.count(), 1)
+        self.assertEqual(
+            BookingAttempt.objects.get().outcome,
+            BookingAttempt.Outcome.SUCCESS,
+        )
 
     def test_booking_client_request_id_is_scoped_to_selected_club(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -317,6 +387,145 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(second_response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(Booking.objects.count(), 2)
+        self.assertEqual(BookingAttempt.objects.count(), 2)
+
+    def test_rejected_slot_unavailable_records_attempt_without_fake_booking(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        blocker = self.create_booking(self.court)
+        client_request_id = "d0de6156-7555-43d9-ae71-70b77a1f117b"
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            client_request_id=client_request_id,
+            requested_at=self.time_at(19).isoformat(),
+            notes="customer asked for busy slot",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_SLOT_UNAVAILABLE")
+        self.assertEqual(Booking.objects.count(), 1)
+        self.assertEqual(Booking.objects.get(), blocker)
+        attempt = BookingAttempt.objects.get()
+        self.assertEqual(attempt.outcome, BookingAttempt.Outcome.REJECTED)
+        self.assertEqual(attempt.failure_code, "BOOKING_SLOT_UNAVAILABLE")
+        self.assertIsNone(attempt.booking)
+        self.assertEqual(str(attempt.client_request_id), client_request_id)
+        self.assertEqual(attempt.requested_at, self.time_at(19))
+
+    def test_rejected_attempt_retry_same_client_request_id_does_not_duplicate(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        self.create_booking(self.court)
+        client_request_id = "7df38e6b-a066-4b72-9897-a705d3de836f"
+        payload = self.booking_payload(
+            self.court,
+            client_request_id=client_request_id,
+            notes="retry same rejected request",
+        )
+
+        first_response = self.client.post(
+            self.booking_list_url(self.club),
+            payload,
+            format="json",
+        )
+        retry_response = self.client.post(
+            self.booking_list_url(self.club),
+            payload,
+            format="json",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(retry_response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(retry_response, "BOOKING_SLOT_UNAVAILABLE")
+        self.assertEqual(Booking.objects.count(), 1)
+        self.assertEqual(BookingAttempt.objects.count(), 1)
+        self.assertEqual(
+            BookingAttempt.objects.get().failure_code,
+            "BOOKING_SLOT_UNAVAILABLE",
+        )
+
+    def test_rejected_attempt_client_request_id_mismatch_does_not_create_new_attempt(
+        self,
+    ):
+        self.client.force_authenticate(user=self.platform_admin)
+        self.create_booking(self.court)
+        client_request_id = "d647bf4c-7b0b-43f7-91fe-0ff12fffe4bb"
+
+        first_response = self.post_booking(
+            self.club,
+            self.court,
+            client_request_id=client_request_id,
+        )
+        mismatch_response = self.post_booking(
+            self.club,
+            self.court,
+            client_request_id=client_request_id,
+            customer_name="Different Customer",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(mismatch_response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(mismatch_response, "BOOKING_CLIENT_REQUEST_MISMATCH")
+        self.assertEqual(Booking.objects.count(), 1)
+        self.assertEqual(BookingAttempt.objects.count(), 1)
+
+    def test_rejected_attempt_does_not_affect_open_slot_availability(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        future_start = self.time_at(20) + timedelta(weeks=10, minutes=30)
+        self.create_booking(
+            self.court,
+            start_time=future_start,
+            end_time=future_start + timedelta(hours=1),
+            status=Booking.Status.CONFIRMED,
+        )
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            is_recurring=True,
+            client_request_id="0dd65df7-c9a8-430e-8f9d-8f9434881f58",
+        )
+        slots_response = self.client.get(
+            self.booking_slots_url(self.club),
+            {"court": self.court.id, "date": "2026-05-20"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "RECURRING_UNAVAILABLE")
+        self.assertEqual(BookingAttempt.objects.count(), 1)
+        attempt = BookingAttempt.objects.get()
+        self.assertEqual(attempt.outcome, BookingAttempt.Outcome.REJECTED)
+        self.assertTrue(attempt.requested_recurring)
+        self.assertEqual(attempt.failure_code, "RECURRING_UNAVAILABLE")
+        self.assertEqual(slots_response.status_code, status.HTTP_200_OK)
+        slot = next(
+            item
+            for item in slots_response.data["slots"]
+            if (
+                item["start_time"].hour
+                if hasattr(item["start_time"], "hour")
+                else parse_datetime(item["start_time"]).hour
+            )
+            == 20
+        )
+        self.assertEqual(slot["slot_status"], "FREE")
+        self.assertTrue(slot["is_available"])
+        self.assertIsNone(slot["booking"])
+
+    def test_rejected_attempt_does_not_affect_financial_rows(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        self.create_booking(self.court)
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            client_request_id="a595367c-dfa9-4d05-bae3-9d4e26386925",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(BookingAttempt.objects.count(), 1)
+        self.assertEqual(Transaction.objects.count(), 0)
+        self.assertEqual(Settlement.objects.count(), 0)
 
     def test_booking_defaults_to_hold_and_manual_source(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -373,6 +582,11 @@ class BookingCreationTests(BookingAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assert_api_error(response, "BOOKING_OUTSIDE_WORKING_HOURS")
+        self.assertEqual(BookingAttempt.objects.count(), 1)
+        self.assertEqual(
+            BookingAttempt.objects.get().failure_code,
+            "BOOKING_OUTSIDE_WORKING_HOURS",
+        )
 
     def test_booking_time_must_align_with_slot_grid(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -404,6 +618,7 @@ class BookingCreationTests(BookingAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assert_field_error(response, "court")
+        self.assertEqual(BookingAttempt.objects.count(), 0)
 
     def test_start_time_must_be_before_end_time(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -601,6 +816,622 @@ class BookingCreationTests(BookingAPITestCase):
             response.data["details"]["conflicting_booking_id"],
             anchor.id,
         )
+
+
+class BookingHistoricalCreationTests(BookingAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("historical-admin")
+        self.staff = self.create_user("historical-staff")
+        self.club = self.create_club("Historical Club", slug="historical-club")
+        self.court = self.create_court(self.club, "Historical Court")
+        self.same_club_other_court = self.create_court(
+            self.club,
+            "Historical Other Court",
+        )
+        self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.sync_now = timezone.datetime(
+            2026,
+            9,
+            10,
+            20,
+            30,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        self.past_start = timezone.datetime(
+            2026,
+            9,
+            3,
+            20,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        self.past_end = self.past_start + timedelta(hours=1)
+
+    def ensure_priced_slot(self, start_time, end_time, *, court=None):
+        target_court = court or self.court
+        local_start = timezone.localtime(start_time)
+        local_end = timezone.localtime(end_time)
+        self.create_working_hours(
+            target_court,
+            weekday=local_start.weekday(),
+            opens_at=local_start.time(),
+            closes_at=local_end.time(),
+            price=target_court.default_price,
+        )
+
+    def historical_payload(self, **extra_fields):
+        data = self.booking_payload(
+            self.court,
+            start_time=self.past_start.isoformat(),
+            end_time=self.past_end.isoformat(),
+            requested_at=(self.past_start - timedelta(minutes=10)).isoformat(),
+            client_request_id="98f92319-9152-42f0-8cb9-7de06927e775",
+        )
+        data.update(extra_fields)
+        return data
+
+    def post_historical(self, payload=None):
+        return self.client.post(
+            self.booking_list_url(self.club),
+            payload or self.historical_payload(),
+            format="json",
+        )
+
+    def test_past_booking_is_accepted_when_business_rules_pass(self):
+        self.ensure_priced_slot(self.past_start, self.past_end)
+        self.client.force_authenticate(user=self.platform_admin)
+
+        with patch("django.utils.timezone.now", return_value=self.sync_now):
+            response = self.post_historical()
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        booking = Booking.objects.get(id=response.data["id"])
+        self.assertLess(booking.start_time, self.sync_now)
+        self.assertLess(booking.end_time, self.sync_now)
+        self.assertEqual(booking.status, Booking.Status.HOLD)
+        self.assertEqual(booking.total_price, Decimal("300.00"))
+        attempt = BookingAttempt.objects.get()
+        self.assertEqual(attempt.outcome, BookingAttempt.Outcome.SUCCESS)
+        self.assertEqual(attempt.booking, booking)
+        self.assertEqual(attempt.requested_start, self.past_start)
+        self.assertEqual(attempt.requested_end, self.past_end)
+
+    def test_past_booking_conflict_returns_slot_unavailable_and_rejected_attempt(self):
+        self.ensure_priced_slot(self.past_start, self.past_end)
+        self.create_booking(
+            self.court,
+            start_time=self.past_start,
+            end_time=self.past_end,
+            status=Booking.Status.CONFIRMED,
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+        with patch("django.utils.timezone.now", return_value=self.sync_now):
+            response = self.post_historical()
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_SLOT_UNAVAILABLE")
+        self.assertEqual(Booking.objects.count(), 1)
+        attempt = BookingAttempt.objects.get()
+        self.assertEqual(attempt.outcome, BookingAttempt.Outcome.REJECTED)
+        self.assertEqual(attempt.failure_code, "BOOKING_SLOT_UNAVAILABLE")
+        self.assertIsNone(attempt.booking)
+
+    def test_future_booking_still_succeeds(self):
+        future_start = self.sync_now + timedelta(days=7)
+        future_start = future_start.replace(hour=20, minute=0)
+        future_end = future_start + timedelta(hours=1)
+        self.ensure_priced_slot(future_start, future_end)
+        self.client.force_authenticate(user=self.platform_admin)
+
+        with patch("django.utils.timezone.now", return_value=self.sync_now):
+            response = self.post_historical(
+                self.historical_payload(
+                    start_time=future_start.isoformat(),
+                    end_time=future_end.isoformat(),
+                    requested_at=self.sync_now.isoformat(),
+                    client_request_id="ce6a733f-2b79-42c2-b34d-5bdf8b3f7d9e",
+                )
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        booking = Booking.objects.get(id=response.data["id"])
+        self.assertGreater(booking.start_time, self.sync_now)
+        self.assertEqual(booking.status, Booking.Status.HOLD)
+        self.assertEqual(
+            BookingAttempt.objects.get().outcome,
+            BookingAttempt.Outcome.SUCCESS,
+        )
+
+    def test_current_overlapping_booking_follows_normal_business_rules(self):
+        current_start = self.sync_now.replace(hour=20, minute=0)
+        current_end = current_start + timedelta(hours=1)
+        self.ensure_priced_slot(current_start, current_end)
+        self.client.force_authenticate(user=self.platform_admin)
+
+        with patch("django.utils.timezone.now", return_value=self.sync_now):
+            response = self.post_historical(
+                self.historical_payload(
+                    start_time=current_start.isoformat(),
+                    end_time=current_end.isoformat(),
+                    requested_at=(self.sync_now - timedelta(minutes=30)).isoformat(),
+                    client_request_id="fe964a66-9b64-42bd-9db8-cf87dac756d6",
+                )
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        booking = Booking.objects.get(id=response.data["id"])
+        self.assertLess(booking.start_time, self.sync_now)
+        self.assertGreater(booking.end_time, self.sync_now)
+        self.assertEqual(booking.status, Booking.Status.HOLD)
+
+    def test_historical_request_does_not_bypass_current_authorization(self):
+        self.ensure_priced_slot(self.past_start, self.past_end)
+        ClubMembership.objects.filter(user=self.staff, club=self.club).update(
+            is_active=False
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        with patch("django.utils.timezone.now", return_value=self.sync_now):
+            response = self.post_historical()
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assert_api_error(response, "CLUB_ACCESS_REVOKED")
+        self.assertEqual(Booking.objects.count(), 0)
+        self.assertEqual(BookingAttempt.objects.count(), 0)
+
+    def test_idempotent_historical_booking_replay_reuses_booking_and_attempt(self):
+        self.ensure_priced_slot(self.past_start, self.past_end)
+        payload = self.historical_payload(
+            client_request_id="6b87c30a-a136-4e5c-a965-d11fdac769af"
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+        with patch("django.utils.timezone.now", return_value=self.sync_now):
+            first_response = self.post_historical(payload)
+            retry_response = self.post_historical(payload)
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(retry_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(retry_response.data["id"], first_response.data["id"])
+        self.assertEqual(Booking.objects.count(), 1)
+        self.assertEqual(BookingAttempt.objects.count(), 1)
+
+    def test_rejected_historical_attempt_does_not_affect_slot_generation(self):
+        self.ensure_priced_slot(self.past_start, self.past_end)
+        future_blocker_start = self.past_start + timedelta(weeks=2)
+        self.create_booking(
+            self.court,
+            start_time=future_blocker_start,
+            end_time=future_blocker_start + timedelta(hours=1),
+            status=Booking.Status.CONFIRMED,
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+        with patch("django.utils.timezone.now", return_value=self.sync_now):
+            response = self.post_historical(
+                self.historical_payload(
+                    is_recurring=True,
+                    client_request_id="6dbf321b-c605-4d5c-97d6-a9e375971a6a",
+                )
+            )
+            slots_response = self.client.get(
+                self.booking_slots_url(self.club),
+                {"court": self.court.id, "date": self.past_start.date().isoformat()},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "RECURRING_UNAVAILABLE")
+        self.assertEqual(BookingAttempt.objects.count(), 1)
+        attempt = BookingAttempt.objects.get()
+        self.assertEqual(attempt.outcome, BookingAttempt.Outcome.REJECTED)
+        self.assertEqual(attempt.failure_code, "RECURRING_UNAVAILABLE")
+        self.assertIsNone(attempt.booking)
+        slot = next(
+            item
+            for item in slots_response.data["slots"]
+            if (
+                item["start_time"].hour
+                if hasattr(item["start_time"], "hour")
+                else parse_datetime(item["start_time"]).hour
+            )
+            == self.past_start.hour
+        )
+        self.assertEqual(slot["slot_status"], "FREE")
+        self.assertTrue(slot["is_available"])
+        self.assertIsNone(slot["booking"])
+
+    def test_historical_hold_is_created_as_hold_until_expiry_job_runs(self):
+        from apps.bookings.services import (
+            due_hold_booking_candidate_ids,
+            expire_due_hold_bookings,
+        )
+
+        self.ensure_priced_slot(self.past_start, self.past_end)
+        self.client.force_authenticate(user=self.platform_admin)
+
+        with patch("django.utils.timezone.now", return_value=self.sync_now):
+            response = self.post_historical(
+                self.historical_payload(
+                    client_request_id="76b8f977-d807-4e34-9470-44c17f79c137"
+                )
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        booking = Booking.objects.get(id=response.data["id"])
+        self.assertEqual(booking.status, Booking.Status.HOLD)
+        self.assertLess(booking.start_time, self.sync_now)
+
+        due_ids = due_hold_booking_candidate_ids(now=self.sync_now)
+        self.assertIn(booking.id, due_ids)
+        expired = expire_due_hold_bookings(now=self.sync_now)
+
+        booking.refresh_from_db()
+        self.assertEqual([item.id for item in expired], [booking.id])
+        self.assertEqual(booking.status, Booking.Status.EXPIRED)
+
+
+class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
+    def setUp(self):
+        self.owner = self.create_user("attempt-api-owner")
+        self.manager = self.create_user("attempt-api-manager")
+        self.staff = self.create_user("attempt-api-staff")
+        self.other_staff = self.create_user("attempt-api-other-staff")
+        self.external_user = self.create_user("attempt-api-external")
+        self.club = self.create_club("Attempt API Club", slug="attempt-api")
+        self.other_club = self.create_club(
+            "Other Attempt API",
+            slug="other-attempt-api",
+        )
+        self.court = self.create_court(self.club, "Attempt API Court")
+        self.other_court = self.create_court(self.club, "Attempt Other Court")
+        self.external_court = self.create_court(self.other_club, "External Court")
+        self.owner_membership = self.create_membership(
+            self.owner,
+            self.club,
+            ClubMembership.Role.OWNER,
+        )
+        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
+        self.staff_membership = self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.create_membership(
+            self.other_staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.create_membership(
+            self.external_user,
+            self.other_club,
+            ClubMembership.Role.OWNER,
+        )
+
+    def create_attempt(self, court, attempted_by, **extra_fields):
+        data = {
+            "club": court.club,
+            "court": court,
+            "attempted_by": attempted_by,
+            "client_request_id": uuid4(),
+            "customer_name": "Attempt Customer",
+            "customer_phone": "+201000009901",
+            "notes": "original attempt",
+            "requested_start": self.time_at(20),
+            "requested_end": self.time_at(21),
+            "requested_at": self.time_at(19),
+            "requested_source": Booking.Source.MANUAL,
+            "requested_recurring": False,
+            "outcome": BookingAttempt.Outcome.REJECTED,
+            "failure_code": "BOOKING_SLOT_UNAVAILABLE",
+            "failure_details": {"conflict_type": "BOOKING"},
+        }
+        data.update(extra_fields)
+        return BookingAttempt.objects.create(**data)
+
+    def attempt_ids(self, response):
+        return {item["id"] for item in response.data["results"]}
+
+    def test_attempt_route_resolves_to_scoped_viewset_and_filter(self):
+        match = resolve("/api/v1/clubs/example-club/booking-attempts/")
+
+        self.assertIs(match.func.cls, BookingAttemptViewSet)
+        self.assertEqual(BookingAttemptViewSet.filter_backends, (DjangoFilterBackend,))
+        self.assertIs(BookingAttemptViewSet.filterset_class, BookingAttemptFilter)
+
+    def test_owner_and_manager_can_list_club_attempts(self):
+        own_attempt = self.create_attempt(self.court, self.staff)
+        other_attempt = self.create_attempt(
+            self.court,
+            self.other_staff,
+            requested_start=self.time_at(21),
+            requested_end=self.time_at(22),
+        )
+        external_attempt = self.create_attempt(self.external_court, self.external_user)
+
+        for actor in (self.owner, self.manager):
+            with self.subTest(actor=actor.username):
+                self.client.force_authenticate(user=actor)
+                response = self.client.get(self.booking_attempt_list_url(self.club))
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(
+                    self.attempt_ids(response),
+                    {own_attempt.id, other_attempt.id},
+                )
+                self.assertNotIn(external_attempt.id, self.attempt_ids(response))
+
+    def test_staff_lists_only_own_attempts_in_assigned_scope(self):
+        own_attempt = self.create_attempt(self.court, self.staff)
+        other_attempt = self.create_attempt(
+            self.court,
+            self.other_staff,
+            requested_start=self.time_at(21),
+            requested_end=self.time_at(22),
+        )
+        other_court_attempt = self.create_attempt(
+            self.other_court,
+            self.staff,
+            requested_start=self.time_at(22),
+            requested_end=self.time_at(23),
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get(self.booking_attempt_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.attempt_ids(response), {own_attempt.id})
+        self.assertNotIn(other_attempt.id, self.attempt_ids(response))
+        self.assertNotIn(other_court_attempt.id, self.attempt_ids(response))
+
+    def test_attempt_filters_by_status_court_employee_and_requested_date(self):
+        accepted_booking = self.create_booking(
+            self.court,
+            created_by=self.staff,
+            customer_phone="+201000009902",
+        )
+        accepted_attempt = self.create_attempt(
+            self.court,
+            self.staff,
+            booking=accepted_booking,
+            outcome=BookingAttempt.Outcome.SUCCESS,
+            failure_code="",
+            resolution=BookingAttempt.Resolution.RESOLVED,
+        )
+        dismissed_attempt = self.create_attempt(
+            self.court,
+            self.staff,
+            requested_start=self.time_at(21),
+            requested_end=self.time_at(22),
+            resolution=BookingAttempt.Resolution.DISMISSED,
+        )
+        self.create_attempt(
+            self.other_court,
+            self.other_staff,
+            requested_start=self.time_at(22),
+            requested_end=self.time_at(23),
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        accepted_response = self.client.get(
+            self.booking_attempt_list_url(self.club),
+            {"status": "ACCEPTED"},
+        )
+        dismissed_response = self.client.get(
+            self.booking_attempt_list_url(self.club),
+            {"status": "DISMISSED"},
+        )
+        scoped_response = self.client.get(
+            self.booking_attempt_list_url(self.club),
+            {
+                "court": self.court.id,
+                "attempted_by": self.staff.id,
+                "date": "2026-05-20",
+            },
+        )
+
+        self.assertEqual(self.attempt_ids(accepted_response), {accepted_attempt.id})
+        self.assertEqual(self.attempt_ids(dismissed_response), {dismissed_attempt.id})
+        self.assertEqual(
+            self.attempt_ids(scoped_response),
+            {accepted_attempt.id, dismissed_attempt.id},
+        )
+
+    def test_attempt_detail_exposes_original_request_and_backend_decision(self):
+        attempt = self.create_attempt(
+            self.court,
+            self.staff,
+            customer_name="Original Attempt Customer",
+            customer_phone="+201012345678",
+            requested_source=Booking.Source.RECURRING,
+            requested_recurring=True,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.booking_attempt_detail_url(self.club, attempt))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "REJECTED")
+        self.assertEqual(response.data["outcome"], BookingAttempt.Outcome.REJECTED)
+        self.assertEqual(
+            response.data["resolution"],
+            BookingAttempt.Resolution.UNRESOLVED,
+        )
+        self.assertEqual(response.data["failure_code"], "BOOKING_SLOT_UNAVAILABLE")
+        self.assertEqual(
+            response.data["failure_details"],
+            {"conflict_type": "BOOKING"},
+        )
+        self.assertEqual(response.data["customer_name"], "Original Attempt Customer")
+        self.assertEqual(response.data["customer_phone"], "+201012345678")
+        self.assertEqual(response.data["requested_source"], Booking.Source.RECURRING)
+        self.assertTrue(response.data["requested_recurring"])
+        self.assertIsNone(response.data["resolved_booking"])
+
+    def test_staff_can_dismiss_own_rejected_attempt_without_fake_booking(self):
+        attempt = self.create_attempt(self.court, self.staff)
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.post(
+            self.booking_attempt_dismiss_url(self.club, attempt),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "DISMISSED")
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.resolution, BookingAttempt.Resolution.DISMISSED)
+        self.assertEqual(Booking.objects.count(), 0)
+        self.assertEqual(Transaction.objects.count(), 0)
+        self.assertEqual(Settlement.objects.count(), 0)
+
+        slots_response = self.client.get(
+            self.booking_slots_url(self.club),
+            {"court": self.court.id, "date": "2026-05-20"},
+        )
+        dismissed_slot = next(
+            slot
+            for slot in slots_response.data["slots"]
+            if (
+                slot["start_time"].hour
+                if hasattr(slot["start_time"], "hour")
+                else parse_datetime(slot["start_time"]).hour
+            )
+            == 20
+        )
+        self.assertEqual(dismissed_slot["slot_status"], "FREE")
+        self.assertTrue(dismissed_slot["is_available"])
+
+    def test_accepted_attempt_cannot_be_dismissed(self):
+        booking = self.create_booking(self.court, created_by=self.staff)
+        attempt = self.create_attempt(
+            self.court,
+            self.staff,
+            booking=booking,
+            outcome=BookingAttempt.Outcome.SUCCESS,
+            failure_code="",
+            resolution=BookingAttempt.Resolution.RESOLVED,
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.post(
+            self.booking_attempt_dismiss_url(self.club, attempt),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(response, "BOOKING_ATTEMPT_CANNOT_BE_DISMISSED")
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.outcome, BookingAttempt.Outcome.SUCCESS)
+        self.assertEqual(attempt.resolution, BookingAttempt.Resolution.RESOLVED)
+        self.assertTrue(Booking.objects.filter(pk=booking.pk).exists())
+
+    def test_staff_cannot_view_or_dismiss_another_staff_attempt(self):
+        attempt = self.create_attempt(self.court, self.other_staff)
+        self.client.force_authenticate(user=self.staff)
+
+        detail_response = self.client.get(
+            self.booking_attempt_detail_url(self.club, attempt)
+        )
+        dismiss_response = self.client.post(
+            self.booking_attempt_dismiss_url(self.club, attempt),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(detail_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(dismiss_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_accepted_attempt_remains_accepted_after_booking_cancel_and_edit(self):
+        self.client.force_authenticate(user=self.staff)
+        create_response = self.post_booking(
+            self.club,
+            self.court,
+            client_request_id=str(uuid4()),
+            requested_at=self.time_at(18).isoformat(),
+            notes="original offline note",
+        )
+        booking = Booking.objects.get(pk=create_response.data["id"])
+        attempt = BookingAttempt.objects.get(booking=booking)
+
+        edit_response = self.client.patch(
+            self.booking_detail_url(self.club, booking),
+            {
+                "customer_name": "Edited Customer",
+                "customer_phone": "+201000009908",
+                "notes": "edited note",
+            },
+            format="json",
+        )
+        with patch(
+            "apps.bookings.services.timezone.now",
+            return_value=self.time_at(10),
+        ):
+            cancel_response = self.client.post(
+                self.booking_lifecycle_url(self.club, booking, "cancel"),
+                {"reason": "Customer cancelled"},
+                format="json",
+            )
+
+        self.assertEqual(edit_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(cancel_response.status_code, status.HTTP_200_OK)
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.outcome, BookingAttempt.Outcome.SUCCESS)
+        self.assertEqual(attempt.resolution, BookingAttempt.Resolution.RESOLVED)
+        self.assertEqual(attempt.booking, booking)
+        self.assertEqual(attempt.customer_name, "Ahmed Hassan")
+        self.assertEqual(str(attempt.customer_phone), "+201000000002")
+        self.assertEqual(attempt.notes, "original offline note")
+
+    def test_rejected_attempts_do_not_appear_in_booking_list_or_financial_state(self):
+        attempt = self.create_attempt(self.court, self.staff)
+        self.client.force_authenticate(user=self.owner)
+
+        bookings_response = self.client.get(self.booking_list_url(self.club))
+
+        self.assertEqual(bookings_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(bookings_response.data["count"], 0)
+        self.assertEqual(self.list_ids(bookings_response), set())
+        self.assertTrue(BookingAttempt.objects.filter(pk=attempt.pk).exists())
+        self.assertEqual(Transaction.objects.count(), 0)
+        self.assertEqual(Settlement.objects.count(), 0)
+
+    def test_membership_soft_delete_preserves_attempt_and_booking_history(self):
+        booking = self.create_booking(self.court, created_by=self.staff)
+        attempt = self.create_attempt(
+            self.court,
+            self.staff,
+            booking=booking,
+            outcome=BookingAttempt.Outcome.SUCCESS,
+            failure_code="",
+            resolution=BookingAttempt.Resolution.RESOLVED,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        delete_response = self.client.delete(
+            reverse(
+                "club-membership-detail",
+                kwargs={"club_slug": self.club.slug, "pk": self.staff_membership.pk},
+            )
+        )
+
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        self.staff_membership.refresh_from_db()
+        attempt.refresh_from_db()
+        self.assertIsNotNone(self.staff_membership.deleted_at)
+        self.assertEqual(attempt.attempted_by, self.staff)
+        self.assertEqual(attempt.booking, booking)
+        self.assertTrue(User.objects.filter(pk=self.staff.pk).exists())
+        self.assertTrue(Booking.objects.filter(pk=booking.pk).exists())
 
 
 class BookingSlotAvailabilityTests(BookingAPITestCase):
@@ -1585,6 +2416,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         "recurrence_status",
         "previous_recurring_booking_id",
         "next_recurring_booking_id",
+        "client_request_id",
         "notes",
         "cancellation_reason",
         "no_show_reason",
@@ -3697,6 +4529,41 @@ class BookingQueryScalingTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertLessEqual(len(queries), 5)
         self.assertEqual(response.data["paid_amount"], "50.00")
+
+    def create_attempt(self, hour):
+        return BookingAttempt.objects.create(
+            club=self.club,
+            court=self.court,
+            attempted_by=self.platform_admin,
+            client_request_id=uuid4(),
+            customer_name=f"Attempt Customer {hour}",
+            customer_phone=f"+2010000093{hour:02d}",
+            requested_start=self.time_at(hour),
+            requested_end=self.time_at(hour + 1),
+            requested_at=self.time_at(8),
+            requested_source=Booking.Source.MANUAL,
+            requested_recurring=False,
+            outcome=BookingAttempt.Outcome.REJECTED,
+            failure_code="BOOKING_SLOT_UNAVAILABLE",
+        )
+
+    def test_booking_attempt_list_query_count_does_not_grow_with_rows(self):
+        self.create_attempt(9)
+
+        with CaptureQueriesContext(connection) as first:
+            first_response = self.client.get(self.booking_attempt_list_url(self.club))
+
+        for hour in range(10, 19):
+            self.create_attempt(hour)
+
+        with CaptureQueriesContext(connection) as second:
+            second_response = self.client.get(self.booking_attempt_list_url(self.club))
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(first_response.data["results"]), 1)
+        self.assertEqual(len(second_response.data["results"]), 10)
+        self.assertEqual(len(first), len(second))
 
     def test_schedule_query_count_stays_bounded_across_slot_and_anchor_growth(self):
         self.create_working_hours(

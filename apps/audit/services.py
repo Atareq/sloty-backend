@@ -35,8 +35,14 @@ def transaction_audit_snapshot(transaction_obj):
         "booking_id": transaction_obj.booking_id,
         "customer_name": booking.customer_name,
         "amount": str(transaction_obj.amount),
+        "client_request_id": (
+            str(transaction_obj.client_request_id)
+            if transaction_obj.client_request_id
+            else None
+        ),
         "payment_method": transaction_obj.payment_method,
         "payment_reference": transaction_obj.payment_reference,
+        "occurred_at": transaction_obj.occurred_at.isoformat(),
         "collector_id": transaction_obj.created_by_id,
         "collector_name": user_display_name(collector),
         "court_id": transaction_obj.court_id,

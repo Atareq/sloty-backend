@@ -285,6 +285,28 @@ HTTP 200. Reusing the same key for a different logical request returns HTTP 409
 with `BOOKING_CLIENT_REQUEST_MISMATCH`. Idempotency is retained for as long as
 the Booking row exists.
 
+Booking attempts are persisted separately from operational bookings for
+authenticated booking create requests that reach domain processing. Attempts
+preserve the original request (`client_request_id`, customer fields, requested
+time, `requested_at`, source, recurrence intent, actor, club, and court), the
+backend outcome, failure code/details for rejected attempts, staff resolution,
+and an optional resolved Booking link. Rejected attempts do not reserve slots,
+appear in booking lists, affect availability, or enter financial totals.
+
+Minimal traceability endpoints:
+
+- `GET /api/v1/clubs/{club_slug}/booking-attempts/`
+- `GET /api/v1/clubs/{club_slug}/booking-attempts/{id}/`
+- `POST /api/v1/clubs/{club_slug}/booking-attempts/{id}/dismiss/`
+
+Useful booking-attempt filters are `court`, `attempted_by`, `outcome`,
+`resolution`, `requested_source`, `status` (`ACCEPTED`, `REJECTED`, or
+`DISMISSED`), `date`, `date_from`, and `date_to`. Staff see only their own
+attempts on their assigned court. Owners, managers, and platform admins see the
+selected club scope. Dismissal is staff resolution of an unsuccessful attempt,
+not Booking cancellation, and does not change Booking, Transaction, Settlement,
+availability, or Current Custody state.
+
 New booking and reschedule prices are calculated from working-hour pricing
 periods and stored in `Booking.total_price` as a historical snapshot. Existing
 booking snapshots are not recalculated when court pricing changes. Booking
@@ -298,6 +320,9 @@ grid. Pricing errors use `BOOKING_OUTSIDE_WORKING_HOURS`,
 - `/api/v1/clubs/{club_slug}/transactions/`
 - `/api/v1/clubs/{club_slug}/transactions/{id}/`
 - `POST /api/v1/clubs/{club_slug}/transactions/{id}/cancel/`
+- `/api/v1/clubs/{club_slug}/transaction-attempts/`
+- `/api/v1/clubs/{club_slug}/transaction-attempts/{id}/`
+- `POST /api/v1/clubs/{club_slug}/transaction-attempts/{id}/dismiss/`
 
 Useful transaction list filters:
 
@@ -327,6 +352,11 @@ endpoint:
 {"reason": "Wrong amount entered"}
 ```
 
+Payment sync clients may send optional `client_request_id` and timezone-aware
+`occurred_at`. `client_request_id` is idempotent inside a club: the same logical
+request returns the existing transaction, while a different request with the
+same key returns `TRANSACTION_CLIENT_REQUEST_MISMATCH`.
+
 Staff transaction lists are collector-scoped ("my collections"): Staff see
 only transactions they recorded (`created_by` is the current user) on their
 assigned court. Query parameters cannot expand that to another collector.
@@ -347,6 +377,21 @@ valid payment from a `CONFIRMED` booking, the booking returns to `HOLD`.
 Duplicate non-blank payment references are rejected within the same club; blank
 references are allowed. Refunds, reversals, and online payment gateway
 integration are not implemented.
+
+Transaction attempts are persisted separately from financial transactions for
+offline/PWA traceability. A successful attempt links to the resulting
+`Transaction`; a rejected attempt has no transaction and stores a machine
+failure code/details. Rejected or dismissed attempts do not count toward
+booking paid/remaining amounts, Current Custody, settlement preview/creation,
+dashboard revenue, or transaction lists.
+
+Useful transaction-attempt filters are `booking`, `court`, `attempted_by`,
+`payment_method`, `outcome`, `resolution`, `failure_code`, computed `status`
+(`ACCEPTED`, `REJECTED`, `DISMISSED`), `date`, `date_from`, and `date_to`.
+Attempt date filters use `occurred_at`. Staff see only their own attempts on
+their assigned court. Owners, managers, and platform admins see the selected
+club scope. Dismissal is staff resolution of an unsuccessful attempt, not
+transaction cancellation, refund, reversal, settlement, or booking payment.
 
 ## Sprint 5 Booking Lifecycle Endpoints
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import threading
 from datetime import time, timedelta
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from django.conf import settings
@@ -21,7 +22,7 @@ from django.test import TransactionTestCase
 from django.utils import timezone
 
 from apps.accounts.models import User
-from apps.bookings.models import Booking
+from apps.bookings.models import Booking, BookingAttempt
 from apps.bookings.services import (
     complete_booking,
     create_booking,
@@ -32,7 +33,7 @@ from apps.clubs.models import Club, ClubMembership
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.settlements.services import create_approved_settlement
-from apps.transactions.models import Transaction
+from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.services import create_booking_transaction
 
 pytestmark = pytest.mark.skipif(
@@ -130,6 +131,31 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         self.assertEqual(len(created), 1)
         self.assertEqual(len(conflicts), 1)
 
+    def test_idempotent_booking_retry_race_creates_one_attempt_and_booking(self):
+        start, end = self.slot(12)
+        client_request_id = uuid4()
+
+        def worker():
+            return create_booking(
+                created_by=self.admin,
+                court=self.court,
+                start_time=start,
+                end_time=end,
+                customer_name="Idempotent Booking Race",
+                customer_phone="+201077777777",
+                client_request_id=client_request_id,
+            )
+
+        results, errors = self.run_threads([worker, worker])
+        booking_ids = {booking_obj.id for booking_obj in results}
+        self.assertFalse(errors)
+        self.assertEqual(booking_ids, {Booking.objects.get().id})
+        self.assertEqual(Booking.objects.count(), 1)
+        self.assertEqual(BookingAttempt.objects.count(), 1)
+        attempt = BookingAttempt.objects.get()
+        self.assertEqual(attempt.outcome, BookingAttempt.Outcome.SUCCESS)
+        self.assertEqual(attempt.booking_id, next(iter(booking_ids)))
+
     def test_payment_race_on_same_hold_confirms_once(self):
         start, end = self.slot(18)
         booking = create_booking(
@@ -161,6 +187,79 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CONFIRMED)
         self.assertEqual(Transaction.objects.filter(booking=booking).count(), 2)
+
+    def test_idempotent_transaction_retry_race_creates_one_attempt_and_transaction(
+        self,
+    ):
+        start, end = self.slot(14)
+        booking = create_booking(
+            created_by=self.admin,
+            court=self.court,
+            start_time=start,
+            end_time=end,
+            customer_name="Idempotent Pay Race",
+            customer_phone="+201022222223",
+        )
+        access = self.make_access()
+        client_request_id = uuid4()
+        occurred_at = timezone.now() - timedelta(hours=2)
+
+        def worker():
+            return create_booking_transaction(
+                access=access,
+                booking=booking,
+                amount=Decimal("50.00"),
+                payment_method=Transaction.PaymentMethod.CASH,
+                payment_reference="PG-IDEMPOTENT-TX",
+                client_request_id=client_request_id,
+                occurred_at=occurred_at,
+                occurred_at_provided=True,
+                created_by=self.admin,
+            )
+
+        results, errors = self.run_threads([worker, worker])
+        transaction_ids = {transaction_obj.id for transaction_obj in results}
+        self.assertFalse(errors)
+        self.assertEqual(transaction_ids, {Transaction.objects.get().id})
+        self.assertEqual(Transaction.objects.filter(booking=booking).count(), 1)
+        self.assertEqual(TransactionAttempt.objects.count(), 1)
+        attempt = TransactionAttempt.objects.get()
+        self.assertEqual(attempt.outcome, TransactionAttempt.Outcome.SUCCESS)
+        self.assertEqual(attempt.transaction_id, next(iter(transaction_ids)))
+
+    def test_payment_race_cannot_overpay_remaining_amount(self):
+        start, end = self.slot(13)
+        booking = create_booking(
+            created_by=self.admin,
+            court=self.court,
+            start_time=start,
+            end_time=end,
+            customer_name="Overpay Race",
+            customer_phone="+201022222224",
+        )
+        booking.total_price = Decimal("75.00")
+        booking.save(update_fields=["total_price"])
+        access = self.make_access()
+
+        def worker(reference):
+            return create_booking_transaction(
+                access=access,
+                booking=booking,
+                amount=Decimal("50.00"),
+                payment_method=Transaction.PaymentMethod.CASH,
+                payment_reference=reference,
+                created_by=self.admin,
+            )
+
+        results, errors = self.run_threads(
+            [
+                lambda: worker("PG-OVERPAY-1"),
+                lambda: worker("PG-OVERPAY-2"),
+            ]
+        )
+        self.assertEqual(len(results), 1)
+        self.assertTrue(errors)
+        self.assertEqual(Transaction.objects.filter(booking=booking).count(), 1)
 
     def test_duplicate_payment_reference_race_rejects_second(self):
         start, end = self.slot(16)

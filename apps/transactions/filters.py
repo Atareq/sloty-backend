@@ -8,7 +8,7 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 from apps.common.search import customer_phone_search_q
-from apps.transactions.models import Transaction
+from apps.transactions.models import Transaction, TransactionAttempt
 
 
 def day_bounds(date_value):
@@ -147,3 +147,77 @@ class TransactionFilter(django_filters.FilterSet):
         if value == "created":
             return queryset.order_by("created", "id")
         return queryset.order_by("-created", "-id")
+
+
+class TransactionAttemptFilter(django_filters.FilterSet):
+    STATUS_CHOICES = (
+        ("ACCEPTED", "Accepted"),
+        ("REJECTED", "Rejected"),
+        ("DISMISSED", "Dismissed"),
+    )
+
+    booking = django_filters.NumberFilter(field_name="booking_id")
+    court = django_filters.NumberFilter(field_name="court_id")
+    attempted_by = django_filters.NumberFilter(field_name="attempted_by_id")
+    payment_method = django_filters.ChoiceFilter(
+        choices=Transaction.PaymentMethod.choices
+    )
+    outcome = django_filters.ChoiceFilter(choices=TransactionAttempt.Outcome.choices)
+    resolution = django_filters.ChoiceFilter(
+        choices=TransactionAttempt.Resolution.choices
+    )
+    failure_code = django_filters.CharFilter(field_name="failure_code")
+    status = django_filters.ChoiceFilter(choices=STATUS_CHOICES, method="filter_status")
+    date = django_filters.DateFilter(method="filter_date")
+    date_from = django_filters.CharFilter(method="filter_date_from")
+    date_to = django_filters.CharFilter(method="filter_date_to")
+
+    class Meta:
+        model = TransactionAttempt
+        fields = (
+            "booking",
+            "court",
+            "attempted_by",
+            "payment_method",
+            "outcome",
+            "resolution",
+            "failure_code",
+            "status",
+            "date",
+            "date_from",
+            "date_to",
+        )
+
+    def filter_status(self, queryset, name, value):
+        normalized = (value or "").strip().upper()
+        if normalized == "ACCEPTED":
+            return queryset.filter(
+                outcome=TransactionAttempt.Outcome.SUCCESS,
+            ).exclude(resolution=TransactionAttempt.Resolution.DISMISSED)
+        if normalized == "REJECTED":
+            return queryset.filter(
+                outcome=TransactionAttempt.Outcome.REJECTED,
+            ).exclude(resolution=TransactionAttempt.Resolution.DISMISSED)
+        if normalized == "DISMISSED":
+            return queryset.filter(resolution=TransactionAttempt.Resolution.DISMISSED)
+        return queryset.none()
+
+    def filter_date(self, queryset, name, value):
+        start_of_day, end_of_day = day_bounds(value)
+        return queryset.filter(
+            occurred_at__gte=start_of_day,
+            occurred_at__lt=end_of_day,
+        )
+
+    def filter_date_from(self, queryset, name, value):
+        start, _date_only = parse_filter_bound(value, field_name="date_from")
+        return queryset.filter(occurred_at__gte=start)
+
+    def filter_date_to(self, queryset, name, value):
+        end, date_only = parse_filter_bound(
+            value,
+            field_name="date_to",
+            date_is_end=True,
+        )
+        lookup = "occurred_at__lt" if date_only else "occurred_at__lte"
+        return queryset.filter(**{lookup: end})

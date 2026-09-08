@@ -200,3 +200,172 @@ class Booking(models.Model):
                 )
         if errors:
             raise ValidationError(errors)
+
+
+class BookingAttempt(models.Model):
+    class Outcome(models.TextChoices):
+        SUCCESS = "SUCCESS", _("Success")
+        REJECTED = "REJECTED", _("Rejected")
+
+    class Resolution(models.TextChoices):
+        UNRESOLVED = "UNRESOLVED", _("Unresolved")
+        DISMISSED = "DISMISSED", _("Dismissed")
+        RESOLVED = "RESOLVED", _("Resolved")
+
+    club = models.ForeignKey(
+        Club,
+        on_delete=models.CASCADE,
+        related_name="booking_attempts",
+    )
+    court = models.ForeignKey(
+        Court,
+        on_delete=models.CASCADE,
+        related_name="booking_attempts",
+    )
+    attempted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="booking_attempts",
+    )
+    booking = models.ForeignKey(
+        Booking,
+        blank=True,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="attempts",
+    )
+    client_request_id = models.UUIDField(blank=True, null=True, db_index=True)
+    customer_name = models.CharField(max_length=255)
+    customer_phone = PhoneNumberField()
+    notes = models.TextField(blank=True)
+    requested_start = models.DateTimeField()
+    requested_end = models.DateTimeField()
+    requested_at = models.DateTimeField(db_index=True)
+    requested_source = models.CharField(
+        max_length=32,
+        choices=Booking.Source.choices,
+        default=Booking.Source.MANUAL,
+        db_index=True,
+    )
+    requested_recurring = models.BooleanField(default=False)
+    outcome = models.CharField(max_length=32, choices=Outcome.choices, db_index=True)
+    failure_code = models.CharField(max_length=128, blank=True)
+    failure_details = models.JSONField(blank=True, default=dict)
+    resolution = models.CharField(
+        max_length=32,
+        choices=Resolution.choices,
+        default=Resolution.UNRESOLVED,
+        db_index=True,
+    )
+    created = models.DateTimeField(auto_now_add=True, db_index=True)
+    modified = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                check=Q(requested_start__lt=models.F("requested_end")),
+                name="booking_attempt_requested_start_before_end",
+            ),
+            models.CheckConstraint(
+                check=(
+                    Q(
+                        outcome="SUCCESS",
+                        booking__isnull=False,
+                        failure_code="",
+                    )
+                    | (
+                        Q(outcome="REJECTED", booking__isnull=True)
+                        & ~Q(failure_code="")
+                    )
+                ),
+                name="booking_attempt_outcome_consistent",
+            ),
+            models.CheckConstraint(
+                check=(
+                    Q(requested_source="RECURRING", requested_recurring=True)
+                    | (~Q(requested_source="RECURRING") & Q(requested_recurring=False))
+                ),
+                name="booking_attempt_source_matches_recurring_intent",
+            ),
+            models.CheckConstraint(
+                check=~Q(
+                    outcome="SUCCESS",
+                    resolution="DISMISSED",
+                ),
+                name="booking_attempt_success_not_dismissed",
+            ),
+            models.UniqueConstraint(
+                fields=["club", "client_request_id"],
+                condition=Q(client_request_id__isnull=False),
+                name="booking_attempt_client_request_once_per_club",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["club", "created"]),
+            models.Index(fields=["club", "outcome", "created"]),
+            models.Index(fields=["attempted_by", "created"]),
+            models.Index(fields=["court", "created"]),
+            models.Index(fields=["club", "requested_start"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.court} attempt {self.client_request_id}"
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        if (
+            self.requested_start
+            and self.requested_end
+            and self.requested_start >= self.requested_end
+        ):
+            errors["requested_end"] = "requested_end must be after requested_start."
+        if self.requested_recurring != (
+            self.requested_source == Booking.Source.RECURRING
+        ):
+            errors["requested_recurring"] = (
+                "Booking attempt recurrence intent must match requested source."
+            )
+        if self.court_id and self.club_id and self.court.club_id != self.club_id:
+            errors["court"] = "Booking attempt court must belong to the club."
+        if self.booking_id:
+            if self.club_id and self.booking.club_id != self.club_id:
+                errors["booking"] = (
+                    "Booking attempt booking must belong to the same club."
+                )
+            if self.court_id and self.booking.court_id != self.court_id:
+                errors["booking"] = (
+                    "Booking attempt booking must belong to the same court."
+                )
+            if self.requested_recurring != (
+                self.booking.source == Booking.Source.RECURRING
+            ):
+                errors["requested_recurring"] = (
+                    "Booking attempt recurrence intent must match the booking."
+                )
+            if self.requested_source != self.booking.source:
+                errors["requested_source"] = (
+                    "Booking attempt requested source must match the booking source."
+                )
+        if self.outcome == self.Outcome.SUCCESS:
+            if self.booking_id is None:
+                errors["booking"] = "Successful booking attempts require a booking."
+            if self.resolution == self.Resolution.DISMISSED:
+                errors["resolution"] = (
+                    "Successful booking attempts cannot be dismissed."
+                )
+            if self.failure_code:
+                errors["failure_code"] = (
+                    "Successful booking attempts must not have a failure code."
+                )
+        if self.outcome == self.Outcome.REJECTED:
+            if self.booking_id is not None:
+                errors["booking"] = "Rejected booking attempts cannot link a booking."
+            if not self.failure_code:
+                errors["failure_code"] = (
+                    "Rejected booking attempts require a failure code."
+                )
+        if errors:
+            raise ValidationError(errors)

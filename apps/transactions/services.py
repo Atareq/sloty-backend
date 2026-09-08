@@ -16,7 +16,7 @@ from apps.audit.services import (
 )
 from apps.bookings.models import Booking
 from apps.common.exceptions import SlotyAPIException
-from apps.transactions.models import Transaction
+from apps.transactions.models import Transaction, TransactionAttempt
 
 DUPLICATE_PAYMENT_REFERENCE_MESSAGE = (
     "This payment reference already exists for this club."
@@ -39,6 +39,37 @@ FIRST_PAYMENT_MINIMUM_DEPOSIT_MESSAGE = _(
 TRANSACTION_AMOUNT_EXCEEDS_REMAINING_MESSAGE = _(
     "Transaction amount cannot exceed remaining booking amount."
 )
+TRANSACTION_CLIENT_REQUEST_MISMATCH_MESSAGE = _(
+    "This client_request_id was already used for a different transaction request."
+)
+PREVIOUS_TRANSACTION_ATTEMPT_REJECTED_MESSAGE = _(
+    "This payment attempt was already rejected."
+)
+TRANSACTION_ATTEMPT_CANNOT_BE_DISMISSED_MESSAGE = _(
+    "Only rejected payment attempts without a transaction can be dismissed."
+)
+PAYMENT_REFERENCE_REQUIRED_MESSAGE = "Payment reference is required for this court."
+PAYMENT_AMOUNT_EXCEEDS_REMAINING_CODE = "PAYMENT_AMOUNT_EXCEEDS_REMAINING"
+FIRST_PAYMENT_MINIMUM_DEPOSIT_CODE = "FIRST_PAYMENT_MINIMUM_DEPOSIT_REQUIRED"
+PAYMENT_REFERENCE_REQUIRED_CODE = "PAYMENT_REFERENCE_REQUIRED"
+DUPLICATE_PAYMENT_REFERENCE_CODE = "DUPLICATE_PAYMENT_REFERENCE"
+TRANSACTION_VALIDATION_ERROR_CODE = "VALIDATION_ERROR"
+TRANSACTION_ATTEMPT_FAILURE_MESSAGES = {
+    PAYMENT_AMOUNT_EXCEEDS_REMAINING_CODE: TRANSACTION_AMOUNT_EXCEEDS_REMAINING_MESSAGE,
+    FIRST_PAYMENT_MINIMUM_DEPOSIT_CODE: FIRST_PAYMENT_MINIMUM_DEPOSIT_MESSAGE,
+    PAYMENT_REFERENCE_REQUIRED_CODE: PAYMENT_REFERENCE_REQUIRED_MESSAGE,
+    DUPLICATE_PAYMENT_REFERENCE_CODE: DUPLICATE_PAYMENT_REFERENCE_MESSAGE,
+    TRANSACTION_VALIDATION_ERROR_CODE: _("Invalid transaction data."),
+    "TRANSACTION_BOOKING_LOCKED": TRANSACTION_BOOKING_LOCKED_MESSAGE,
+    "TRANSACTION_BOOKING_NOT_IN_CLUB": TRANSACTION_BOOKING_NOT_IN_CLUB_MESSAGE,
+}
+TRANSACTION_ATTEMPT_VALIDATION_FAILURE_CODES = {
+    PAYMENT_AMOUNT_EXCEEDS_REMAINING_CODE,
+    FIRST_PAYMENT_MINIMUM_DEPOSIT_CODE,
+    PAYMENT_REFERENCE_REQUIRED_CODE,
+    DUPLICATE_PAYMENT_REFERENCE_CODE,
+    TRANSACTION_VALIDATION_ERROR_CODE,
+}
 
 
 def normalize_payment_reference(payment_reference):
@@ -110,6 +141,452 @@ def is_duplicate_payment_reference_integrity_error(exc):
     )
 
 
+def is_transaction_client_request_integrity_error(exc):
+    message = str(exc).lower()
+    return "client_request_id" in message and (
+        "unique" in message or "unique_transaction_client_request_per_club" in message
+    )
+
+
+def get_transaction_by_client_request_id(*, club, client_request_id, lock=False):
+    if client_request_id is None:
+        return None
+    queryset = Transaction.objects.filter(
+        club=club,
+        client_request_id=client_request_id,
+    ).select_related("booking", "club", "court", "created_by")
+    if lock:
+        queryset = queryset.select_for_update(of=("self",))
+    return queryset.first()
+
+
+def transaction_matches_client_request(
+    transaction_obj,
+    *,
+    booking,
+    amount,
+    payment_method,
+    payment_reference,
+    notes,
+    created_by,
+    occurred_at=None,
+    occurred_at_provided=False,
+):
+    expected_notes = notes or ""
+    expected_reference = normalize_payment_reference(payment_reference)
+    same_request = (
+        transaction_obj.transaction_type == Transaction.Type.PAYMENT
+        and transaction_obj.booking_id == booking.id
+        and transaction_obj.amount == amount
+        and transaction_obj.payment_method == payment_method
+        and transaction_obj.payment_reference == expected_reference
+        and (transaction_obj.notes or "") == expected_notes
+        and transaction_obj.created_by_id == getattr(created_by, "id", None)
+    )
+    if not same_request:
+        return False
+    if occurred_at_provided:
+        return transaction_obj.occurred_at == occurred_at
+    return True
+
+
+def raise_transaction_client_request_mismatch(
+    *,
+    client_request_id,
+    existing_transaction=None,
+    existing_attempt=None,
+):
+    details = {"client_request_id": str(client_request_id)}
+    if existing_transaction is not None:
+        details["existing_transaction_id"] = existing_transaction.id
+    elif existing_attempt is not None:
+        details["existing_attempt_id"] = existing_attempt.id
+    raise SlotyAPIException(
+        status_code=status.HTTP_409_CONFLICT,
+        code="TRANSACTION_CLIENT_REQUEST_MISMATCH",
+        message=TRANSACTION_CLIENT_REQUEST_MISMATCH_MESSAGE,
+        details=details,
+    )
+
+
+def resolve_idempotent_transaction_request(
+    *,
+    club,
+    client_request_id,
+    booking,
+    amount,
+    payment_method,
+    payment_reference,
+    notes,
+    created_by,
+    occurred_at=None,
+    occurred_at_provided=False,
+    lock=False,
+):
+    existing_transaction = get_transaction_by_client_request_id(
+        club=club,
+        client_request_id=client_request_id,
+        lock=lock,
+    )
+    if existing_transaction is None:
+        return None
+
+    if transaction_matches_client_request(
+        existing_transaction,
+        booking=booking,
+        amount=amount,
+        payment_method=payment_method,
+        payment_reference=payment_reference,
+        notes=notes,
+        created_by=created_by,
+        occurred_at=occurred_at,
+        occurred_at_provided=occurred_at_provided,
+    ):
+        existing_transaction._sloty_idempotency_reused = True
+        return existing_transaction
+
+    raise_transaction_client_request_mismatch(
+        client_request_id=client_request_id,
+        existing_transaction=existing_transaction,
+    )
+
+
+def transaction_attempt_payload(
+    *,
+    access,
+    booking,
+    amount,
+    payment_method,
+    payment_reference,
+    notes,
+    created_by,
+    client_request_id,
+    occurred_at,
+):
+    return {
+        "club": access.club,
+        "court": booking.court,
+        "booking": booking,
+        "attempted_by": created_by,
+        "client_request_id": client_request_id,
+        "amount": amount,
+        "payment_method": payment_method,
+        "payment_reference": normalize_payment_reference(payment_reference),
+        "notes": notes or "",
+        "occurred_at": occurred_at,
+    }
+
+
+def transaction_attempt_matches_client_request(
+    attempt,
+    *,
+    booking,
+    amount,
+    payment_method,
+    payment_reference,
+    notes,
+    created_by,
+    occurred_at=None,
+    occurred_at_provided=False,
+):
+    expected_reference = normalize_payment_reference(payment_reference)
+    same_request = (
+        attempt.booking_id == booking.id
+        and attempt.amount == amount
+        and attempt.payment_method == payment_method
+        and attempt.payment_reference == expected_reference
+        and (attempt.notes or "") == (notes or "")
+        and attempt.attempted_by_id == getattr(created_by, "id", None)
+    )
+    if not same_request:
+        return False
+    if occurred_at_provided:
+        return attempt.occurred_at == occurred_at
+    return True
+
+
+def raise_transaction_attempt_mismatch(*, client_request_id, attempt):
+    raise_transaction_client_request_mismatch(
+        client_request_id=client_request_id,
+        existing_attempt=attempt,
+    )
+
+
+def raise_previous_transaction_attempt_rejection(attempt):
+    if attempt.failure_code in TRANSACTION_ATTEMPT_VALIDATION_FAILURE_CODES:
+        raise serializers.ValidationError(
+            attempt.failure_details
+            or {
+                "non_field_errors": [
+                    str(
+                        TRANSACTION_ATTEMPT_FAILURE_MESSAGES.get(
+                            attempt.failure_code,
+                            PREVIOUS_TRANSACTION_ATTEMPT_REJECTED_MESSAGE,
+                        )
+                    )
+                ]
+            }
+        )
+    raise SlotyAPIException(
+        status_code=status.HTTP_409_CONFLICT,
+        code=attempt.failure_code,
+        message=TRANSACTION_ATTEMPT_FAILURE_MESSAGES.get(
+            attempt.failure_code,
+            PREVIOUS_TRANSACTION_ATTEMPT_REJECTED_MESSAGE,
+        ),
+        details=attempt.failure_details or {},
+    )
+
+
+def resolve_idempotent_transaction_attempt(
+    *,
+    access,
+    booking,
+    amount,
+    payment_method,
+    payment_reference,
+    notes,
+    created_by,
+    client_request_id,
+    occurred_at=None,
+    occurred_at_provided=False,
+):
+    if client_request_id is None:
+        return None
+
+    attempt = (
+        TransactionAttempt.objects.select_for_update(of=("self",))
+        .filter(club=access.club, client_request_id=client_request_id)
+        .select_related("booking", "club", "court", "attempted_by", "transaction")
+        .first()
+    )
+    if attempt is None:
+        return None
+
+    if not transaction_attempt_matches_client_request(
+        attempt,
+        booking=booking,
+        amount=amount,
+        payment_method=payment_method,
+        payment_reference=payment_reference,
+        notes=notes,
+        created_by=created_by,
+        occurred_at=occurred_at,
+        occurred_at_provided=occurred_at_provided,
+    ):
+        raise_transaction_attempt_mismatch(
+            client_request_id=client_request_id,
+            attempt=attempt,
+        )
+    if attempt.outcome == TransactionAttempt.Outcome.SUCCESS:
+        transaction_obj = attempt.transaction
+        transaction_obj._sloty_idempotency_reused = True
+        return transaction_obj
+    raise_previous_transaction_attempt_rejection(attempt)
+
+
+def create_success_transaction_attempt(
+    *,
+    transaction_obj,
+    access,
+    booking,
+    amount,
+    payment_method,
+    payment_reference,
+    notes,
+    created_by,
+    client_request_id,
+    occurred_at,
+):
+    if client_request_id is not None:
+        existing_attempt = TransactionAttempt.objects.filter(
+            club=access.club,
+            client_request_id=client_request_id,
+        ).first()
+        if existing_attempt is not None:
+            return existing_attempt
+    return TransactionAttempt.objects.create(
+        **transaction_attempt_payload(
+            access=access,
+            booking=booking,
+            amount=amount,
+            payment_method=payment_method,
+            payment_reference=payment_reference,
+            notes=notes,
+            created_by=created_by,
+            client_request_id=client_request_id,
+            occurred_at=occurred_at,
+        ),
+        transaction=transaction_obj,
+        outcome=TransactionAttempt.Outcome.SUCCESS,
+        resolution=TransactionAttempt.Resolution.RESOLVED,
+    )
+
+
+def normalize_failure_details(value):
+    if isinstance(value, dict):
+        return {
+            str(key): normalize_failure_details(item) for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [normalize_failure_details(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def first_error_text(value):
+    if isinstance(value, dict):
+        for item in value.values():
+            text = first_error_text(item)
+            if text:
+                return text
+        return ""
+    if isinstance(value, (list, tuple)):
+        return first_error_text(value[0]) if value else ""
+    return str(value)
+
+
+def transaction_attempt_failure_code_for_exception(exc):
+    if isinstance(exc, SlotyAPIException):
+        return exc.api_code
+    if isinstance(exc, serializers.ValidationError):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            if "amount" in detail:
+                amount_error = first_error_text(detail["amount"])
+                if amount_error == str(TRANSACTION_AMOUNT_EXCEEDS_REMAINING_MESSAGE):
+                    return PAYMENT_AMOUNT_EXCEEDS_REMAINING_CODE
+                if amount_error == str(FIRST_PAYMENT_MINIMUM_DEPOSIT_MESSAGE):
+                    return FIRST_PAYMENT_MINIMUM_DEPOSIT_CODE
+            if "payment_reference" in detail:
+                reference_error = first_error_text(detail["payment_reference"])
+                if reference_error == str(DUPLICATE_PAYMENT_REFERENCE_MESSAGE):
+                    return DUPLICATE_PAYMENT_REFERENCE_CODE
+                if reference_error == PAYMENT_REFERENCE_REQUIRED_MESSAGE:
+                    return PAYMENT_REFERENCE_REQUIRED_CODE
+        return TRANSACTION_VALIDATION_ERROR_CODE
+    return "TRANSACTION_REQUEST_REJECTED"
+
+
+def transaction_attempt_failure_details_for_exception(exc):
+    if isinstance(exc, SlotyAPIException):
+        return normalize_failure_details(exc.details or {})
+    if isinstance(exc, serializers.ValidationError):
+        return normalize_failure_details(exc.detail)
+    return {}
+
+
+def should_record_rejected_transaction_attempt(exc):
+    if isinstance(exc, SlotyAPIException):
+        return exc.api_code != "TRANSACTION_CLIENT_REQUEST_MISMATCH"
+    return isinstance(exc, serializers.ValidationError)
+
+
+def can_record_transaction_attempt(*, access, booking):
+    return (
+        booking is not None
+        and booking.club_id == access.club.id
+        and access.can_access_court(booking.court)
+    )
+
+
+def record_rejected_transaction_attempt(
+    *,
+    access,
+    booking,
+    amount,
+    payment_method,
+    payment_reference,
+    notes,
+    created_by,
+    client_request_id,
+    occurred_at,
+    occurred_at_provided,
+    exc,
+):
+    if not should_record_rejected_transaction_attempt(exc):
+        return None
+    if not can_record_transaction_attempt(access=access, booking=booking):
+        return None
+
+    try:
+        with transaction.atomic():
+            if client_request_id is not None:
+                type(access.club).objects.select_for_update().get(pk=access.club.pk)
+                existing_attempt = (
+                    TransactionAttempt.objects.select_for_update(of=("self",))
+                    .filter(club=access.club, client_request_id=client_request_id)
+                    .first()
+                )
+                if existing_attempt is not None:
+                    if transaction_attempt_matches_client_request(
+                        existing_attempt,
+                        booking=booking,
+                        amount=amount,
+                        payment_method=payment_method,
+                        payment_reference=payment_reference,
+                        notes=notes,
+                        created_by=created_by,
+                        occurred_at=occurred_at,
+                        occurred_at_provided=occurred_at_provided,
+                    ):
+                        return existing_attempt
+                    raise_transaction_attempt_mismatch(
+                        client_request_id=client_request_id,
+                        attempt=existing_attempt,
+                    )
+            return TransactionAttempt.objects.create(
+                **transaction_attempt_payload(
+                    access=access,
+                    booking=booking,
+                    amount=amount,
+                    payment_method=payment_method,
+                    payment_reference=payment_reference,
+                    notes=notes,
+                    created_by=created_by,
+                    client_request_id=client_request_id,
+                    occurred_at=occurred_at,
+                ),
+                outcome=TransactionAttempt.Outcome.REJECTED,
+                failure_code=transaction_attempt_failure_code_for_exception(exc),
+                failure_details=transaction_attempt_failure_details_for_exception(exc),
+            )
+    except IntegrityError:
+        if client_request_id is None:
+            raise
+        return TransactionAttempt.objects.filter(
+            club=access.club,
+            client_request_id=client_request_id,
+        ).first()
+
+
+def dismiss_transaction_attempt(*, access, attempt, actor):
+    with transaction.atomic():
+        locked_attempt = (
+            TransactionAttempt.objects.select_for_update(of=("self",))
+            .select_related("club", "court", "booking", "attempted_by", "transaction")
+            .get(pk=attempt.pk)
+        )
+        if not access.can_dismiss_transaction_attempt(locked_attempt):
+            raise PermissionDenied("You cannot dismiss this payment attempt.")
+        if locked_attempt.resolution == TransactionAttempt.Resolution.DISMISSED:
+            return locked_attempt
+        if (
+            locked_attempt.outcome != TransactionAttempt.Outcome.REJECTED
+            or locked_attempt.transaction_id is not None
+        ):
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="TRANSACTION_ATTEMPT_CANNOT_BE_DISMISSED",
+                message=TRANSACTION_ATTEMPT_CANNOT_BE_DISMISSED_MESSAGE,
+            )
+
+        locked_attempt.resolution = TransactionAttempt.Resolution.DISMISSED
+        locked_attempt.save(update_fields=["resolution", "modified"])
+        return locked_attempt
+
+
 def validate_booking_transaction_data(
     *,
     access,
@@ -176,54 +653,156 @@ def create_booking_transaction(
     payment_method,
     payment_reference="",
     notes="",
+    client_request_id=None,
+    occurred_at=None,
+    occurred_at_provided=False,
     created_by,
 ):
+    occurred_at = occurred_at or timezone.now()
     try:
-        with transaction.atomic():
-            locked_booking = (
-                Booking.objects.select_for_update()
-                .select_related("club", "court")
-                .get(pk=booking.pk)
-            )
-            normalized_reference = validate_booking_transaction_data(
-                access=access,
-                booking=locked_booking,
-                amount=amount,
-                payment_method=payment_method,
-                payment_reference=payment_reference,
-            )
+        try:
+            with transaction.atomic():
+                locked_booking = (
+                    Booking.objects.select_for_update()
+                    .select_related("club", "court")
+                    .get(pk=booking.pk)
+                )
 
-            created_transaction = Transaction.objects.create(
-                club=locked_booking.club,
-                court=locked_booking.court,
-                booking=locked_booking,
-                transaction_type=Transaction.Type.PAYMENT,
-                amount=amount,
-                payment_method=payment_method,
-                payment_reference=normalized_reference,
-                notes=notes,
-                created_by=created_by,
-            )
-            record_audit_log(
-                club=created_transaction.club,
-                court=created_transaction.court,
-                actor=created_by,
-                action=AuditLog.Action.TRANSACTION_CREATED,
-                entity_type="Transaction",
-                entity_id=created_transaction.id,
-                after_data=transaction_audit_snapshot(created_transaction),
-            )
+                if client_request_id is not None:
+                    type(access.club).objects.select_for_update().get(pk=access.club.pk)
+                    existing_attempt_transaction = (
+                        resolve_idempotent_transaction_attempt(
+                            access=access,
+                            booking=locked_booking,
+                            amount=amount,
+                            payment_method=payment_method,
+                            payment_reference=payment_reference,
+                            notes=notes,
+                            created_by=created_by,
+                            client_request_id=client_request_id,
+                            occurred_at=occurred_at,
+                            occurred_at_provided=occurred_at_provided,
+                        )
+                    )
+                    if existing_attempt_transaction is not None:
+                        return existing_attempt_transaction
+                    existing_transaction = resolve_idempotent_transaction_request(
+                        club=access.club,
+                        client_request_id=client_request_id,
+                        booking=locked_booking,
+                        amount=amount,
+                        payment_method=payment_method,
+                        payment_reference=payment_reference,
+                        notes=notes,
+                        created_by=created_by,
+                        occurred_at=occurred_at,
+                        occurred_at_provided=occurred_at_provided,
+                        lock=True,
+                    )
+                    if existing_transaction is not None:
+                        create_success_transaction_attempt(
+                            transaction_obj=existing_transaction,
+                            access=access,
+                            booking=locked_booking,
+                            amount=amount,
+                            payment_method=payment_method,
+                            payment_reference=payment_reference,
+                            notes=notes,
+                            created_by=created_by,
+                            client_request_id=client_request_id,
+                            occurred_at=existing_transaction.occurred_at,
+                        )
+                        return existing_transaction
 
-            if locked_booking.status == Booking.Status.HOLD:
-                locked_booking.status = Booking.Status.CONFIRMED
-                locked_booking.save(update_fields=["status", "modified"])
+                normalized_reference = validate_booking_transaction_data(
+                    access=access,
+                    booking=locked_booking,
+                    amount=amount,
+                    payment_method=payment_method,
+                    payment_reference=payment_reference,
+                )
 
-            return created_transaction
-    except IntegrityError as exc:
-        if is_duplicate_payment_reference_integrity_error(exc):
-            raise serializers.ValidationError(
-                {"payment_reference": [DUPLICATE_PAYMENT_REFERENCE_MESSAGE]}
-            ) from exc
+                created_transaction = Transaction.objects.create(
+                    club=locked_booking.club,
+                    court=locked_booking.court,
+                    booking=locked_booking,
+                    transaction_type=Transaction.Type.PAYMENT,
+                    amount=amount,
+                    client_request_id=client_request_id,
+                    payment_method=payment_method,
+                    payment_reference=normalized_reference,
+                    notes=notes,
+                    occurred_at=occurred_at,
+                    created_by=created_by,
+                )
+                created_transaction._sloty_idempotency_reused = False
+                create_success_transaction_attempt(
+                    transaction_obj=created_transaction,
+                    access=access,
+                    booking=locked_booking,
+                    amount=amount,
+                    payment_method=payment_method,
+                    payment_reference=normalized_reference,
+                    notes=notes,
+                    created_by=created_by,
+                    client_request_id=client_request_id,
+                    occurred_at=occurred_at,
+                )
+                record_audit_log(
+                    club=created_transaction.club,
+                    court=created_transaction.court,
+                    actor=created_by,
+                    action=AuditLog.Action.TRANSACTION_CREATED,
+                    entity_type="Transaction",
+                    entity_id=created_transaction.id,
+                    after_data=transaction_audit_snapshot(created_transaction),
+                )
+
+                if locked_booking.status == Booking.Status.HOLD:
+                    locked_booking.status = Booking.Status.CONFIRMED
+                    locked_booking.save(update_fields=["status", "modified"])
+
+                return created_transaction
+        except IntegrityError as exc:
+            if is_duplicate_payment_reference_integrity_error(exc):
+                raise serializers.ValidationError(
+                    {"payment_reference": [DUPLICATE_PAYMENT_REFERENCE_MESSAGE]}
+                ) from exc
+            client_request_conflict = (
+                client_request_id is not None
+                and is_transaction_client_request_integrity_error(exc)
+            )
+            if client_request_conflict:
+                existing_transaction = resolve_idempotent_transaction_request(
+                    club=access.club,
+                    client_request_id=client_request_id,
+                    booking=booking,
+                    amount=amount,
+                    payment_method=payment_method,
+                    payment_reference=payment_reference,
+                    notes=notes,
+                    created_by=created_by,
+                    occurred_at=occurred_at,
+                    occurred_at_provided=occurred_at_provided,
+                    lock=False,
+                )
+                if existing_transaction is not None:
+                    return existing_transaction
+            raise
+    except (SlotyAPIException, serializers.ValidationError) as exc:
+        record_rejected_transaction_attempt(
+            access=access,
+            booking=booking,
+            amount=amount,
+            payment_method=payment_method,
+            payment_reference=payment_reference,
+            notes=notes,
+            created_by=created_by,
+            client_request_id=client_request_id,
+            occurred_at=occurred_at,
+            occurred_at_provided=occurred_at_provided,
+            exc=exc,
+        )
         raise
 
 

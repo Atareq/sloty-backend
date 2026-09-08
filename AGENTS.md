@@ -97,6 +97,21 @@ Current repo reality:
 - Sprint 10 adds logged transaction cancelling for safe corrections, excludes
   cancelled transactions from financial totals and settlements, and recalculates
   booking payment status from valid transactions
+- BE-01/BE-02/BE-03/BE-05 Offline/PWA foundation adds persistent
+  `BookingAttempt` history for authenticated booking creation attempts that
+  reach backend domain processing. Booking creation writes successful and
+  rejected attempts through the existing booking service. Historical booking
+  creation is allowed when normal business rules pass; appointment time being
+  before server sync time is not a standalone rejection reason. Attempts are
+  separate from operational `Booking` rows. BE-05 exposes only minimal
+  club-scoped traceability list/detail plus own rejected-attempt dismissal.
+- BE-04/BE-06 Offline/PWA transaction sync adds idempotent transaction
+  creation with optional `client_request_id` and `occurred_at` financial event
+  time plus persistent `TransactionAttempt` traceability for authenticated
+  payment attempts that reach backend domain processing. Accepted synced
+  payments remain ordinary `Transaction` rows and use the existing financial
+  validation, audit, Current Custody, and settlement behavior. Rejected or
+  dismissed attempts are separate history and must not affect financial totals.
 - Court usage reporting adds a read-only `apps/reports/` analytics app and
   `GET /api/v1/clubs/{club_slug}/reports/court-usage/`
 - Planned shared app name is `apps/common/`
@@ -218,7 +233,8 @@ Current implemented app:
 - Club/court scope must come from active `ClubMembership` rows, not from direct
   club or court fields on `User`.
 - `apps/bookings/` contains booking creation, list/detail APIs, schedule-style
-  filters, price snapshot calculation, and active booking overlap protection.
+  filters, price snapshot calculation, active booking overlap protection, and
+  persistent `BookingAttempt` records for offline/PWA booking intent history.
 - Current booking source values are `MANUAL`, `ADMIN_CORRECTION`, and
   `RECURRING`. Clients must not post `source=RECURRING`; they start a
   recurrence with write-only `is_recurring=true`. Only a Platform Super Admin
@@ -252,6 +268,40 @@ Current implemented app:
   HTTP 409 with `BOOKING_CLIENT_REQUEST_MISMATCH`. Concurrent requests with the
   same Club/key are serialized by row locks and the database uniqueness
   constraint.
+- Booking create accepts optional write-only `requested_at` as the business
+  timestamp for attempt history. If omitted, the booking service uses server
+  time.
+- Booking create must not reject a request solely because `start_time` or
+  `end_time` is earlier than current server time. Delayed offline/PWA
+  synchronization still runs normal current backend validation: selected Club
+  access, Court access, active Club/Court checks, pricing-period coverage, slot
+  grid alignment, overlap/availability, recurrence conflict checks, and
+  backend-owned price calculation.
+- `BookingAttempt.client_request_id` is optional to preserve the existing
+  online booking contract. When provided, it is unique inside the selected Club
+  and idempotent retries reuse the existing attempt: successful retries return
+  the existing Booking, rejected retries return the stored rejection code, and
+  same-key/different-payload requests return
+  `BOOKING_CLIENT_REQUEST_MISMATCH`. Attempt persistence is a separate
+  historical record of an authenticated booking creation attempt, not a second
+  operational reservation or a public CRUD surface.
+- Booking attempts preserve the originally requested booking `source` in
+  `requested_source`. It must match `requested_recurring`: `RECURRING` means
+  recurring intent; `MANUAL` and `ADMIN_CORRECTION` are non-recurring attempt
+  sources.
+- Booking attempt traceability endpoints are limited to
+  `GET /api/v1/clubs/{club_slug}/booking-attempts/`,
+  `GET /api/v1/clubs/{club_slug}/booking-attempts/{id}/`, and
+  `POST /api/v1/clubs/{club_slug}/booking-attempts/{id}/dismiss/`.
+  List filters are `court`, `attempted_by`, `outcome`, `resolution`,
+  `requested_source`, computed `status` (`ACCEPTED`, `REJECTED`, `DISMISSED`),
+  `date`, `date_from`, and `date_to`. Staff see only their own attempts on
+  their assigned court; owners, managers, and platform admins see selected-club
+  scope. Dismissal is allowed only by the original staff actor for rejected
+  attempts without a resolved Booking. Dismissal updates attempt resolution
+  only; it is not Booking cancellation and must not affect availability,
+  booking lifecycle, transactions, settlements, dashboards, reports, or Current
+  Custody.
 - New booking creation and rescheduling must be inside configured court working
   hours and fully covered by pricing periods. No `outside_working_hours` flag is
   stored.
@@ -278,8 +328,9 @@ Current implemented app:
 - Transaction corrections use a logged cancel of the original row followed by
   the normal create endpoint. Refunds, reversals, online payment gateway logic,
   and platform commission calculation remain future work.
-- Business APIs for memberships, courts, working hours, bookings, and
-  transactions are club-scoped under `/api/v1/clubs/{club_slug}/...`.
+- Business APIs for memberships, courts, working hours, bookings, transactions,
+  and transaction attempts are club-scoped under
+  `/api/v1/clubs/{club_slug}/...`.
 - Club user listing is club-scoped under
   `/api/v1/clubs/{club_slug}/users/`, is read-only, and returns users through
   `ClubMembership` rows. Platform admins and owners see all selected-club
@@ -535,6 +586,19 @@ Rules for the flow:
   `no_show_reason`, `reschedule_reason`, `completed_at`, `cancelled_at`,
   `no_show_at`, and `expired_at`. Do not add payment status or cached remaining
   amount fields.
+- `BookingAttempt` preserves original requested booking intent
+  (`customer_name`, `customer_phone`, `notes`, requested start/end,
+  `requested_at`, recurrence intent, `client_request_id`, actor, Club, and
+  Court) plus backend outcome (`SUCCESS` or `REJECTED`), failure code/details,
+  staff resolution (`UNRESOLVED`, `DISMISSED`, `RESOLVED`), and optional
+  resulting `Booking`. Rejected attempts must not create fake bookings and must
+  not participate in availability, schedule occupancy, lifecycle, transactions,
+  settlements, dashboards, reports, or booking counts.
+- Historical `HOLD` bookings are created as ordinary `HOLD` rows. The existing
+  automatic hold-expiry command still uses
+  `min(Booking.created + Court.internal_hold_expiry_hours, Booking.start_time)`,
+  so a historical HOLD may already be due when the scheduled expiry command next
+  runs. Booking creation itself does not run automatic expiry.
 - Do not place transaction creation logic, settlement, rescheduling,
   dashboard, marketplace, or notification behavior in `bookings`, except the
   hold-expiry command explicitly owned by booking lifecycle services.
@@ -628,8 +692,9 @@ pricing periods.
 `apps/transactions/`
 
 - Transaction recording and Sprint 10 correction app.
-- Contains `Transaction`, transaction serializers, transaction viewsets,
-  transaction creation/cancel services, and transaction admin registration.
+- Contains `Transaction`, `TransactionAttempt`, transaction serializers,
+  transaction viewsets, transaction creation/cancel/attempt services, and
+  transaction admin registration.
 - Do not create `apps/transactions/permissions.py` by default.
 - Transaction access must be centralized through
   `apps/clubs/access.py -> ClubAccessContext`.
@@ -660,6 +725,50 @@ pricing periods.
   amounts. Corrections use
   `POST .../transactions/{id}/cancel/` with a required reason, followed by normal
   transaction creation.
+- Transaction create accepts optional `client_request_id` as a UUID idempotency
+  key. Uniqueness is scoped to the selected Club and retained on the
+  `Transaction` row. The same `client_request_id` plus the same logical
+  transaction request returns the original `Transaction` with HTTP 200 and does
+  not create another row or audit event. Reusing the key for different booking,
+  collector, amount, method, reference, notes, or explicit `occurred_at` returns
+  HTTP 409 with `TRANSACTION_CLIENT_REQUEST_MISMATCH`.
+- `Transaction.occurred_at` stores when the payment/refund financially occurred
+  from the business perspective. Public payment sync may submit historical
+  timezone-aware `occurred_at` values. `Transaction.created` remains the server
+  persistence timestamp and is still the authority for existing transaction
+  date filters, Current Custody `period_start`, settlement ordering, and
+  dashboard/reporting filters unless a future contract explicitly changes that.
+- `TransactionAttempt` preserves original requested payment intent (`booking`,
+  `club`, `court`, attempted-by user, `client_request_id`, amount, payment
+  method/reference, notes, and business `occurred_at`) plus backend outcome
+  (`SUCCESS` or `REJECTED`), failure code/details, staff resolution
+  (`UNRESOLVED`, `DISMISSED`, `RESOLVED`), and optional resulting
+  `Transaction`. Successful attempts resolve to a normal `Transaction` and
+  default to `RESOLVED`; rejected attempts have no `Transaction` and default to
+  `UNRESOLVED`.
+- `TransactionAttempt.client_request_id` is optional but, when supplied, is
+  unique inside the selected Club and is checked before legacy
+  `Transaction.client_request_id`. Idempotent retries of the same successful
+  request return the resolved `Transaction`; retries of the same rejected
+  request return the stored rejection; same-key/different-payload requests
+  return `TRANSACTION_CLIENT_REQUEST_MISMATCH` without overwriting the attempt.
+- Transaction attempt traceability endpoints are limited to
+  `GET /api/v1/clubs/{club_slug}/transaction-attempts/`,
+  `GET /api/v1/clubs/{club_slug}/transaction-attempts/{id}/`, and
+  `POST /api/v1/clubs/{club_slug}/transaction-attempts/{id}/dismiss/`.
+  List filters are `booking`, `court`, `attempted_by`, `payment_method`,
+  `outcome`, `resolution`, `failure_code`, computed `status` (`ACCEPTED`,
+  `REJECTED`, `DISMISSED`), `date`, `date_from`, and `date_to`; attempt date
+  filters use `TransactionAttempt.occurred_at`. Staff see only their own
+  attempts on their assigned court; owners, managers, and platform admins see
+  selected-club scope. Dismissal is allowed only by the original staff actor
+  for rejected attempts without a resolved `Transaction`.
+- Rejected and dismissed transaction attempts must not create fake
+  `Transaction` rows and must not affect booking paid/remaining amounts,
+  Current Custody, settlement preview/creation, revenue/dashboard totals,
+  transaction list/detail, transaction cancellation, or audit financial events.
+  Dismissing an attempt updates attempt resolution only; it is not payment
+  cancellation or reversal.
 - The first active PAYMENT for a normal booking must be at least
   `min(booking.court.minimum_deposit, booking.total_price)`. Only active PAYMENT
   rows count toward paid/remaining booking amounts. Active REFUND rows count as

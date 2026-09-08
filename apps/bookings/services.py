@@ -2,7 +2,7 @@ from collections import defaultdict
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import prefetch_related_objects
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -19,10 +19,14 @@ from apps.bookings.filters import (
     annotate_booking_hold_expires_at,
     compute_booking_hold_expires_at,
 )
-from apps.bookings.models import Booking
+from apps.bookings.models import Booking, BookingAttempt
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
 from apps.courts.pricing import (
+    BOOKING_MULTIDAY_NOT_SUPPORTED_MESSAGE,
+    BOOKING_OUTSIDE_WORKING_HOURS_MESSAGE,
+    BOOKING_PRICE_NOT_CONFIGURED_MESSAGE,
+    BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID_MESSAGE,
     calculate_booking_price_from_schedule,
     slot_price_from_schedule,
     working_hour_bounds,
@@ -62,6 +66,9 @@ BOOKING_CLIENT_REQUEST_MISMATCH_MESSAGE = _(
 BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT_MESSAGE = _(
     "This booking cannot be completed until the remaining amount is paid."
 )
+PREVIOUS_BOOKING_ATTEMPT_REJECTED_MESSAGE = _(
+    "This booking request was previously rejected."
+)
 COURT_CLOSED_ON_THIS_DAY_MESSAGE = _("The court is closed on this day.")
 PRICING_NOT_CONFIGURED_LABEL = _("Pricing not configured")
 BOOKING_NOT_IN_CLUB_MESSAGE = _("Booking must belong to the selected club.")
@@ -81,6 +88,9 @@ RECURRENCE_CONTINUATION_DECISION_REQUIRED_MESSAGE = _(
     "Choose whether this recurring booking should continue."
 )
 BOOKING_RECURRENCE_NOT_ACTIVE_MESSAGE = _("This booking has no active recurrence.")
+BOOKING_ATTEMPT_CANNOT_BE_DISMISSED_MESSAGE = _(
+    "Only rejected booking attempts without a resolved booking can be dismissed."
+)
 RECURRING_BOOKING_RESCHEDULE_NOT_SUPPORTED_MESSAGE = _(
     "Active recurring bookings cannot be rescheduled."
 )
@@ -92,6 +102,17 @@ NEXT_OCCURRENCE_PLAN_ERROR_CODES = {
     "BOOKING_PRICE_NOT_CONFIGURED",
     "BOOKING_MULTIDAY_NOT_SUPPORTED",
     "BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID",
+}
+BOOKING_ATTEMPT_FAILURE_MESSAGES = {
+    "BOOKING_SLOT_UNAVAILABLE": BOOKING_SLOT_UNAVAILABLE_MESSAGE,
+    "RECURRING_UNAVAILABLE": RECURRING_UNAVAILABLE_MESSAGE,
+    "BOOKING_OUTSIDE_WORKING_HOURS": BOOKING_OUTSIDE_WORKING_HOURS_MESSAGE,
+    "BOOKING_PRICE_NOT_CONFIGURED": BOOKING_PRICE_NOT_CONFIGURED_MESSAGE,
+    "BOOKING_MULTIDAY_NOT_SUPPORTED": BOOKING_MULTIDAY_NOT_SUPPORTED_MESSAGE,
+    "BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID": (
+        BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID_MESSAGE
+    ),
+    "VALIDATION_ERROR": _("The submitted data was invalid."),
 }
 
 
@@ -313,6 +334,281 @@ def resolve_idempotent_booking_request(
             "existing_booking_id": existing_booking.id,
         },
     )
+
+
+def requested_recurring_from_booking_data(booking_data):
+    return booking_data.get("source") == Booking.Source.RECURRING
+
+
+def requested_source_from_booking_data(booking_data):
+    return booking_data.get("source", Booking.Source.MANUAL)
+
+
+def booking_attempt_matches_client_request(
+    attempt,
+    *,
+    court,
+    start_time,
+    end_time,
+    booking_data,
+):
+    expected_notes = booking_data.get("notes", "") or ""
+    expected_phone = booking_data.get("customer_phone")
+
+    return (
+        attempt.court_id == court.id
+        and attempt.requested_start == start_time
+        and attempt.requested_end == end_time
+        and attempt.customer_name == booking_data.get("customer_name")
+        and str(attempt.customer_phone) == str(expected_phone)
+        and (attempt.notes or "") == expected_notes
+        and attempt.requested_source == requested_source_from_booking_data(booking_data)
+        and attempt.requested_recurring
+        == requested_recurring_from_booking_data(booking_data)
+    )
+
+
+def raise_booking_attempt_mismatch(*, client_request_id, attempt):
+    details = {"client_request_id": str(client_request_id)}
+    if attempt.booking_id is not None:
+        details["existing_booking_id"] = attempt.booking_id
+    else:
+        details["existing_attempt_id"] = attempt.id
+    raise SlotyAPIException(
+        status_code=status.HTTP_409_CONFLICT,
+        code="BOOKING_CLIENT_REQUEST_MISMATCH",
+        message=BOOKING_CLIENT_REQUEST_MISMATCH_MESSAGE,
+        details=details,
+    )
+
+
+def raise_previous_booking_attempt_rejection(attempt):
+    raise SlotyAPIException(
+        status_code=status.HTTP_409_CONFLICT,
+        code=attempt.failure_code,
+        message=BOOKING_ATTEMPT_FAILURE_MESSAGES.get(
+            attempt.failure_code,
+            PREVIOUS_BOOKING_ATTEMPT_REJECTED_MESSAGE,
+        ),
+        details=attempt.failure_details or {},
+    )
+
+
+def resolve_idempotent_booking_attempt(
+    *,
+    club,
+    court,
+    start_time,
+    end_time,
+    booking_data,
+):
+    client_request_id = booking_data.get("client_request_id")
+    if client_request_id is None:
+        return None
+
+    attempt = (
+        BookingAttempt.objects.select_for_update()
+        .filter(club=club, client_request_id=client_request_id)
+        .select_related("booking", "court", "club")
+        .first()
+    )
+    if attempt is None:
+        return None
+
+    if not booking_attempt_matches_client_request(
+        attempt,
+        court=court,
+        start_time=start_time,
+        end_time=end_time,
+        booking_data=booking_data,
+    ):
+        raise_booking_attempt_mismatch(
+            client_request_id=client_request_id,
+            attempt=attempt,
+        )
+    if attempt.outcome == BookingAttempt.Outcome.SUCCESS:
+        booking = attempt.booking
+        booking._sloty_idempotency_reused = True
+        return booking
+    raise_previous_booking_attempt_rejection(attempt)
+
+
+def booking_attempt_payload(
+    *,
+    club,
+    court,
+    created_by,
+    start_time,
+    end_time,
+    requested_at,
+    booking_data,
+):
+    return {
+        "club": club,
+        "court": court,
+        "attempted_by": created_by,
+        "client_request_id": booking_data.get("client_request_id"),
+        "customer_name": booking_data.get("customer_name"),
+        "customer_phone": booking_data.get("customer_phone"),
+        "notes": booking_data.get("notes", "") or "",
+        "requested_start": start_time,
+        "requested_end": end_time,
+        "requested_at": requested_at,
+        "requested_source": requested_source_from_booking_data(booking_data),
+        "requested_recurring": requested_recurring_from_booking_data(booking_data),
+    }
+
+
+def create_success_booking_attempt(
+    *,
+    booking,
+    created_by,
+    start_time,
+    end_time,
+    requested_at,
+    booking_data,
+):
+    if booking_data.get("client_request_id") is not None:
+        existing_attempt = BookingAttempt.objects.filter(
+            club=booking.club,
+            client_request_id=booking_data["client_request_id"],
+        ).first()
+        if existing_attempt is not None:
+            return existing_attempt
+    return BookingAttempt.objects.create(
+        **booking_attempt_payload(
+            club=booking.club,
+            court=booking.court,
+            created_by=created_by,
+            start_time=start_time,
+            end_time=end_time,
+            requested_at=requested_at,
+            booking_data=booking_data,
+        ),
+        outcome=BookingAttempt.Outcome.SUCCESS,
+        booking=booking,
+        resolution=BookingAttempt.Resolution.RESOLVED,
+    )
+
+
+def failure_details_for_exception(exc):
+    if isinstance(exc, SlotyAPIException):
+        return normalize_failure_details(exc.details or {})
+    if isinstance(exc, serializers.ValidationError):
+        return normalize_failure_details(exc.detail)
+    return {}
+
+
+def normalize_failure_details(value):
+    if isinstance(value, dict):
+        return {
+            str(key): normalize_failure_details(item) for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [normalize_failure_details(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def failure_code_for_exception(exc):
+    if isinstance(exc, SlotyAPIException):
+        return exc.api_code
+    if isinstance(exc, serializers.ValidationError):
+        return "VALIDATION_ERROR"
+    return "BOOKING_REQUEST_REJECTED"
+
+
+def should_record_rejected_booking_attempt(exc):
+    if isinstance(exc, SlotyAPIException):
+        return exc.api_code != "BOOKING_CLIENT_REQUEST_MISMATCH"
+    return isinstance(exc, serializers.ValidationError)
+
+
+def record_rejected_booking_attempt(
+    *,
+    created_by,
+    court,
+    start_time,
+    end_time,
+    requested_at,
+    booking_data,
+    exc,
+):
+    if not should_record_rejected_booking_attempt(exc):
+        return None
+    club = court.club
+    client_request_id = booking_data.get("client_request_id")
+
+    try:
+        with transaction.atomic():
+            if client_request_id is not None:
+                club.__class__.objects.select_for_update().get(pk=club.pk)
+                existing_attempt = (
+                    BookingAttempt.objects.select_for_update()
+                    .filter(club=club, client_request_id=client_request_id)
+                    .first()
+                )
+                if existing_attempt is not None:
+                    if booking_attempt_matches_client_request(
+                        existing_attempt,
+                        court=court,
+                        start_time=start_time,
+                        end_time=end_time,
+                        booking_data=booking_data,
+                    ):
+                        return existing_attempt
+                    raise_booking_attempt_mismatch(
+                        client_request_id=client_request_id,
+                        attempt=existing_attempt,
+                    )
+            return BookingAttempt.objects.create(
+                **booking_attempt_payload(
+                    club=club,
+                    court=court,
+                    created_by=created_by,
+                    start_time=start_time,
+                    end_time=end_time,
+                    requested_at=requested_at,
+                    booking_data=booking_data,
+                ),
+                outcome=BookingAttempt.Outcome.REJECTED,
+                failure_code=failure_code_for_exception(exc),
+                failure_details=failure_details_for_exception(exc),
+            )
+    except IntegrityError:
+        if client_request_id is None:
+            raise
+        return BookingAttempt.objects.filter(
+            club=club,
+            client_request_id=client_request_id,
+        ).first()
+
+
+def dismiss_booking_attempt(*, access, attempt, actor):
+    with transaction.atomic():
+        locked_attempt = (
+            BookingAttempt.objects.select_for_update()
+            .select_related("club", "court", "attempted_by", "booking")
+            .get(pk=attempt.pk)
+        )
+        if not access.can_dismiss_booking_attempt(locked_attempt):
+            raise PermissionDenied("You cannot dismiss this booking attempt.")
+        if locked_attempt.resolution == BookingAttempt.Resolution.DISMISSED:
+            return locked_attempt
+        if (
+            locked_attempt.outcome != BookingAttempt.Outcome.REJECTED
+            or locked_attempt.booking_id is not None
+        ):
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="BOOKING_ATTEMPT_CANNOT_BE_DISMISSED",
+                message=BOOKING_ATTEMPT_CANNOT_BE_DISMISSED_MESSAGE,
+            )
+
+        locked_attempt.resolution = BookingAttempt.Resolution.DISMISSED
+        locked_attempt.save(update_fields=["resolution", "modified"])
+        return locked_attempt
 
 
 def validate_no_active_recurrence_overlap(
@@ -713,66 +1009,112 @@ def generate_booking_slots(*, access, court, date_from, date_to):
     return response
 
 
-def create_booking(*, created_by, court, start_time, end_time, **booking_data):
-    with transaction.atomic():
-        locked_court = (
-            court.__class__.objects.select_for_update()
-            .select_related("club")
-            .prefetch_related("working_hours__pricing_periods")
-            .get(pk=court.pk)
-        )
-        if booking_data.get("client_request_id") is not None:
-            locked_court.club.__class__.objects.select_for_update().get(
-                pk=locked_court.club_id
+def create_booking(
+    *,
+    created_by,
+    court,
+    start_time,
+    end_time,
+    requested_at=None,
+    **booking_data,
+):
+    requested_at = requested_at or timezone.now()
+    try:
+        with transaction.atomic():
+            locked_court = (
+                court.__class__.objects.select_for_update()
+                .select_related("club")
+                .prefetch_related("working_hours__pricing_periods")
+                .get(pk=court.pk)
             )
-            existing_booking = resolve_idempotent_booking_request(
+            if booking_data.get("client_request_id") is not None:
+                locked_court.club.__class__.objects.select_for_update().get(
+                    pk=locked_court.club_id
+                )
+                existing_attempt_booking = resolve_idempotent_booking_attempt(
+                    club=locked_court.club,
+                    court=locked_court,
+                    start_time=start_time,
+                    end_time=end_time,
+                    booking_data=booking_data,
+                )
+                if existing_attempt_booking is not None:
+                    return existing_attempt_booking
+                existing_booking = resolve_idempotent_booking_request(
+                    club=locked_court.club,
+                    court=locked_court,
+                    start_time=start_time,
+                    end_time=end_time,
+                    booking_data=booking_data,
+                )
+                if existing_booking is not None:
+                    create_success_booking_attempt(
+                        booking=existing_booking,
+                        created_by=created_by,
+                        start_time=start_time,
+                        end_time=end_time,
+                        requested_at=requested_at,
+                        booking_data=booking_data,
+                    )
+                    return existing_booking
+
+            validate_booking_duration(locked_court, start_time, end_time)
+            total_price = calculate_booking_price(
+                locked_court,
+                start_time,
+                end_time,
+            )
+            if booking_data.get("source") == Booking.Source.RECURRING:
+                validate_no_availability_conflict(locked_court, start_time, end_time)
+                validate_can_start_recurrence(
+                    court=locked_court,
+                    start_time=start_time,
+                    end_time=end_time,
+                )
+                booking_data["recurrence_status"] = Booking.RecurrenceStatus.ACTIVE
+            else:
+                validate_no_availability_conflict(locked_court, start_time, end_time)
+
+            created_booking = Booking.objects.create(
                 club=locked_court.club,
                 court=locked_court,
                 start_time=start_time,
                 end_time=end_time,
-                booking_data=booking_data,
+                total_price=total_price,
+                status=Booking.Status.HOLD,
+                created_by=created_by,
+                **booking_data,
             )
-            if existing_booking is not None:
-                return existing_booking
-
-        validate_booking_duration(locked_court, start_time, end_time)
-        total_price = calculate_booking_price(
-            locked_court,
-            start_time,
-            end_time,
-        )
-        if booking_data.get("source") == Booking.Source.RECURRING:
-            validate_no_availability_conflict(locked_court, start_time, end_time)
-            validate_can_start_recurrence(
-                court=locked_court,
+            created_booking._sloty_idempotency_reused = False
+            create_success_booking_attempt(
+                booking=created_booking,
+                created_by=created_by,
                 start_time=start_time,
                 end_time=end_time,
+                requested_at=requested_at,
+                booking_data=booking_data,
             )
-            booking_data["recurrence_status"] = Booking.RecurrenceStatus.ACTIVE
-        else:
-            validate_no_availability_conflict(locked_court, start_time, end_time)
-
-        created_booking = Booking.objects.create(
-            club=locked_court.club,
-            court=locked_court,
+            record_audit_log(
+                club=created_booking.club,
+                court=created_booking.court,
+                actor=created_by,
+                action=AuditLog.Action.BOOKING_CREATED,
+                entity_type="Booking",
+                entity_id=created_booking.id,
+                after_data=booking_audit_snapshot(created_booking),
+            )
+            return created_booking
+    except (SlotyAPIException, serializers.ValidationError) as exc:
+        record_rejected_booking_attempt(
+            created_by=created_by,
+            court=court,
             start_time=start_time,
             end_time=end_time,
-            total_price=total_price,
-            status=Booking.Status.HOLD,
-            created_by=created_by,
-            **booking_data,
+            requested_at=requested_at,
+            booking_data=booking_data,
+            exc=exc,
         )
-        created_booking._sloty_idempotency_reused = False
-        record_audit_log(
-            club=created_booking.club,
-            court=created_booking.court,
-            actor=created_by,
-            action=AuditLog.Action.BOOKING_CREATED,
-            entity_type="Booking",
-            entity_id=created_booking.id,
-            after_data=booking_audit_snapshot(created_booking),
-        )
-        return created_booking
+        raise
 
 
 def validate_booking_for_lifecycle_action(*, access, booking):
