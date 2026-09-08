@@ -31,7 +31,8 @@ Status: Implemented as the active recurrence contract.
    conflict details. If the selected base appointment itself is unavailable, the
    canonical code remains `BOOKING_SLOT_UNAVAILABLE`.
 9. Completing an ACTIVE recurring booking requires `continue_recurring`.
-   `false` ends recurrence; `true` creates next week's booking and records the
+   `false` ends recurrence; `true` creates the next current/future weekly
+   occurrence after skipping any missed historical periods and records the
    required next deposit as an ordinary booking PAYMENT transaction.
    `GET /api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/` is the
    read-only preview of that next occurrence (datetime, current schedule

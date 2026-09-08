@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
@@ -221,6 +222,7 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
         )
         validators = []
 
+    @extend_schema_field(serializers.BooleanField())
     def get_is_deleted(self, obj):
         return obj.deleted_at is not None
 
@@ -395,6 +397,7 @@ class ClubUserListSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
+    @extend_schema_field(serializers.BooleanField())
     def get_can_change_pricing(self, membership):
         if membership.role == ClubMembership.Role.OWNER:
             return True
@@ -403,11 +406,13 @@ class ClubUserListSerializer(serializers.ModelSerializer):
             and membership.manager_can_change_pricing
         )
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_court_name(self, membership):
         if membership.court is None:
             return None
         return membership.court.name
 
+    @extend_schema_field(serializers.BooleanField())
     def get_can_manage_working_hours(self, membership):
         if membership.role == ClubMembership.Role.OWNER:
             return True
@@ -416,6 +421,7 @@ class ClubUserListSerializer(serializers.ModelSerializer):
             and membership.manager_can_change_pricing
         )
 
+    @extend_schema_field(serializers.BooleanField())
     def get_can_manage_settlements(self, membership):
         if membership.role == ClubMembership.Role.OWNER:
             return True

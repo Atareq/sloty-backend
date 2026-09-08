@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
+import yaml
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, connection, transaction
 from django.test.utils import CaptureQueriesContext
@@ -2071,14 +2072,37 @@ class TransactionCentralizedAccessTests(TransactionAPITestCase):
     def test_schema_and_docs_return_200(self):
         schema_response = self.client.get(reverse("schema"))
         docs_response = self.client.get(reverse("swagger-ui"))
+        schema = schema_response.content.decode()
+        schema_doc = yaml.safe_load(schema)
 
         self.assertEqual(schema_response.status_code, status.HTTP_200_OK)
         self.assertEqual(docs_response.status_code, status.HTTP_200_OK)
         self.assertIn(
             "/api/v1/clubs/{club_slug}/transactions/",
-            schema_response.content.decode(),
+            schema,
         )
-        schema = schema_response.content.decode()
+        transaction_create_responses = schema_doc["paths"][
+            "/api/v1/clubs/{club_slug}/transactions/"
+        ]["post"]["responses"]
+        self.assertIn("201", transaction_create_responses)
+        self.assertIn("200", transaction_create_responses)
+        self.assertEqual(
+            transaction_create_responses["201"]["content"]["application/json"][
+                "schema"
+            ]["$ref"],
+            "#/components/schemas/TransactionDetail",
+        )
+        self.assertEqual(
+            transaction_create_responses["200"]["content"]["application/json"][
+                "schema"
+            ]["$ref"],
+            "#/components/schemas/TransactionDetail",
+        )
+        attempt_fields = schema_doc["components"]["schemas"]["TransactionAttemptList"][
+            "properties"
+        ]
+        self.assertEqual(attempt_fields["resolved_transaction"]["type"], "integer")
+        self.assertTrue(attempt_fields["resolved_transaction"]["nullable"])
         self.assertIn("booking_customer_name", schema)
         self.assertIn("booking_customer_phone", schema)
         self.assertIn("booking_start_time", schema)

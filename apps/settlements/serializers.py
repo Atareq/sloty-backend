@@ -1,4 +1,5 @@
 from django.utils.translation import gettext_lazy as _
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from apps.accounts.models import User
@@ -44,12 +45,15 @@ class SettlementListSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
+    @extend_schema_field(serializers.CharField())
     def get_collected_by_name(self, obj):
         return user_display_name(obj.collected_by)
 
+    @extend_schema_field(serializers.CharField())
     def get_settled_by_name(self, obj):
         return user_display_name(obj.settled_by)
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_court_name(self, obj):
         if obj.court_id is None:
             return None
@@ -118,6 +122,7 @@ class SettlementLineSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
+    @extend_schema_field(serializers.CharField())
     def get_kind(self, obj):
         return obj.transaction.transaction_type
 
@@ -158,12 +163,15 @@ class SettlementDetailSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
+    @extend_schema_field(serializers.CharField())
     def get_collected_by_name(self, obj):
         return user_display_name(obj.collected_by)
 
+    @extend_schema_field(serializers.CharField())
     def get_settled_by_name(self, obj):
         return user_display_name(obj.settled_by)
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_court_name(self, obj):
         if obj.court_id is None:
             return None

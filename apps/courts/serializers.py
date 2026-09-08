@@ -1,4 +1,5 @@
 from django.utils.translation import gettext_lazy as _
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
@@ -127,12 +128,15 @@ class CourtListSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
+    @extend_schema_field(serializers.BooleanField())
     def get_pricing_configured(self, obj):
         return pricing_configured_for_court(obj)
 
+    @extend_schema_field(serializers.DecimalField(max_digits=10, decimal_places=2))
     def get_minimum_slot_price(self, obj):
         return get_court_pricing_summary(obj)["minimum_slot_price"]
 
+    @extend_schema_field(serializers.DecimalField(max_digits=10, decimal_places=2))
     def get_maximum_slot_price(self, obj):
         return get_court_pricing_summary(obj)["maximum_slot_price"]
 
@@ -168,12 +172,15 @@ class CourtDetailSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
+    @extend_schema_field(serializers.BooleanField())
     def get_pricing_configured(self, obj):
         return pricing_configured_for_court(obj)
 
+    @extend_schema_field(serializers.DecimalField(max_digits=10, decimal_places=2))
     def get_minimum_slot_price(self, obj):
         return get_court_pricing_summary(obj)["minimum_slot_price"]
 
+    @extend_schema_field(serializers.DecimalField(max_digits=10, decimal_places=2))
     def get_maximum_slot_price(self, obj):
         return get_court_pricing_summary(obj)["maximum_slot_price"]
 

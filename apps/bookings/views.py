@@ -63,7 +63,10 @@ from apps.transactions.services import annotate_booking_paid_amount
     create=extend_schema(
         tags=["Bookings"],
         request=BookingCreateSerializer,
-        responses=BookingDetailSerializer,
+        responses={
+            status.HTTP_201_CREATED: BookingDetailSerializer,
+            status.HTTP_200_OK: BookingDetailSerializer,
+        },
     ),
     retrieve=extend_schema(tags=["Bookings"], responses=BookingDetailSerializer),
     partial_update=extend_schema(

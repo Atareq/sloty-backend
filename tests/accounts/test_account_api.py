@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+import yaml
 from django.conf import settings
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
@@ -178,6 +179,23 @@ class MeAPITests(AccountAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertLessEqual(len(queries), 2)
+
+    def test_openapi_documents_me_nested_response_fields(self):
+        response = self.client.get(reverse("schema"))
+        schema_doc = yaml.safe_load(response.content.decode())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        fields = schema_doc["components"]["schemas"]["UserMe"]["properties"]
+        self.assertTrue(fields["account_created_by"]["nullable"])
+        self.assertEqual(
+            fields["account_created_by"]["allOf"][0]["$ref"],
+            "#/components/schemas/AccountCreator",
+        )
+        self.assertEqual(fields["memberships"]["type"], "array")
+        self.assertEqual(
+            fields["memberships"]["items"]["$ref"],
+            "#/components/schemas/UserMembership",
+        )
 
 
 class JWTAPITests(AccountAPITestCase):

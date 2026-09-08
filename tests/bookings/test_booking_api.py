@@ -4586,10 +4586,49 @@ class BookingFilterPatternTests(BookingAPITestCase):
         schema_doc = yaml.safe_load(schema)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking_create_responses = schema_doc["paths"][
+            "/api/v1/clubs/{club_slug}/bookings/"
+        ]["post"]["responses"]
+        self.assertIn("201", booking_create_responses)
+        self.assertIn("200", booking_create_responses)
+        self.assertEqual(
+            booking_create_responses["201"]["content"]["application/json"]["schema"][
+                "$ref"
+            ],
+            "#/components/schemas/BookingDetail",
+        )
+        self.assertEqual(
+            booking_create_responses["200"]["content"]["application/json"]["schema"][
+                "$ref"
+            ],
+            "#/components/schemas/BookingDetail",
+        )
         booking_list_fields = schema_doc["components"]["schemas"]["BookingList"][
             "properties"
         ]
+        booking_detail_fields = schema_doc["components"]["schemas"]["BookingDetail"][
+            "properties"
+        ]
         self.assertIn("notes", booking_list_fields)
+        self.assertEqual(booking_list_fields["is_fully_paid"]["type"], "boolean")
+        self.assertEqual(booking_list_fields["is_recurring"]["type"], "boolean")
+        self.assertEqual(
+            booking_list_fields["next_recurring_booking_id"]["type"],
+            "integer",
+        )
+        self.assertTrue(booking_list_fields["next_recurring_booking_id"]["nullable"])
+        self.assertEqual(booking_detail_fields["is_fully_paid"]["type"], "boolean")
+        self.assertEqual(booking_detail_fields["is_recurring"]["type"], "boolean")
+        self.assertEqual(
+            booking_detail_fields["next_recurring_booking_id"]["type"],
+            "integer",
+        )
+        self.assertTrue(booking_detail_fields["next_recurring_booking_id"]["nullable"])
+        attempt_fields = schema_doc["components"]["schemas"]["BookingAttemptList"][
+            "properties"
+        ]
+        self.assertEqual(attempt_fields["resolved_booking"]["type"], "integer")
+        self.assertTrue(attempt_fields["resolved_booking"]["nullable"])
         self.assertIn("hold_expires_at", schema)
         self.assertIn("recurrence-next", schema)
         self.assertIn("search", schema)

@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from apps.bookings.models import Booking
@@ -130,17 +131,19 @@ class TransactionCancelSerializer(serializers.Serializer):
 
 class TransactionAttemptStatusMixin(serializers.Serializer):
     status = serializers.SerializerMethodField()
-    resolved_transaction = serializers.PrimaryKeyRelatedField(
-        source="transaction",
-        read_only=True,
-    )
+    resolved_transaction = serializers.SerializerMethodField()
 
+    @extend_schema_field(serializers.CharField())
     def get_status(self, obj) -> str:
         if obj.resolution == TransactionAttempt.Resolution.DISMISSED:
             return "DISMISSED"
         if obj.outcome == TransactionAttempt.Outcome.SUCCESS:
             return "ACCEPTED"
         return "REJECTED"
+
+    @extend_schema_field(serializers.IntegerField(allow_null=True))
+    def get_resolved_transaction(self, obj):
+        return obj.transaction_id
 
 
 class TransactionAttemptListSerializer(

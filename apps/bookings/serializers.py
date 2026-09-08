@@ -43,14 +43,17 @@ class BookingPaymentSummaryMixin(serializers.Serializer):
     remaining_amount = serializers.SerializerMethodField()
     is_fully_paid = serializers.SerializerMethodField()
 
+    @extend_schema_field(serializers.CharField())
     def get_paid_amount(self, obj):
         return format_money(get_paid_amount_for_booking(obj))
 
+    @extend_schema_field(serializers.CharField())
     def get_remaining_amount(self, obj):
         paid_amount = get_paid_amount_for_booking(obj)
         remaining_amount = obj.total_price - paid_amount
         return format_money(remaining_amount)
 
+    @extend_schema_field(serializers.BooleanField())
     def get_is_fully_paid(self, obj):
         return get_paid_amount_for_booking(obj) >= obj.total_price
 
@@ -72,9 +75,11 @@ class BookingRecurrenceReadMixin:
     is_recurring = serializers.SerializerMethodField()
     next_recurring_booking_id = serializers.SerializerMethodField()
 
+    @extend_schema_field(serializers.BooleanField())
     def get_is_recurring(self, obj):
         return obj.source == Booking.Source.RECURRING
 
+    @extend_schema_field(serializers.IntegerField(allow_null=True))
     def get_next_recurring_booking_id(self, obj):
         next_booking = getattr(obj, "next_recurring_booking", None)
         return next_booking.id if next_booking else None
@@ -260,17 +265,19 @@ class BookingCreateSerializer(serializers.ModelSerializer):
 
 class BookingAttemptStatusMixin(serializers.Serializer):
     status = serializers.SerializerMethodField()
-    resolved_booking = serializers.PrimaryKeyRelatedField(
-        source="booking",
-        read_only=True,
-    )
+    resolved_booking = serializers.SerializerMethodField()
 
+    @extend_schema_field(serializers.CharField())
     def get_status(self, obj) -> str:
         if obj.resolution == BookingAttempt.Resolution.DISMISSED:
             return "DISMISSED"
         if obj.outcome == BookingAttempt.Outcome.SUCCESS:
             return "ACCEPTED"
         return "REJECTED"
+
+    @extend_schema_field(serializers.IntegerField(allow_null=True))
+    def get_resolved_booking(self, obj):
+        return obj.booking_id
 
 
 class BookingAttemptListSerializer(

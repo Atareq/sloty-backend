@@ -98,7 +98,10 @@ class TransactionAttemptViewSet(
     create=extend_schema(
         tags=["Transactions"],
         request=TransactionCreateSerializer,
-        responses=TransactionDetailSerializer,
+        responses={
+            status.HTTP_201_CREATED: TransactionDetailSerializer,
+            status.HTTP_200_OK: TransactionDetailSerializer,
+        },
     ),
     retrieve=extend_schema(
         tags=["Transactions"], responses=TransactionDetailSerializer

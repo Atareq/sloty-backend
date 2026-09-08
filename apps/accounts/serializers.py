@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers, status
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
@@ -130,6 +131,7 @@ class UserMembershipSerializer(serializers.ModelSerializer):
             "permissions",
         )
 
+    @extend_schema_field(UserMembershipPermissionsSerializer)
     def get_permissions(self, membership):
         if membership.role == ClubMembership.Role.OWNER:
             permissions = {
@@ -177,6 +179,7 @@ class UserMeSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
+    @extend_schema_field(AccountCreatorSerializer(allow_null=True))
     def get_account_created_by(self, obj):
         creator = obj.created_by
         if creator is None:
@@ -188,6 +191,7 @@ class UserMeSerializer(serializers.ModelSerializer):
             }
         ).data
 
+    @extend_schema_field(UserMembershipSerializer(many=True))
     def get_memberships(self, obj):
         memberships = getattr(obj, "active_memberships_for_me", None)
         if memberships is None:
