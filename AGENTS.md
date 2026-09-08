@@ -112,6 +112,10 @@ Current repo reality:
   payments remain ordinary `Transaction` rows and use the existing financial
   validation, audit, Current Custody, and settlement behavior. Rejected or
   dismissed attempts are separate history and must not affect financial totals.
+- Final Offline/PWA hardening stores `ClubMembership.last_sync_at` as the
+  selected-club sync/contact marker. Successful authenticated club-scoped API
+  responses update the active selected-club membership, throttled to avoid a
+  write on every request. Failed auth/access/domain responses do not update it.
 - Court usage reporting adds a read-only `apps/reports/` analytics app and
   `GET /api/v1/clubs/{club_slug}/reports/court-usage/`
 - Planned shared app name is `apps/common/`
@@ -232,6 +236,13 @@ Current implemented app:
   working-hour fields onto `Court`, or convert them to one-to-one settings.
 - Club/court scope must come from active `ClubMembership` rows, not from direct
   club or court fields on `User`.
+- `ClubMembership.last_sync_at` is a nullable server timestamp for the last
+  successful authenticated selected-club API contact. It is exposed read-only
+  through `/api/v1/me/`, club memberships, and club users. It must not be
+  writable by clients and must not be updated for invalid JWTs, inactive users,
+  revoked memberships, or failed responses. The update belongs to
+  `ClubScopedAccessMixin`; do not add a sync heartbeat/device/session endpoint
+  just to maintain this field.
 - `apps/bookings/` contains booking creation, list/detail APIs, schedule-style
   filters, price snapshot calculation, active booking overlap protection, and
   persistent `BookingAttempt` records for offline/PWA booking intent history.
@@ -270,7 +281,8 @@ Current implemented app:
   constraint.
 - Booking create accepts optional write-only `requested_at` as the business
   timestamp for attempt history. If omitted, the booking service uses server
-  time.
+  time. API clients must send timezone-aware datetimes; timezone-less
+  `requested_at` values are validation errors and do not create attempts.
 - Booking create must not reject a request solely because `start_time` or
   `end_time` is earlier than current server time. Delayed offline/PWA
   synchronization still runs normal current backend validation: selected Club
@@ -1067,9 +1079,11 @@ Owning app: `apps/bookings/`. Locked contract:
   `slot_price` remain authoritative for the future occurrence; do not treat
   anchor lifecycle or financial fields as the virtual occurrence state.
 - Completing an ACTIVE recurring booking requires `continue_recurring`. False
-  completes the booking and sets `ENDED`; true atomically creates next week's
-  booking, records the next deposit as an ordinary booking `Transaction` when
-  required, and marks the completed booking `RENEWED`.
+  completes the booking and sets `ENDED`; true atomically creates the next
+  current/future weekly occurrence, records the next deposit as an ordinary
+  booking `Transaction` when required, and marks the completed booking
+  `RENEWED`. If an offline/historical anchor missed several weeks, continuation
+  skips missed past occurrences instead of creating stale booking rows.
 -   `GET /api/v1/clubs/{club_slug}/bookings/{id}/recurrence-next/` is the
   read-only continuation preview for an ACTIVE recurring CONFIRMED booking.
   It returns `can_continue`, `next_start_time`, `next_end_time`,

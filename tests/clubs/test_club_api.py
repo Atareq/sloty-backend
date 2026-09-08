@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -5,8 +6,10 @@ from unittest.mock import patch
 from django.db import IntegrityError, transaction
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import status
 from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.accounts.models import User
 from apps.audit.models import AuditLog
@@ -1567,3 +1570,183 @@ class ClubUserListResponseFieldAPITests(ClubAPITestCase):
         self.assertNotIn("role", user_fields)
         self.assertNotIn("club", user_fields)
         self.assertNotIn("court", user_fields)
+
+
+class ClubMembershipLastSyncAPITests(ClubAPITestCase):
+    def setUp(self):
+        self.owner = self.create_user("sync-owner")
+        self.staff = self.create_user("sync-staff")
+        self.other_staff = self.create_user("sync-other-staff")
+        self.revoked_staff = self.create_user("sync-revoked-staff")
+        self.inactive_user = self.create_user("sync-inactive-user")
+        self.club = self.create_club("Sync Club", slug="sync-club")
+        self.other_club = self.create_club("Other Sync Club", slug="other-sync-club")
+        self.court = self.create_court(self.club, "Sync Court")
+        self.other_court = self.create_court(self.other_club, "Other Sync Court")
+        self.owner_membership = self.create_membership(
+            self.owner,
+            self.club,
+            ClubMembership.Role.OWNER,
+        )
+        self.staff_membership = self.create_membership(
+            self.staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+        self.other_staff_membership = self.create_membership(
+            self.other_staff,
+            self.other_club,
+            ClubMembership.Role.STAFF,
+            court=self.other_court,
+        )
+        self.revoked_membership = self.create_membership(
+            self.revoked_staff,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+            is_active=False,
+        )
+        self.inactive_user_membership = self.create_membership(
+            self.inactive_user,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court,
+        )
+
+    def court_list_url(self, club):
+        return reverse("club-court-list", kwargs={"club_slug": club.slug})
+
+    def test_successful_club_scoped_contact_updates_selected_membership_last_sync(self):
+        sync_time = timezone.datetime(
+            2026,
+            9,
+            8,
+            12,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        with patch("apps.clubs.mixins.timezone.now", return_value=sync_time):
+            response = self.client.get(self.court_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.staff_membership.refresh_from_db()
+        self.other_staff_membership.refresh_from_db()
+        self.assertEqual(self.staff_membership.last_sync_at, sync_time)
+        self.assertIsNone(self.other_staff_membership.last_sync_at)
+
+    def test_recent_last_sync_is_not_rewritten_on_every_request(self):
+        original_sync_time = timezone.datetime(
+            2026,
+            9,
+            8,
+            12,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        request_time = original_sync_time + timedelta(minutes=2)
+        self.staff_membership.last_sync_at = original_sync_time
+        self.staff_membership.save(update_fields=["last_sync_at"])
+        self.client.force_authenticate(user=self.staff)
+
+        with patch("apps.clubs.mixins.timezone.now", return_value=request_time):
+            response = self.client.get(self.court_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.staff_membership.refresh_from_db()
+        self.assertEqual(self.staff_membership.last_sync_at, original_sync_time)
+
+    def test_failed_access_does_not_update_last_sync(self):
+        unauthenticated_response = self.client.get(self.court_list_url(self.club))
+
+        self.client.force_authenticate(user=self.revoked_staff)
+        revoked_response = self.client.get(self.court_list_url(self.club))
+
+        self.revoked_membership.refresh_from_db()
+        self.assertEqual(
+            unauthenticated_response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+        self.assertEqual(revoked_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIsNone(self.revoked_membership.last_sync_at)
+
+    def test_inactive_authenticated_user_does_not_update_last_sync(self):
+        token = AccessToken.for_user(self.inactive_user)
+        self.inactive_user.is_active = False
+        self.inactive_user.save(update_fields=["is_active"])
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        response = self.client.get(self.court_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["code"], "USER_INACTIVE")
+        self.inactive_user_membership.refresh_from_db()
+        self.assertIsNone(self.inactive_user_membership.last_sync_at)
+
+    def test_selected_club_contact_does_not_update_other_club_membership(self):
+        sync_time = timezone.datetime(
+            2026,
+            9,
+            8,
+            13,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        self.create_membership(
+            self.staff,
+            self.other_club,
+            ClubMembership.Role.OWNER,
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        with patch("apps.clubs.mixins.timezone.now", return_value=sync_time):
+            response = self.client.get(self.court_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        selected_membership = ClubMembership.objects.get(
+            user=self.staff,
+            club=self.club,
+        )
+        other_membership = ClubMembership.objects.get(
+            user=self.staff,
+            club=self.other_club,
+        )
+        self.assertEqual(selected_membership.last_sync_at, sync_time)
+        self.assertIsNone(other_membership.last_sync_at)
+
+    def test_me_and_club_user_responses_expose_membership_last_sync_at(self):
+        sync_time = timezone.datetime(
+            2026,
+            9,
+            8,
+            14,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        self.staff_membership.last_sync_at = sync_time
+        self.staff_membership.save(update_fields=["last_sync_at"])
+
+        self.client.force_authenticate(user=self.staff)
+        me_response = self.client.get(reverse("me"))
+        self.client.force_authenticate(user=self.owner)
+        club_users_response = self.client.get(
+            self.club_user_list_url(self.club),
+            {"role": ClubMembership.Role.STAFF},
+        )
+
+        self.assertEqual(me_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(club_users_response.status_code, status.HTTP_200_OK)
+        membership = next(
+            item
+            for item in me_response.data["memberships"]
+            if item["id"] == self.staff_membership.id
+        )
+        club_user = next(
+            item
+            for item in club_users_response.data["results"]
+            if item["membership_id"] == self.staff_membership.id
+        )
+        self.assertEqual(parse_datetime(membership["last_sync_at"]), sync_time)
+        self.assertEqual(parse_datetime(club_user["last_sync_at"]), sync_time)

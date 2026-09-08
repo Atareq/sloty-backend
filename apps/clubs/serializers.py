@@ -201,6 +201,7 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
             "manager_can_settle_transactions",
             "manager_can_change_pricing",
             "is_active",
+            "last_sync_at",
             "is_deleted",
             "deleted_at",
             "deleted_by",
@@ -210,6 +211,7 @@ class ClubMembershipSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             "id",
+            "last_sync_at",
             "is_deleted",
             "deleted_at",
             "deleted_by",
@@ -364,6 +366,7 @@ class ClubUserListSerializer(serializers.ModelSerializer):
     club_slug = serializers.SlugField(source="club.slug", read_only=True)
     court_name = serializers.SerializerMethodField()
     membership_is_active = serializers.BooleanField(source="is_active", read_only=True)
+    last_sync_at = serializers.DateTimeField(read_only=True, allow_null=True)
     can_change_pricing = serializers.SerializerMethodField()
     can_manage_working_hours = serializers.SerializerMethodField()
     can_manage_settlements = serializers.SerializerMethodField()
@@ -385,6 +388,7 @@ class ClubUserListSerializer(serializers.ModelSerializer):
             "court",
             "court_name",
             "membership_is_active",
+            "last_sync_at",
             "can_change_pricing",
             "can_manage_working_hours",
             "can_manage_settlements",

@@ -309,6 +309,65 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(attempt.outcome, BookingAttempt.Outcome.SUCCESS)
         self.assertEqual(attempt.booking_id, response.data["id"])
 
+    def test_booking_requested_at_requires_timezone_information(self):
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            requested_at="2026-05-20T18:00:00",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "requested_at")
+        self.assertEqual(Booking.objects.count(), 0)
+        self.assertEqual(BookingAttempt.objects.count(), 0)
+
+    def test_future_requested_at_is_preserved_as_business_timestamp(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        requested_at = self.time_at(23)
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            requested_at=requested_at.isoformat(),
+            client_request_id="39cdf878-348f-4415-97fa-3e775c5d794a",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        attempt = BookingAttempt.objects.get()
+        self.assertEqual(attempt.requested_at, requested_at)
+        self.assertNotEqual(attempt.created, attempt.requested_at)
+
+    def test_serializer_shape_error_does_not_create_booking_attempt(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        payload = self.booking_payload(self.court)
+        payload.pop("customer_name")
+
+        response = self.client.post(
+            self.booking_list_url(self.club),
+            payload,
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "customer_name")
+        self.assertEqual(Booking.objects.count(), 0)
+        self.assertEqual(BookingAttempt.objects.count(), 0)
+
+    def test_invalid_token_does_not_create_booking_attempt(self):
+        self.client.credentials(HTTP_AUTHORIZATION="Bearer invalid-token")
+
+        response = self.post_booking(
+            self.club,
+            self.court,
+            client_request_id="ef5fc7a6-b49a-44d3-a485-330df385edcd",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(Booking.objects.count(), 0)
+        self.assertEqual(BookingAttempt.objects.count(), 0)
+
     def test_booking_create_replays_same_client_request_id_and_payload(self):
         self.client.force_authenticate(user=self.platform_admin)
         client_request_id = "40eb1a39-139e-479f-a3ee-58c119785584"
@@ -1274,6 +1333,32 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         self.assertEqual(response.data["requested_source"], Booking.Source.RECURRING)
         self.assertTrue(response.data["requested_recurring"])
         self.assertIsNone(response.data["resolved_booking"])
+
+    def test_attempt_original_request_cannot_be_patched_or_put(self):
+        attempt = self.create_attempt(
+            self.court,
+            self.staff,
+            customer_name="Immutable Attempt Customer",
+            notes="original notes",
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        patch_response = self.client.patch(
+            self.booking_attempt_detail_url(self.club, attempt),
+            {"customer_name": "Edited Attempt Customer", "notes": "edited"},
+            format="json",
+        )
+        put_response = self.client.put(
+            self.booking_attempt_detail_url(self.club, attempt),
+            {"customer_name": "Edited Attempt Customer", "notes": "edited"},
+            format="json",
+        )
+
+        self.assertEqual(patch_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(put_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.customer_name, "Immutable Attempt Customer")
+        self.assertEqual(attempt.notes, "original notes")
 
     def test_staff_can_dismiss_own_rejected_attempt_without_fake_booking(self):
         attempt = self.create_attempt(self.court, self.staff)
@@ -2475,6 +2560,17 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         base = timezone.now() + timedelta(days=days_ahead)
         return base.replace(hour=hour, minute=0, second=0, microsecond=0)
 
+    def ensure_priced_interval(self, court, start_time, end_time):
+        local_start = timezone.localtime(start_time)
+        local_end = timezone.localtime(end_time)
+        self.create_working_hours(
+            court,
+            weekday=local_start.weekday(),
+            opens_at=local_start.time(),
+            closes_at=local_end.time(),
+            price=court.default_price,
+        )
+
     def test_anonymous_cannot_call_lifecycle_actions(self):
         booking = self.create_booking(
             self.court,
@@ -2901,17 +2997,21 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         )
         self.create_transaction(booking, amount=booking.total_price)
 
-        response = self.post_lifecycle(
-            self.club,
-            booking,
-            "complete",
-            self.platform_admin,
-            {
-                "continue_recurring": True,
-                "next_deposit_payment_method": Transaction.PaymentMethod.CASH,
-                "next_deposit_notes": "Next week deposit",
-            },
-        )
+        with patch(
+            "apps.bookings.services.timezone.now",
+            return_value=booking.end_time + timedelta(minutes=1),
+        ):
+            response = self.post_lifecycle(
+                self.club,
+                booking,
+                "complete",
+                self.platform_admin,
+                {
+                    "continue_recurring": True,
+                    "next_deposit_payment_method": Transaction.PaymentMethod.CASH,
+                    "next_deposit_notes": "Next week deposit",
+                },
+            )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         booking.refresh_from_db()
@@ -2948,9 +3048,13 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         booking_count = Booking.objects.count()
 
         self.client.force_authenticate(user=self.platform_admin)
-        response = self.client.get(
-            self.booking_lifecycle_url(self.club, booking, "recurrence-next")
-        )
+        with patch(
+            "apps.bookings.services.timezone.now",
+            return_value=booking.end_time + timedelta(minutes=1),
+        ):
+            response = self.client.get(
+                self.booking_lifecycle_url(self.club, booking, "recurrence-next")
+            )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["can_continue"])
@@ -2971,6 +3075,132 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         self.assertEqual(booking.status, Booking.Status.CONFIRMED)
         self.assertEqual(booking.recurrence_status, Booking.RecurrenceStatus.ACTIVE)
 
+    def test_historical_recurring_completion_skips_missed_weeks_to_future_occurrence(
+        self,
+    ):
+        self.court.minimum_deposit = Decimal("0.00")
+        self.court.save(update_fields=["minimum_deposit"])
+        sync_now = timezone.datetime(
+            2026,
+            9,
+            8,
+            12,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        old_start = timezone.datetime(
+            2026,
+            8,
+            11,
+            18,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        old_end = old_start + timedelta(hours=1)
+        expected_start = timezone.datetime(
+            2026,
+            9,
+            8,
+            18,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        expected_end = expected_start + timedelta(hours=1)
+        self.ensure_priced_interval(self.court, expected_start, expected_end)
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            start_time=old_start,
+            end_time=old_end,
+        )
+        self.create_transaction(booking, amount=booking.total_price)
+
+        with patch("apps.bookings.services.timezone.now", return_value=sync_now):
+            response = self.post_lifecycle(
+                self.club,
+                booking,
+                "complete",
+                self.platform_admin,
+                {"continue_recurring": True},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        next_booking = booking.next_recurring_booking
+        self.assertEqual(next_booking.start_time, expected_start)
+        self.assertEqual(next_booking.end_time, expected_end)
+        self.assertGreater(next_booking.start_time, sync_now)
+        self.assertEqual(
+            Booking.objects.filter(source=Booking.Source.RECURRING).count(), 2
+        )
+        self.assertFalse(
+            Booking.objects.filter(
+                previous_recurring_booking=booking,
+                start_time__lt=sync_now,
+            ).exists()
+        )
+
+    def test_historical_recurring_completion_can_create_current_occurrence(self):
+        self.court.minimum_deposit = Decimal("0.00")
+        self.court.save(update_fields=["minimum_deposit"])
+        sync_now = timezone.datetime(
+            2026,
+            9,
+            8,
+            18,
+            30,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        old_start = timezone.datetime(
+            2026,
+            8,
+            11,
+            18,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        old_end = old_start + timedelta(hours=1)
+        expected_start = timezone.datetime(
+            2026,
+            9,
+            8,
+            18,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+        expected_end = expected_start + timedelta(hours=1)
+        self.ensure_priced_interval(self.court, expected_start, expected_end)
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            start_time=old_start,
+            end_time=old_end,
+        )
+        self.create_transaction(booking, amount=booking.total_price)
+
+        with patch("apps.bookings.services.timezone.now", return_value=sync_now):
+            response = self.post_lifecycle(
+                self.club,
+                booking,
+                "complete",
+                self.platform_admin,
+                {"continue_recurring": True},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        next_booking = booking.next_recurring_booking
+        self.assertEqual(next_booking.start_time, expected_start)
+        self.assertEqual(next_booking.end_time, expected_end)
+        self.assertLessEqual(next_booking.start_time, sync_now)
+        self.assertGreater(next_booking.end_time, sync_now)
+        self.assertEqual(
+            Booking.objects.filter(source=Booking.Source.RECURRING).count(), 2
+        )
+
     def test_recurrence_next_conflict_uses_stable_unavailable_code(self):
         booking = self.create_booking(
             self.court,
@@ -2988,9 +3218,13 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         )
 
         self.client.force_authenticate(user=self.platform_admin)
-        response = self.client.get(
-            self.booking_lifecycle_url(self.club, booking, "recurrence-next")
-        )
+        with patch(
+            "apps.bookings.services.timezone.now",
+            return_value=booking.end_time + timedelta(minutes=1),
+        ):
+            response = self.client.get(
+                self.booking_lifecycle_url(self.club, booking, "recurrence-next")
+            )
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assert_api_error(response, "NEXT_RECURRING_SLOT_UNAVAILABLE")

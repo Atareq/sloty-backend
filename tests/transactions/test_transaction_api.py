@@ -866,6 +866,40 @@ class TransactionAttemptTraceabilityAPITests(TransactionAPITestCase):
         self.assertEqual(attempt.occurred_at, occurred_at)
         self.assertEqual(attempt.failure_code, "")
 
+    def test_accepted_attempt_updates_payment_custody_and_settlement_candidates(self):
+        self.client.force_authenticate(user=self.staff)
+        create_response = self.post_transaction(
+            self.club,
+            self.booking,
+            client_request_id=str(uuid4()),
+            amount="100.00",
+            payment_reference="ACCEPTED-FINANCIAL-STATE",
+        )
+        transaction_obj = Transaction.objects.get(pk=create_response.data["id"])
+        access = self.make_access(self.owner, self.club)
+
+        custody_transactions = list(
+            get_current_unsettled_transactions(access=access, collected_by=self.staff)
+        )
+        custody = summarize_current_custody_transactions(custody_transactions)
+
+        self.client.force_authenticate(user=self.owner)
+        preview_response = self.client.get(
+            reverse("club-settlement-preview", kwargs={"club_slug": self.club.slug}),
+            {"collected_by": self.staff.id},
+        )
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, Booking.Status.CONFIRMED)
+        self.assertEqual(get_booking_paid_amount(self.booking), Decimal("100.00"))
+        self.assertEqual(custody_transactions, [transaction_obj])
+        self.assertEqual(custody["net_amount"], Decimal("100.00"))
+        self.assertEqual(preview_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(preview_response.data["transaction_count"], 1)
+        self.assertEqual(preview_response.data["total_amount"], "100.00")
+        self.assertEqual(TransactionAttempt.objects.get().transaction, transaction_obj)
+
     def test_rejected_payment_records_attempt_without_fake_transaction(self):
         self.create_transaction(
             self.booking,
@@ -1093,6 +1127,32 @@ class TransactionAttemptTraceabilityAPITests(TransactionAPITestCase):
         self.assertEqual(response.data["payment_reference"], "DETAIL-REF")
         self.assertEqual(response.data["notes"], "original detail")
         self.assertIsNone(response.data["resolved_transaction"])
+
+    def test_attempt_original_request_cannot_be_patched_or_put(self):
+        attempt = self.create_attempt(
+            self.booking,
+            self.staff,
+            amount=Decimal("275.00"),
+            notes="immutable payment attempt",
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        patch_response = self.client.patch(
+            self.transaction_attempt_detail_url(self.club, attempt),
+            {"amount": "75.00", "notes": "edited"},
+            format="json",
+        )
+        put_response = self.client.put(
+            self.transaction_attempt_detail_url(self.club, attempt),
+            {"amount": "75.00", "notes": "edited"},
+            format="json",
+        )
+
+        self.assertEqual(patch_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(put_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.amount, Decimal("275.00"))
+        self.assertEqual(attempt.notes, "immutable payment attempt")
 
     def test_staff_can_dismiss_own_rejected_attempt_without_fake_transaction(self):
         attempt = self.create_attempt(self.booking, self.staff)

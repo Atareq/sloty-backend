@@ -126,6 +126,7 @@ class UserMembershipSerializer(serializers.ModelSerializer):
             "role",
             "club",
             "court",
+            "last_sync_at",
             "permissions",
         )
 

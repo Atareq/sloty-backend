@@ -120,6 +120,7 @@ class ClubMembership(models.Model):
     manager_can_settle_transactions = models.BooleanField(default=False)
     manager_can_change_pricing = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
+    last_sync_at = models.DateTimeField(blank=True, null=True, db_index=True)
     deleted_at = models.DateTimeField(blank=True, null=True, db_index=True)
     deleted_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

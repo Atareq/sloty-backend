@@ -92,7 +92,8 @@ and test authenticated requests by providing a bearer token.
 - `POST /api/v1/auth/token/refresh/` refreshes an access token.
 - `GET /api/v1/me/` returns the authenticated user's identity, platform admin
   flag, account creator, and active club memberships for frontend club
-  selection.
+  selection. Membership rows include read-only `last_sync_at`, the last
+  successful authenticated API contact for that selected club membership.
 - `GET /api/v1/users/` manages base user accounts for platform admin users.
 - `POST /api/v1/users/` creates platform admin users only.
 
@@ -292,6 +293,8 @@ time, `requested_at`, source, recurrence intent, actor, club, and court), the
 backend outcome, failure code/details for rejected attempts, staff resolution,
 and an optional resolved Booking link. Rejected attempts do not reserve slots,
 appear in booking lists, affect availability, or enter financial totals.
+`requested_at` is the staff/business capture time and must include timezone
+information when supplied.
 
 Minimal traceability endpoints:
 
@@ -450,7 +453,9 @@ and whether a digital payment reference will be required
 (`requires_digital_payment_reference`; `requires_payment_reference` is a
 deprecated alias). The preview does not write data. Completing with
 `continue_recurring=true` revalidates the same rules. Clients must not send
-next amounts.
+next amounts. If an offline/historical recurrence anchor has missed several
+weeks, continuation creates only the next current or future weekly occurrence;
+missed past occurrences are not backfilled.
 
 `expire` accepts an empty body and is allowed only for `HOLD` bookings.
 

@@ -19,6 +19,7 @@ from apps.bookings.services import (
     validate_booking_duration,
 )
 from apps.common.exceptions import SlotyAPIException
+from apps.common.serializers import TimezoneAwareDateTimeField
 from apps.courts.models import Court
 from apps.transactions.models import Transaction
 from apps.transactions.services import get_booking_paid_amount
@@ -173,7 +174,7 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         default=False,
         write_only=True,
     )
-    requested_at = serializers.DateTimeField(required=False, write_only=True)
+    requested_at = TimezoneAwareDateTimeField(required=False, write_only=True)
 
     class Meta:
         model = Booking

@@ -407,7 +407,7 @@ def resolve_idempotent_booking_attempt(
         return None
 
     attempt = (
-        BookingAttempt.objects.select_for_update()
+        BookingAttempt.objects.select_for_update(of=("self",))
         .filter(club=club, client_request_id=client_request_id)
         .select_related("booking", "court", "club")
         .first()
@@ -545,7 +545,7 @@ def record_rejected_booking_attempt(
             if client_request_id is not None:
                 club.__class__.objects.select_for_update().get(pk=club.pk)
                 existing_attempt = (
-                    BookingAttempt.objects.select_for_update()
+                    BookingAttempt.objects.select_for_update(of=("self",))
                     .filter(club=club, client_request_id=client_request_id)
                     .first()
                 )
@@ -588,7 +588,7 @@ def record_rejected_booking_attempt(
 def dismiss_booking_attempt(*, access, attempt, actor):
     with transaction.atomic():
         locked_attempt = (
-            BookingAttempt.objects.select_for_update()
+            BookingAttempt.objects.select_for_update(of=("self",))
             .select_related("club", "court", "attempted_by", "booking")
             .get(pk=attempt.pk)
         )
@@ -1553,6 +1553,23 @@ def ensure_booking_can_be_completed(booking):
     return remaining_amount
 
 
+def next_recurring_interval_after_reference(*, booking, reference_time=None):
+    recurrence_step = timedelta(days=7)
+    next_start = booking.start_time + recurrence_step
+    next_end = booking.end_time + recurrence_step
+    reference_time = reference_time or timezone.now()
+
+    if next_end <= reference_time:
+        step_seconds = recurrence_step.total_seconds()
+        missed_steps = (
+            int((reference_time - next_end).total_seconds() // step_seconds) + 1
+        )
+        next_start += recurrence_step * missed_steps
+        next_end += recurrence_step * missed_steps
+
+    return next_start, next_end
+
+
 def plan_next_recurring_occurrence(*, court, booking):
     if not court.is_active or not court.club.is_active:
         raise SlotyAPIException(
@@ -1561,8 +1578,7 @@ def plan_next_recurring_occurrence(*, court, booking):
             message=RECURRENCE_CANNOT_CONTINUE_MESSAGE,
         )
 
-    next_start = booking.start_time + timedelta(days=7)
-    next_end = booking.end_time + timedelta(days=7)
+    next_start, next_end = next_recurring_interval_after_reference(booking=booking)
     try:
         validate_booking_duration(court, next_start, next_end)
         next_price = calculate_booking_price(court, next_start, next_end)

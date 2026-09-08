@@ -1,29 +1,11 @@
 from decimal import Decimal
 
-from django.utils import timezone
-from django.utils.dateparse import parse_datetime
 from rest_framework import serializers
 
 from apps.bookings.models import Booking
+from apps.common.serializers import TimezoneAwareDateTimeField
 from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.services import create_booking_transaction
-
-
-class TimezoneAwareDateTimeField(serializers.DateTimeField):
-    default_error_messages = {
-        **serializers.DateTimeField.default_error_messages,
-        "timezone_required": "Datetime must include timezone information.",
-    }
-
-    def to_internal_value(self, value):
-        if isinstance(value, str):
-            parsed = parse_datetime(value)
-            if parsed is not None and timezone.is_naive(parsed):
-                self.fail("timezone_required")
-        parsed_value = super().to_internal_value(value)
-        if timezone.is_naive(parsed_value):
-            self.fail("timezone_required")
-        return parsed_value
 
 
 class TransactionListSerializer(serializers.ModelSerializer):
