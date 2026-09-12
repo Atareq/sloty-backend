@@ -256,7 +256,7 @@ Current implemented app:
 - Booking list filters currently supported by the API are `court`, `status`,
   `source`, `date`, `date_from`, `date_to`, `needs_action`, `overdue`,
   `has_remaining_amount`, deprecated `remaining_amount_gt`, `ended`,
-  `hold_expiring`, `search`, and `upcoming`.
+  `hold_expiring`, `search`, `upcoming`, and `ordering`.
 - `search` matches `customer_name` (case-insensitive contains),
   `customer_phone` including practical Egyptian phone variants such as
   `01012345678`, spaced digits, and `+201012345678`, and `notes`. It runs on
@@ -851,10 +851,19 @@ pricing periods.
 - `apps.settlements.services.get_current_unsettled_transactions()` is the one
   authoritative Current Custody candidate rule used by summary, preview,
   create, and dashboard current-money fields. It contains no date,
+- `apps.settlements.services.get_unsettled_transactions_queryset()` is the
+  authoritative Current Custody resolver used by build_custody, preview_custody,
+  settle_custody, and summary. Current Custody and Settlement are financially
+  scoped by Club + optional Collector, NOT by Court. A collector's custody
+  includes all unsettled transactions collected by that user across all courts in
+  the Club. (Court filtering applies only when callers such as court-filtered
+  dashboard metrics explicitly request court-specific transaction metrics via
+  `get_current_unsettled_transactions(court=...)`). It contains no date,
   payment-method, or settlement-status parameters. Current Custody includes all
   non-cancelled signed Transactions with no settlement line, regardless of
   age. Optional `court` filtering applies only when explicitly selected and
   authorized; the default is all Courts accessible to the actor.
+  non-cancelled signed Transactions with no settlement line, regardless of age.
 - Current Custody summaries expose candidate count, signed net, payment total,
   refund total, signed payment-method breakdown, earliest candidate time, and
   request time. Zero-net and negative-net collectors remain visible when they
@@ -1115,6 +1124,8 @@ AND transaction is not linked to any settlement line
 ```
 
 Current Custody is the signed sum of all such authorized Transactions and is
+Current Custody is the signed sum of all such unsettled Transactions in the
+selected Club (scoped by Club + optional Collector, not Court) and is
 not date-filtered. It includes every payment method and negative REFUND rows.
 No candidates and candidates with a zero signed net are different states;
 zero-net and negative-net collectors must not disappear.

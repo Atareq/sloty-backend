@@ -2511,6 +2511,8 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         "no_show_at",
         "expired_at",
         "hold_expires_at",
+        "last_status_changed_by",
+        "last_status_changed_by_name",
         "created_by",
         "created",
         "modified",
@@ -4552,6 +4554,141 @@ class BookingFilterTests(BookingAPITestCase):
         )
         self.assertIsNone(confirmed_row["hold_expires_at"])
 
+    def test_ordering_created_orders_by_creation_timestamp_and_tiebreaker(self):
+        b1 = self.booking
+        b2 = self.confirmed_booking
+        b3 = self.create_booking(
+            self.court,
+            customer_phone="+201000000089",
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+        )
+
+        t0 = timezone.now() - timedelta(hours=2)
+        t1 = timezone.now() - timedelta(hours=1)
+
+        Booking.objects.filter(pk=b1.pk).update(created=t0)
+        Booking.objects.filter(pk__in=[b2.pk, b3.pk]).update(created=t1)
+
+        self.assertLess(b2.id, b3.id)
+
+        default_resp = self.client.get(self.booking_list_url(self.club))
+        self.assertEqual(
+            [item["id"] for item in default_resp.data["results"]],
+            [b3.id, b1.id, b2.id],
+        )
+
+        empty_resp = self.client.get(self.booking_list_url(self.club), {"ordering": ""})
+        self.assertEqual(
+            [item["id"] for item in empty_resp.data["results"]],
+            [b3.id, b1.id, b2.id],
+        )
+
+        oldest_resp = self.client.get(
+            self.booking_list_url(self.club), {"ordering": "created"}
+        )
+        self.assertEqual(
+            [item["id"] for item in oldest_resp.data["results"]],
+            [b1.id, b2.id, b3.id],
+        )
+
+        newest_resp = self.client.get(
+            self.booking_list_url(self.club), {"ordering": "-created"}
+        )
+        self.assertEqual(
+            [item["id"] for item in newest_resp.data["results"]],
+            [b3.id, b2.id, b1.id],
+        )
+
+    def test_ordering_with_invalid_choice_returns_400(self):
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"ordering": "start_time"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "ordering")
+
+    def test_ordering_composes_with_filters(self):
+        extra_confirmed = self.create_booking(
+            self.court,
+            customer_phone="+201000000091",
+            start_time=self.time_at(12),
+            end_time=self.time_at(13),
+            status=Booking.Status.CONFIRMED,
+        )
+        t0 = timezone.now() - timedelta(hours=3)
+        t1 = timezone.now() - timedelta(hours=1)
+        Booking.objects.filter(pk=self.confirmed_booking.pk).update(created=t1)
+        Booking.objects.filter(pk=extra_confirmed.pk).update(created=t0)
+
+        oldest_resp = self.client.get(
+            self.booking_list_url(self.club),
+            {"status": Booking.Status.CONFIRMED, "ordering": "created"},
+        )
+        self.assertEqual(oldest_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in oldest_resp.data["results"]],
+            [extra_confirmed.id, self.confirmed_booking.id],
+        )
+
+        newest_resp = self.client.get(
+            self.booking_list_url(self.club),
+            {"status": Booking.Status.CONFIRMED, "ordering": "-created"},
+        )
+        self.assertEqual(newest_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in newest_resp.data["results"]],
+            [self.confirmed_booking.id, extra_confirmed.id],
+        )
+
+    def test_ordering_pagination_stability_across_pages(self):
+        created_time = timezone.now()
+        new_bookings = []
+        for i in range(1, 23):
+            day_offset = timedelta(days=i)
+            b = self.create_booking(
+                self.court,
+                customer_phone=f"+201000{i:06d}",
+                start_time=self.time_at(10) + day_offset,
+                end_time=self.time_at(11) + day_offset,
+            )
+            new_bookings.append(b)
+
+        all_bookings = [self.booking, self.confirmed_booking] + new_bookings
+        Booking.objects.filter(pk__in=[b.pk for b in all_bookings]).update(
+            created=created_time
+        )
+        all_ids_sorted_asc = sorted([b.id for b in all_bookings])
+        all_ids_sorted_desc = sorted([b.id for b in all_bookings], reverse=True)
+
+        page1 = self.client.get(
+            self.booking_list_url(self.club), {"ordering": "created", "page": 1}
+        )
+        page2 = self.client.get(
+            self.booking_list_url(self.club), {"ordering": "created", "page": 2}
+        )
+        self.assertEqual(page1.status_code, status.HTTP_200_OK)
+        self.assertEqual(page2.status_code, status.HTTP_200_OK)
+        results_asc = [item["id"] for item in page1.data["results"]] + [
+            item["id"] for item in page2.data["results"]
+        ]
+        self.assertEqual(results_asc, all_ids_sorted_asc)
+        self.assertEqual(len(set(results_asc)), len(all_bookings))
+
+        page1_desc = self.client.get(
+            self.booking_list_url(self.club), {"ordering": "-created", "page": 1}
+        )
+        page2_desc = self.client.get(
+            self.booking_list_url(self.club), {"ordering": "-created", "page": 2}
+        )
+        self.assertEqual(page1_desc.status_code, status.HTTP_200_OK)
+        self.assertEqual(page2_desc.status_code, status.HTTP_200_OK)
+        results_desc = [item["id"] for item in page1_desc.data["results"]] + [
+            item["id"] for item in page2_desc.data["results"]
+        ]
+        self.assertEqual(results_desc, all_ids_sorted_desc)
+        self.assertEqual(len(set(results_desc)), len(all_bookings))
+
 
 class BookingFilterPatternTests(BookingAPITestCase):
     def test_booking_route_resolves_to_viewset(self):
@@ -4633,7 +4770,14 @@ class BookingFilterPatternTests(BookingAPITestCase):
         self.assertIn("recurrence-next", schema)
         self.assertIn("search", schema)
         self.assertIn("upcoming", schema)
+        self.assertIn("ordering", schema)
         self.assertIn("requires_digital_payment_reference", schema)
+        booking_list_params = schema_doc["paths"][
+            "/api/v1/clubs/{club_slug}/bookings/"
+        ]["get"]["parameters"]
+        ordering_param = next(p for p in booking_list_params if p["name"] == "ordering")
+        self.assertEqual(ordering_param["in"], "query")
+        self.assertEqual(set(ordering_param["schema"]["enum"]), {"created", "-created"})
 
 
 class BookingPaymentSummaryTests(BookingAPITestCase):
@@ -5113,3 +5257,570 @@ class BookingRescheduleRefundEntitlementTests(BookingAPITestCase):
             Decimal("300.00") - refund_preview,
             retained_preview,
         )
+
+
+class BookingLastStatusActorTests(BookingAPITestCase):
+    def setUp(self):
+        super().setUp()
+        self.club = self.create_club("Status Actor Club", slug="status-actor-club")
+        self.court = self.create_court(self.club, "Main Court")
+
+        self.platform_admin = self.create_platform_admin("status-admin")
+        self.owner = self.create_user(
+            "status-owner", first_name="Owner", last_name="User"
+        )
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.staff_a = self.create_user(
+            "staff-a", first_name="Ahmed", last_name="Mohamed"
+        )
+        self.create_membership(
+            self.staff_a, self.club, ClubMembership.Role.STAFF, court=self.court
+        )
+        self.staff_b = self.create_user(
+            "staff-b", first_name="Mahmoud", last_name="Ali"
+        )
+        self.create_membership(
+            self.staff_b, self.club, ClubMembership.Role.STAFF, court=self.court
+        )
+
+    def post_lifecycle(self, club, booking, action_name, user, payload=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.post(
+            self.booking_lifecycle_url(club, booking, action_name),
+            payload or {},
+            format="json",
+        )
+
+    def test_booking_creation_by_internal_user_sets_actor(self):
+        self.client.force_authenticate(user=self.staff_a)
+        response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(10).isoformat(),
+            end_time=self.time_at(11).isoformat(),
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["last_status_changed_by"], self.staff_a.id)
+        self.assertEqual(response.data["last_status_changed_by_name"], "Ahmed Mohamed")
+
+        booking = Booking.objects.get(pk=response.data["id"])
+        self.assertEqual(booking.status, Booking.Status.HOLD)
+        self.assertEqual(booking.last_status_changed_by, self.staff_a)
+        self.assertEqual(
+            booking.last_status_changed_by_type,
+            Booking.LastStatusActorType.INTERNAL_USER,
+        )
+
+    def test_cancellation_updates_actor(self):
+        future_start = timezone.now() + timedelta(days=2)
+        booking = self.create_booking(
+            self.court,
+            created_by=self.staff_a,
+            last_status_changed_by=self.staff_a,
+            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            start_time=future_start,
+            end_time=future_start + timedelta(hours=1),
+        )
+        cancel_resp = self.post_lifecycle(
+            self.club,
+            booking,
+            "cancel",
+            self.staff_b,
+            {"reason": "Cancelled by Mahmoud"},
+        )
+        self.assertEqual(cancel_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(cancel_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(cancel_resp.data["last_status_changed_by_name"], "Mahmoud Ali")
+
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CANCELLED)
+        self.assertEqual(booking.last_status_changed_by, self.staff_b)
+        self.assertEqual(
+            booking.last_status_changed_by_type,
+            Booking.LastStatusActorType.INTERNAL_USER,
+        )
+
+        # Check detail endpoint
+        self.client.force_authenticate(user=self.owner)
+        detail_resp = self.client.get(self.booking_detail_url(self.club, booking))
+        self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(detail_resp.data["last_status_changed_by_name"], "Mahmoud Ali")
+
+    def test_no_show_updates_actor(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            created_by=self.staff_a,
+            last_status_changed_by=self.staff_a,
+            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+        )
+        no_show_resp = self.post_lifecycle(
+            self.club,
+            booking,
+            "no-show",
+            self.staff_b,
+            {"reason": "Customer did not show up"},
+        )
+        self.assertEqual(no_show_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(no_show_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(
+            no_show_resp.data["last_status_changed_by_name"], "Mahmoud Ali"
+        )
+
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.NO_SHOW)
+        self.assertEqual(booking.last_status_changed_by, self.staff_b)
+        self.assertEqual(
+            booking.last_status_changed_by_type,
+            Booking.LastStatusActorType.INTERNAL_USER,
+        )
+
+    def test_completion_updates_actor(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            created_by=self.staff_a,
+            last_status_changed_by=self.staff_a,
+            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+            total_price=Decimal("300.00"),
+        )
+        self.create_transaction(
+            booking,
+            amount=Decimal("300.00"),
+            created_by=self.staff_a,
+        )
+        complete_resp = self.post_lifecycle(
+            self.club,
+            booking,
+            "complete",
+            self.staff_b,
+        )
+        self.assertEqual(complete_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(complete_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(
+            complete_resp.data["last_status_changed_by_name"], "Mahmoud Ali"
+        )
+
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.COMPLETED)
+        self.assertEqual(booking.last_status_changed_by, self.staff_b)
+        self.assertEqual(
+            booking.last_status_changed_by_type,
+            Booking.LastStatusActorType.INTERNAL_USER,
+        )
+
+    def test_confirmed_by_transaction_updates_actor(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            created_by=self.staff_a,
+            last_status_changed_by=self.staff_a,
+            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+            total_price=Decimal("300.00"),
+        )
+        self.client.force_authenticate(user=self.staff_b)
+        tx_url = reverse(
+            "club-transaction-list",
+            kwargs={"club_slug": self.club.slug},
+        )
+        tx_resp = self.client.post(
+            tx_url,
+            {
+                "booking": booking.id,
+                "amount": "100.00",
+                "payment_method": Transaction.PaymentMethod.CASH,
+            },
+        )
+        self.assertEqual(tx_resp.status_code, status.HTTP_201_CREATED)
+
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+        self.assertEqual(booking.last_status_changed_by, self.staff_b)
+        self.assertEqual(
+            booking.last_status_changed_by_type,
+            Booking.LastStatusActorType.INTERNAL_USER,
+        )
+
+        detail_resp = self.client.get(self.booking_detail_url(self.club, booking))
+        self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(detail_resp.data["last_status_changed_by_name"], "Mahmoud Ali")
+
+    def test_automatic_expiry_sets_system_actor(self):
+        from apps.bookings.services import expire_due_hold_bookings
+
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            created_by=self.staff_a,
+            last_status_changed_by=self.staff_a,
+            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+        )
+        # Run automatic hold expiry with a time far in the future
+        expire_due_hold_bookings(now=self.time_at(20) + timedelta(days=10))
+
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.EXPIRED)
+        self.assertIsNone(booking.last_status_changed_by)
+        self.assertEqual(
+            booking.last_status_changed_by_type,
+            Booking.LastStatusActorType.SYSTEM,
+        )
+
+        self.client.force_authenticate(user=self.owner)
+        detail_resp = self.client.get(self.booking_detail_url(self.club, booking))
+        self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(detail_resp.data["last_status_changed_by"])
+        self.assertEqual(
+            detail_resp.data["last_status_changed_by_name"], "System (Automatic)"
+        )
+
+    def test_manual_expiry_sets_internal_user(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            created_by=self.staff_a,
+            last_status_changed_by=self.staff_a,
+            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+        )
+        expire_resp = self.post_lifecycle(
+            self.club,
+            booking,
+            "expire",
+            self.staff_b,
+        )
+        self.assertEqual(expire_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(expire_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(expire_resp.data["last_status_changed_by_name"], "Mahmoud Ali")
+
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.EXPIRED)
+        self.assertEqual(booking.last_status_changed_by, self.staff_b)
+        self.assertEqual(
+            booking.last_status_changed_by_type,
+            Booking.LastStatusActorType.INTERNAL_USER,
+        )
+
+    def test_payment_cancellation_reverting_to_hold(self):
+        from apps.transactions.services import cancel_transaction
+
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            created_by=self.staff_a,
+            last_status_changed_by=self.staff_a,
+            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+            total_price=Decimal("300.00"),
+        )
+        tx = self.create_transaction(
+            booking,
+            amount=Decimal("100.00"),
+            created_by=self.staff_a,
+        )
+
+        class MockAccess:
+            club = self.club
+
+            def can_cancel_transaction(self, t):
+                return True
+
+        cancel_transaction(
+            access=MockAccess(),
+            transaction_obj=tx,
+            reason="Mistake in payment",
+            actor=self.staff_b,
+        )
+
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.HOLD)
+        self.assertEqual(booking.last_status_changed_by, self.staff_b)
+        self.assertEqual(
+            booking.last_status_changed_by_type,
+            Booking.LastStatusActorType.INTERNAL_USER,
+        )
+
+        self.client.force_authenticate(user=self.owner)
+        detail_resp = self.client.get(self.booking_detail_url(self.club, booking))
+        self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(detail_resp.data["last_status_changed_by_name"], "Mahmoud Ali")
+
+    def test_reschedule_preserves_last_status_actor(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            created_by=self.staff_a,
+            last_status_changed_by=self.staff_a,
+            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+        )
+        reschedule_resp = self.post_lifecycle(
+            self.club,
+            booking,
+            "reschedule",
+            self.staff_b,
+            {
+                "court": self.court.id,
+                "start_time": self.time_at(21).isoformat(),
+                "end_time": self.time_at(22).isoformat(),
+                "reason": "Customer wanted 1 hour later",
+            },
+        )
+        self.assertEqual(reschedule_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            reschedule_resp.data["last_status_changed_by"], self.staff_a.id
+        )
+        self.assertEqual(
+            reschedule_resp.data["last_status_changed_by_name"], "Ahmed Mohamed"
+        )
+
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.HOLD)
+        self.assertEqual(booking.last_status_changed_by, self.staff_a)
+        self.assertEqual(
+            booking.last_status_changed_by_type,
+            Booking.LastStatusActorType.INTERNAL_USER,
+        )
+
+    def test_historical_legacy_booking_never_falls_back_to_created_by(self):
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            created_by=self.staff_a,
+            last_status_changed_by=None,
+            last_status_changed_by_type=None,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+        )
+        self.client.force_authenticate(user=self.owner)
+        detail_resp = self.client.get(self.booking_detail_url(self.club, booking))
+        self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(detail_resp.data["last_status_changed_by"])
+        self.assertIsNone(detail_resp.data["last_status_changed_by_name"])
+
+        list_resp = self.client.get(self.booking_list_url(self.club))
+        self.assertEqual(list_resp.status_code, status.HTTP_200_OK)
+        item = [r for r in list_resp.data["results"] if r["id"] == booking.id][0]
+        self.assertIsNone(item["last_status_changed_by"])
+        self.assertIsNone(item["last_status_changed_by_name"])
+
+    def test_no_n_plus_one_queries_on_booking_list(self):
+        # Create 1 booking
+        self.create_booking(
+            self.court,
+            created_by=self.staff_a,
+            last_status_changed_by=self.staff_a,
+            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+        )
+        self.client.force_authenticate(user=self.owner)
+        with CaptureQueriesContext(connection) as capture_one:
+            resp_one = self.client.get(self.booking_list_url(self.club))
+        self.assertEqual(resp_one.status_code, status.HTTP_200_OK)
+        queries_one = len(capture_one)
+
+        # Create 19 more bookings (total 20 bookings)
+        for i in range(1, 20):
+            self.create_booking(
+                self.court,
+                created_by=self.staff_b if i % 2 == 0 else self.staff_a,
+                last_status_changed_by=self.staff_b if i % 2 == 0 else self.staff_a,
+                last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+                start_time=self.time_at(10) + timedelta(days=i),
+                end_time=self.time_at(11) + timedelta(days=i),
+            )
+
+        with CaptureQueriesContext(connection) as capture_twenty:
+            resp_twenty = self.client.get(self.booking_list_url(self.club))
+        self.assertEqual(resp_twenty.status_code, status.HTTP_200_OK)
+        queries_twenty = len(capture_twenty)
+
+        # The query count must be constant (O(1)) and not increase per booking
+        self.assertEqual(queries_one, queries_twenty)
+
+    def test_tenant_isolation(self):
+        other_club = self.create_club("Other Club", slug="other-club")
+        other_court = self.create_court(other_club, "Other Court")
+        other_user = self.create_user(
+            "other-user", first_name="Foreign", last_name="Actor"
+        )
+        self.create_membership(
+            other_user, other_club, ClubMembership.Role.STAFF, court=other_court
+        )
+
+        booking_a = self.create_booking(
+            self.court,
+            created_by=self.staff_a,
+            last_status_changed_by=self.staff_a,
+            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+        )
+        booking_b = self.create_booking(
+            other_court,
+            created_by=other_user,
+            last_status_changed_by=other_user,
+            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+        )
+
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.get(self.booking_list_url(self.club))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.data["results"]
+        result_ids = [r["id"] for r in results]
+        self.assertIn(booking_a.id, result_ids)
+        self.assertNotIn(booking_b.id, result_ids)
+        item_a = [r for r in results if r["id"] == booking_a.id][0]
+        self.assertEqual(item_a["last_status_changed_by"], self.staff_a.id)
+        self.assertEqual(item_a["last_status_changed_by_name"], "Ahmed Mohamed")
+
+
+class BookingMidnightWorkingHourAPITests(BookingAPITestCase):
+    def setUp(self):
+        super().setUp()
+        self.owner = self.create_user("owner_midnight")
+        self.club = self.create_club("Midnight Club", slug="midnight-club")
+        self.court = self.create_court(self.club, "Midnight Court")
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+
+        # 2026-05-20 is Wednesday (weekday = 2)
+        # Open 10:00 to 00:00 (Period 1: 10:00-18:00 @ 200, Period 2: 18:00-00:00 @ 300)
+        self.working_hour = self.create_working_hours(
+            self.court,
+            weekday=2,
+            opens_at=time(10, 0),
+            closes_at=time(0, 0),
+        )
+        self.set_price_periods(
+            self.working_hour,
+            (time(10, 0), time(18, 0), Decimal("200.00")),
+            (time(18, 0), time(0, 0), Decimal("300.00")),
+        )
+
+    def test_slot_generation_generates_slots_through_midnight(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {"court": self.court.id, "date": "2026-05-20"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slots = response.data["slots"]
+        self.assertTrue(len(slots) > 0)
+        last_slot = slots[-1]
+        self.assertEqual(last_slot["start_time"], self.time_at(23))
+        self.assertEqual(
+            last_slot["end_time"],
+            self.time_at(23) + timedelta(hours=1),
+        )
+        self.assertEqual(last_slot["slot_price"], "300.00")
+        self.assertTrue(last_slot["is_available"])
+
+    def test_booking_creation_ending_at_midnight(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(23).isoformat(),
+            end_time=(self.time_at(23) + timedelta(hours=1)).isoformat(),
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["total_price"], "300.00")
+        self.assertEqual(response.data["status"], Booking.Status.HOLD)
+
+    def test_booking_creation_crossing_past_midnight_rejected(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(23).isoformat(),
+            end_time=(self.time_at(23) + timedelta(hours=2)).isoformat(),
+        )
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "BOOKING_MULTIDAY_NOT_SUPPORTED")
+
+    def test_booking_conflict_at_midnight_boundary(self):
+        self.client.force_authenticate(user=self.owner)
+        # Create booking ending at midnight
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(23),
+            end_time=self.time_at(23) + timedelta(hours=1),
+            total_price=Decimal("300.00"),
+        )
+        # Overlapping attempt at same slot is rejected
+        response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(23).isoformat(),
+            end_time=(self.time_at(23) + timedelta(hours=1)).isoformat(),
+        )
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "BOOKING_SLOT_UNAVAILABLE")
+
+    def test_reschedule_to_midnight_slot(self):
+        self.client.force_authenticate(user=self.owner)
+        booking = self.create_booking(
+            self.court,
+            start_time=self.time_at(14),
+            end_time=self.time_at(15),
+            total_price=Decimal("200.00"),
+        )
+        response = self.client.post(
+            self.booking_lifecycle_url(self.club, booking, "reschedule"),
+            {
+                "court": self.court.id,
+                "start_time": self.time_at(23).isoformat(),
+                "end_time": (self.time_at(23) + timedelta(hours=1)).isoformat(),
+                "reason": "Move to late night",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        booking.refresh_from_db()
+        self.assertEqual(booking.start_time, self.time_at(23))
+        self.assertEqual(booking.end_time, self.time_at(23) + timedelta(hours=1))
+        self.assertEqual(booking.total_price, Decimal("300.00"))
+
+    def test_recurring_booking_ending_at_midnight(self):
+        self.client.force_authenticate(user=self.owner)
+        # Also configure next Wednesday (2026-05-27)
+        response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(23).isoformat(),
+            end_time=(self.time_at(23) + timedelta(hours=1)).isoformat(),
+            is_recurring=True,
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["is_recurring"], True)
+
+        # Check next week's slots on 2026-05-27
+        slots_response = self.client.get(
+            self.booking_slots_url(self.club),
+            {"court": self.court.id, "date": "2026-05-27"},
+        )
+        self.assertEqual(slots_response.status_code, status.HTTP_200_OK)
+        next_week_last_slot = slots_response.data["slots"][-1]
+        self.assertEqual(
+            next_week_last_slot["slot_status"],
+            "RECURRING_RESERVED",
+        )
+        self.assertFalse(next_week_last_slot["is_available"])

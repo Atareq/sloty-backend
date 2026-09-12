@@ -9,12 +9,16 @@ Current Custody
 Current Custody is the signed net of all currently unsettled, non-cancelled
 Transaction rows inside the authorized Club scope. The authoritative candidate
 rule is `apps.settlements.services.get_current_unsettled_transactions()`:
+rule is `apps.settlements.services.get_unsettled_transactions_queryset()`:
 
 - `club` is the selected authorized Club;
 - `settlement_line IS NULL`;
 - `is_cancelled = false`;
 - `created_by` is the collector when one is selected;
 - `court` narrows the result only when explicitly selected and authorized.
+- Financial Custody and Settlement are scoped by Club + optional Collector, NOT by Court.
+  A collector's custody includes all unsettled transactions collected by that user in the
+  Club across all courts. Court filtering is never applied to Current Custody or Settlement.
 
 Transaction age, Booking date, dashboard/report periods, payment method, and a
 requested settlement status never redefine Current Custody.
@@ -40,6 +44,8 @@ does not trust preview data or client-supplied Transaction IDs.
 
 Court
 -----
+Court and Financial Custody
+----------------------------
 
 The default management scope includes all Courts accessible to the actor in the
 selected Club. Court filtering is applied only when a Court is explicitly
@@ -47,6 +53,21 @@ selected. Existing Staff Court restrictions remain unchanged.
 Clients request the all-Courts custody scope by omitting the `court` query
 parameter. They must not send `court=null`, choose `courts[0]`, or infer a
 default Court on behalf of the backend.
+Current Custody and Settlement are financially scoped by CLUB + optional COLLECTOR,
+not by COURT. This is intentionally different from operational Transaction and
+Booking authorization.
+
+Operational transaction and booking authorization (e.g. `ClubAccessContext.scoped_transactions_queryset`)
+remains court-scoped for Staff: staff can only view transactions for bookings on
+their assigned court.
+
+However, financial custody represents physical or accountable money held by a collector
+for the Club. A collector holding cash holds it for the entire club, regardless of which
+court's booking generated the payment. Therefore:
+- Staff self-preview resolves ALL unsettled transactions collected by that staff member in the Club.
+- Owner / Manager preview for that staff member resolves the EXACT same transaction set and net amount.
+- Settlement create settles the exact same transaction set.
+- Settlement preview and create may accept an optional `court` for recording court metadata on the Settlement row, but the candidate transaction set is never filtered by Court.
 
 Current Custody API Shape
 -------------------------

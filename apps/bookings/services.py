@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import datetime, time, timedelta
+from datetime import time, timedelta
 from decimal import Decimal
 
 from django.db import IntegrityError, transaction
@@ -28,6 +28,8 @@ from apps.courts.pricing import (
     BOOKING_PRICE_NOT_CONFIGURED_MESSAGE,
     BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID_MESSAGE,
     calculate_booking_price_from_schedule,
+    datetime_for_local_date,
+    operational_end_date,
     slot_price_from_schedule,
     working_hour_bounds,
 )
@@ -660,13 +662,12 @@ def validate_no_availability_conflict(
 def recurring_time_intervals_overlap(start_a, end_a, start_b, end_b):
     local_start_a, local_end_a = localized_interval(start_a, end_a)
     local_start_b, local_end_b = localized_interval(start_b, end_b)
-    if (local_start_b.date() - local_start_a.date()).days % 7 != 0:
+    day_diff = (local_start_b.date() - local_start_a.date()).days
+    if day_diff % 7 != 0:
         return False
-    a_start = datetime.combine(local_start_a.date(), local_start_a.time())
-    a_end = datetime.combine(local_start_a.date(), local_end_a.time())
-    b_start = datetime.combine(local_start_a.date(), local_start_b.time())
-    b_end = datetime.combine(local_start_a.date(), local_end_b.time())
-    return a_start < b_end and a_end > b_start
+    b_start = local_start_b - timedelta(days=day_diff)
+    b_end = local_end_b - timedelta(days=day_diff)
+    return local_start_a < b_end and local_end_a > b_start
 
 
 def find_new_recurrence_conflict(
@@ -771,11 +772,8 @@ def validate_can_start_recurrence(
         )
 
 
-def local_datetime_for_date(value, value_time):
-    naive_value = datetime.combine(value, value_time)
-    if timezone.is_naive(naive_value):
-        return timezone.make_aware(naive_value, timezone.get_current_timezone())
-    return naive_value
+def local_datetime_for_date(value, value_time, *, is_end=False):
+    return datetime_for_local_date(value, value_time, is_end=is_end)
 
 
 def format_slot_label(slot_status):
@@ -825,9 +823,7 @@ def index_bookings_by_local_date(bookings):
         start_local = timezone.localtime(booking.start_time)
         end_local = timezone.localtime(booking.end_time)
         current = start_local.date()
-        last = end_local.date()
-        if end_local.time() == time.min:
-            last = last - timedelta(days=1)
+        last = operational_end_date(end_local)
         if last < current:
             last = current
         while current <= last:
@@ -890,8 +886,8 @@ def generate_booking_slots(*, access, court, date_from, date_to):
             continue
 
         opens_at, closes_at, _pricing_periods = bounds
-        day_open = local_datetime_for_date(current_date, opens_at)
-        day_close = local_datetime_for_date(current_date, closes_at)
+        day_open = local_datetime_for_date(current_date, opens_at, is_end=False)
+        day_close = local_datetime_for_date(current_date, closes_at, is_end=True)
         slot_delta = timedelta(minutes=court.slot_duration_minutes)
         slot_start = day_open
         weekday = current_date.weekday()
@@ -1083,6 +1079,10 @@ def create_booking(
                 total_price=total_price,
                 status=Booking.Status.HOLD,
                 created_by=created_by,
+                last_status_changed_by=created_by,
+                last_status_changed_by_type=(
+                    Booking.LastStatusActorType.INTERNAL_USER if created_by else None
+                ),
                 **booking_data,
             )
             created_booking._sloty_idempotency_reused = False
@@ -1362,11 +1362,17 @@ def cancel_booking(
         locked_booking.status = Booking.Status.CANCELLED
         locked_booking.cancelled_at = now
         locked_booking.cancellation_reason = reason
+        locked_booking.last_status_changed_by = actor
+        locked_booking.last_status_changed_by_type = (
+            Booking.LastStatusActorType.INTERNAL_USER if actor else None
+        )
         recurrence_ended = end_active_recurrence(locked_booking=locked_booking)
         update_fields = [
             "status",
             "cancelled_at",
             "cancellation_reason",
+            "last_status_changed_by",
+            "last_status_changed_by_type",
             "modified",
         ]
         if recurrence_ended:
@@ -1420,8 +1426,20 @@ def no_show_booking(*, access, booking, actor, reason=""):
         locked_booking.status = Booking.Status.NO_SHOW
         locked_booking.no_show_at = timezone.now()
         locked_booking.no_show_reason = (reason or "").strip()
+        locked_booking.last_status_changed_by = actor
+        locked_booking.last_status_changed_by_type = (
+            Booking.LastStatusActorType.INTERNAL_USER if actor else None
+        )
         recurrence_ended = end_active_recurrence(locked_booking=locked_booking)
         update_fields = ["status", "no_show_at", "no_show_reason", "modified"]
+        update_fields = [
+            "status",
+            "no_show_at",
+            "no_show_reason",
+            "last_status_changed_by",
+            "last_status_changed_by_type",
+            "modified",
+        ]
         if recurrence_ended:
             update_fields.append("recurrence_status")
         locked_booking.save(update_fields=update_fields)
@@ -1721,6 +1739,10 @@ def complete_booking(
                 recurrence_status=Booking.RecurrenceStatus.ACTIVE,
                 previous_recurring_booking=locked_booking,
                 created_by=actor,
+                last_status_changed_by=actor,
+                last_status_changed_by_type=(
+                    Booking.LastStatusActorType.INTERNAL_USER if actor else None
+                ),
             )
             required_next_deposit = next_plan["next_required_deposit"]
             if required_next_deposit > 0:
@@ -1768,6 +1790,18 @@ def complete_booking(
                 )
                 next_booking.status = Booking.Status.CONFIRMED
                 next_booking.save(update_fields=["status", "modified"])
+                next_booking.last_status_changed_by = actor
+                next_booking.last_status_changed_by_type = (
+                    Booking.LastStatusActorType.INTERNAL_USER if actor else None
+                )
+                next_booking.save(
+                    update_fields=[
+                        "status",
+                        "last_status_changed_by",
+                        "last_status_changed_by_type",
+                        "modified",
+                    ]
+                )
                 record_audit_log(
                     club=next_payment.club,
                     court=next_payment.court,
@@ -1781,6 +1815,18 @@ def complete_booking(
             else:
                 next_booking.status = Booking.Status.CONFIRMED
                 next_booking.save(update_fields=["status", "modified"])
+                next_booking.last_status_changed_by = actor
+                next_booking.last_status_changed_by_type = (
+                    Booking.LastStatusActorType.INTERNAL_USER if actor else None
+                )
+                next_booking.save(
+                    update_fields=[
+                        "status",
+                        "last_status_changed_by",
+                        "last_status_changed_by_type",
+                        "modified",
+                    ]
+                )
             record_audit_log(
                 club=next_booking.club,
                 court=next_booking.court,
@@ -1795,6 +1841,17 @@ def complete_booking(
         locked_booking.status = Booking.Status.COMPLETED
         locked_booking.completed_at = timezone.now()
         update_fields = ["status", "completed_at", "modified"]
+        locked_booking.last_status_changed_by = actor
+        locked_booking.last_status_changed_by_type = (
+            Booking.LastStatusActorType.INTERNAL_USER if actor else None
+        )
+        update_fields = [
+            "status",
+            "completed_at",
+            "last_status_changed_by",
+            "last_status_changed_by_type",
+            "modified",
+        ]
         if is_active_recurrence:
             locked_booking.recurrence_status = (
                 Booking.RecurrenceStatus.RENEWED
@@ -1847,8 +1904,23 @@ def expire_locked_booking(*, locked_booking, actor, metadata=None):
     before_data = booking_audit_snapshot(locked_booking)
     locked_booking.status = Booking.Status.EXPIRED
     locked_booking.expired_at = timezone.now()
+    if actor is not None:
+        locked_booking.last_status_changed_by = actor
+        locked_booking.last_status_changed_by_type = (
+            Booking.LastStatusActorType.INTERNAL_USER
+        )
+    else:
+        locked_booking.last_status_changed_by = None
+        locked_booking.last_status_changed_by_type = Booking.LastStatusActorType.SYSTEM
     recurrence_ended = end_active_recurrence(locked_booking=locked_booking)
     update_fields = ["status", "expired_at", "modified"]
+    update_fields = [
+        "status",
+        "expired_at",
+        "last_status_changed_by",
+        "last_status_changed_by_type",
+        "modified",
+    ]
     if recurrence_ended:
         update_fields.append("recurrence_status")
     locked_booking.save(update_fields=update_fields)

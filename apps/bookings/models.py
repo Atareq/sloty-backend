@@ -26,6 +26,10 @@ class Booking(models.Model):
         ADMIN_CORRECTION = "ADMIN_CORRECTION", _("Admin correction")
         RECURRING = "RECURRING", _("Recurring")
 
+    class LastStatusActorType(models.TextChoices):
+        INTERNAL_USER = "INTERNAL_USER", _("Internal user")
+        SYSTEM = "SYSTEM", _("System")
+
     class RecurrenceStatus(models.TextChoices):
         ACTIVE = "ACTIVE", _("Active")
         RENEWED = "RENEWED", _("Renewed")
@@ -104,6 +108,19 @@ class Booking(models.Model):
         null=True,
         on_delete=models.SET_NULL,
         related_name="created_bookings",
+    )
+    last_status_changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="last_status_changed_bookings",
+    )
+    last_status_changed_by_type = models.CharField(
+        max_length=32,
+        choices=LastStatusActorType.choices,
+        blank=True,
+        null=True,
     )
     created = models.DateTimeField(auto_now_add=True, db_index=True)
     modified = models.DateTimeField(auto_now=True)

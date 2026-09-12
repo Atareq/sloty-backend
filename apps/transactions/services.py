@@ -761,6 +761,20 @@ def create_booking_transaction(
                 if locked_booking.status == Booking.Status.HOLD:
                     locked_booking.status = Booking.Status.CONFIRMED
                     locked_booking.save(update_fields=["status", "modified"])
+                    locked_booking.last_status_changed_by = created_by
+                    locked_booking.last_status_changed_by_type = (
+                        Booking.LastStatusActorType.INTERNAL_USER
+                        if created_by
+                        else None
+                    )
+                    locked_booking.save(
+                        update_fields=[
+                            "status",
+                            "last_status_changed_by",
+                            "last_status_changed_by_type",
+                            "modified",
+                        ]
+                    )
 
                 return created_transaction
         except IntegrityError as exc:
@@ -806,13 +820,24 @@ def create_booking_transaction(
         raise
 
 
-def recalculate_booking_status_after_transaction_cancel(booking):
+def recalculate_booking_status_after_transaction_cancel(booking, *, actor=None):
     old_status = booking.status
     if booking.status == Booking.Status.CONFIRMED and get_booking_paid_amount(
         booking
     ) == Decimal("0.00"):
         booking.status = Booking.Status.HOLD
-        booking.save(update_fields=["status", "modified"])
+        booking.last_status_changed_by = actor
+        booking.last_status_changed_by_type = (
+            Booking.LastStatusActorType.INTERNAL_USER if actor else None
+        )
+        booking.save(
+            update_fields=[
+                "status",
+                "last_status_changed_by",
+                "last_status_changed_by_type",
+                "modified",
+            ]
+        )
     return old_status, booking.status
 
 
@@ -882,7 +907,8 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
             ]
         )
         _, new_booking_status = recalculate_booking_status_after_transaction_cancel(
-            locked_booking
+            locked_booking,
+            actor=actor,
         )
 
         record_audit_log(

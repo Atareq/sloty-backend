@@ -1540,3 +1540,71 @@ class DashboardQueryScalingTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(len(first_response.data["staff_unsettled_money"]), 1)
         self.assertEqual(len(second_response.data["staff_unsettled_money"]), 30)
         self.assertEqual(len(first), len(second))
+
+
+class DashboardMidnightWorkingHourTests(DashboardDataMixin, DashboardAPITestCase):
+    def setUp(self):
+        super().setUp()
+        self.midnight_court = self.create_court(self.club, "Midnight Court")
+        # Working hours from 18:00 to 00:00 (midnight)
+        working_hour = CourtWorkingHour.objects.create(
+            court=self.midnight_court,
+            weekday=0,  # Monday 2026-07-06
+        )
+        CourtWorkingHourPricePeriod.objects.create(
+            working_hour=working_hour,
+            starts_at=time(18, 0),
+            ends_at=time(0, 0),
+            price=Decimal("300.00"),
+        )
+
+    def test_availability_generates_slots_ending_at_midnight(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        response = self.client.get(
+            self.availability_url(self.club, self.midnight_court),
+            {"date": "2026-07-06"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slots = response.data["slots"]
+        self.assertEqual(len(slots), 6)
+        last_slot = slots[-1]
+        self.assertEqual(
+            last_slot["start_time"],
+            self.time_at(23).isoformat(),
+        )
+        self.assertEqual(
+            last_slot["end_time"],
+            (self.time_at(23) + timedelta(hours=1)).isoformat(),
+        )
+        self.assertTrue(last_slot["is_available"])
+
+        public_response = self.client.get(
+            self.public_availability_url(self.club, self.midnight_court),
+            {"date": "2026-07-06"},
+        )
+        self.assertEqual(public_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(public_response.data["slots"]), 6)
+        self.assertEqual(public_response.data["slots"][-1]["availability"], "AVAILABLE")
+
+    def test_utilization_counts_available_minutes_to_midnight(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        self.create_booking(
+            self.midnight_court,
+            start_time=self.time_at(23),
+            end_time=self.time_at(23) + timedelta(hours=1),
+            status=Booking.Status.CONFIRMED,
+        )
+        response = self.client.get(
+            self.utilization_url(self.club),
+            {"date_from": "2026-07-06", "date_to": "2026-07-06"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = next(
+            item
+            for item in response.data["results"]
+            if item["court"] == self.midnight_court.id
+        )
+        # 18:00 to 24:00 is 6 hours = 360 minutes
+        self.assertEqual(result["available_minutes"], 360)
+        self.assertEqual(result["booked_minutes"], 60)
+        self.assertEqual(result["utilization_percentage"], "16.67")

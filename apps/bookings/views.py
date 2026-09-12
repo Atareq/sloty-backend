@@ -101,6 +101,7 @@ class BookingViewSet(
                     "club",
                     "court",
                     "created_by",
+                    "last_status_changed_by",
                     "previous_recurring_booking",
                     "next_recurring_booking",
                 )
@@ -139,6 +140,8 @@ class BookingViewSet(
             Booking.objects.select_related(
                 "club",
                 "court",
+                "created_by",
+                "last_status_changed_by",
                 "previous_recurring_booking",
                 "next_recurring_booking",
             ),

@@ -1,9 +1,13 @@
 from datetime import datetime, time
 
 import django_filters
+from django.db.models import OuterRef, Subquery
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 
 from apps.audit.models import AuditLog
+from apps.bookings.models import Booking
+from apps.common.search import customer_phone_search_q
 
 
 def day_bounds(date_value):
@@ -31,6 +35,10 @@ class AuditLogFilter(django_filters.FilterSet):
         field_name="created",
         lookup_expr="lte",
     )
+    search = django_filters.CharFilter(
+        method="filter_search",
+        help_text=_("Search audit logs by related booking customer phone."),
+    )
 
     class Meta:
         model = AuditLog
@@ -43,8 +51,22 @@ class AuditLogFilter(django_filters.FilterSet):
             "date",
             "date_from",
             "date_to",
+            "search",
         )
 
     def filter_date(self, queryset, name, value):
         start_of_day, end_of_day = day_bounds(value)
         return queryset.filter(created__gte=start_of_day, created__lte=end_of_day)
+
+    def filter_search(self, queryset, name, value):
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return queryset
+        matching_bookings = Booking.objects.filter(
+            customer_phone_search_q("customer_phone", cleaned),
+            club_id=OuterRef("club_id"),
+        )
+        return queryset.filter(
+            entity_type="Booking",
+            entity_id__in=Subquery(matching_bookings.values("id")),
+        )

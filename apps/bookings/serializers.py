@@ -85,10 +85,34 @@ class BookingRecurrenceReadMixin:
         return next_booking.id if next_booking else None
 
 
+class BookingLastStatusActorMixin(serializers.Serializer):
+    last_status_changed_by = serializers.SerializerMethodField()
+    last_status_changed_by_name = serializers.SerializerMethodField()
+
+    @extend_schema_field(serializers.IntegerField(allow_null=True))
+    def get_last_status_changed_by(self, obj):
+        if obj.last_status_changed_by_type == Booking.LastStatusActorType.INTERNAL_USER:
+            return obj.last_status_changed_by_id
+        return None
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_last_status_changed_by_name(self, obj):
+        if obj.last_status_changed_by_type == Booking.LastStatusActorType.SYSTEM:
+            return "System (Automatic)"
+        if (
+            obj.last_status_changed_by_type == Booking.LastStatusActorType.INTERNAL_USER
+            and obj.last_status_changed_by is not None
+        ):
+            full_name = obj.last_status_changed_by.get_full_name().strip()
+            return full_name or obj.last_status_changed_by.username
+        return None
+
+
 class BookingListSerializer(
     BookingPaymentSummaryMixin,
     BookingHoldExpiresAtMixin,
     BookingRecurrenceReadMixin,
+    BookingLastStatusActorMixin,
     serializers.ModelSerializer,
 ):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
@@ -120,6 +144,8 @@ class BookingListSerializer(
             "client_request_id",
             "hold_expires_at",
             "notes",
+            "last_status_changed_by",
+            "last_status_changed_by_name",
             "created_by",
             "created",
         )
@@ -130,6 +156,7 @@ class BookingDetailSerializer(
     BookingPaymentSummaryMixin,
     BookingHoldExpiresAtMixin,
     BookingRecurrenceReadMixin,
+    BookingLastStatusActorMixin,
     serializers.ModelSerializer,
 ):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
@@ -166,6 +193,8 @@ class BookingDetailSerializer(
             "no_show_at",
             "expired_at",
             "hold_expires_at",
+            "last_status_changed_by",
+            "last_status_changed_by_name",
             "created_by",
             "created",
             "modified",

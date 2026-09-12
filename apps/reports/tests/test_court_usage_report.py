@@ -497,3 +497,34 @@ class CourtUsageReportTests(APITestCase):
         self.assertEqual(first_response.status_code, status.HTTP_200_OK)
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(first), len(second))
+
+    def test_custom_period_ending_at_midnight(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.get(
+            self.url(),
+            self.params(period="custom", hour_from="18:00", hour_to="00:00"),
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["summary"]["booking_count"], 1)
+        self.assertEqual(response.data["summary"]["occupied_minutes"], 60)
+
+    def test_working_hours_ending_at_midnight_aggregation(self):
+        self.client.force_authenticate(user=self.owner)
+        self.create_working_hours(self.court, opens_at=time(18), closes_at=time(0))
+        booking = self.create_booking(
+            self.court,
+            status=Booking.Status.CONFIRMED,
+            start_time=self.time_at(23),
+            end_time=self.time_at(0, day=7),
+            total_price=Decimal("300.00"),
+        )
+        self.create_transaction(booking, amount=Decimal("300.00"))
+
+        response = self.client.get(self.url(), self.params(court=self.court.id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        court_data = response.data["usage_by_court"][0]
+        self.assertEqual(court_data["available_minutes"], 360)
+        self.assertEqual(court_data["occupied_minutes"], 60)
+        self.assertEqual(court_data["utilization_percentage"], "16.67")
+        self.assertEqual(court_data["booking_count"], 1)
+        self.assertEqual(court_data["financial"]["total_paid_amount"], "300.00")

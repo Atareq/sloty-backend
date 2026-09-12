@@ -5,7 +5,7 @@ from rest_framework import serializers
 from apps.accounts.models import User
 from apps.courts.models import Court
 from apps.settlements.models import Settlement, SettlementTransaction
-from apps.settlements.services import preview_settlement, process_settlement_request
+from apps.settlements.services import preview_custody, settle_custody
 
 
 def user_display_name(user):
@@ -218,10 +218,12 @@ class SettlementCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         request = self.context["request"]
-        return process_settlement_request(
+        return settle_custody(
             access=self.context["club_access"],
             actor=request.user,
-            **validated_data,
+            collector=validated_data["collected_by"],
+            court=validated_data.get("court"),
+            notes=validated_data.get("notes", ""),
         )
 
     def to_representation(self, instance):
@@ -263,10 +265,12 @@ class SettlementPreviewRequestSerializer(serializers.Serializer):
         return attrs
 
     def preview(self):
-        return preview_settlement(
+        request = self.context["request"]
+        return preview_custody(
             access=self.context["club_access"],
-            actor=self.context["request"].user,
-            **self.validated_data,
+            actor=request.user,
+            collector=self.validated_data["collected_by"],
+            court=self.validated_data.get("court"),
         )
 
 

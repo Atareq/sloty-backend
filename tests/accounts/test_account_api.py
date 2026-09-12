@@ -659,3 +659,280 @@ class OrphanBusinessUserIntegrityTests(AccountAPITestCase):
         self.assertNotIn(inactive_user.id, orphan_ids)
         self.assertNotIn(platform_admin.id, orphan_ids)
         self.assertNotIn(scoped_user.id, orphan_ids)
+
+
+class OwnerUserScopingAPITests(AccountAPITestCase):
+    def setUp(self):
+        super().setUp()
+        self.club_a = self.create_club("Club Alpha", "club-alpha")
+        self.club_b = self.create_club("Club Beta", "club-beta")
+        self.club_c = self.create_club("Club Gamma", "club-gamma")
+
+        self.court_a = self.create_court(self.club_a, "Court Alpha")
+        self.court_b = self.create_court(self.club_b, "Court Beta")
+        self.court_c = self.create_court(self.club_c, "Court Gamma")
+
+        # Owner of Club A and Club B
+        self.owner = self.create_user(
+            "owner_user",
+            first_name="Tarek",
+            last_name="Owner",
+        )
+        self.create_membership(self.owner, self.club_a, ClubMembership.Role.OWNER)
+        self.create_membership(self.owner, self.club_b, ClubMembership.Role.OWNER)
+
+        # Manager of Club A
+        self.manager_a = self.create_user(
+            "manager_a",
+            first_name="Mona",
+            last_name="Manager",
+        )
+        self.create_membership(self.manager_a, self.club_a, ClubMembership.Role.MANAGER)
+
+        # Staff in Club A
+        self.staff_a1 = self.create_user(
+            "staff_ahmed",
+            first_name="Ahmed",
+            last_name="Mohamed",
+            email="ahmed@example.com",
+            phone_number="+201012345678",
+        )
+        self.create_membership(
+            self.staff_a1,
+            self.club_a,
+            ClubMembership.Role.STAFF,
+            court=self.court_a,
+        )
+
+        self.staff_a2 = self.create_user(
+            "staff_alo",
+            first_name="Alo",
+            last_name="Hassan",
+            email="alo@example.com",
+            phone_number="+201098765432",
+        )
+        self.create_membership(
+            self.staff_a2,
+            self.club_a,
+            ClubMembership.Role.STAFF,
+            court=self.court_a,
+        )
+
+        # Staff in Club B
+        self.staff_b = self.create_user(
+            "staff_beta",
+            first_name="Beta",
+            last_name="Staff",
+            email="beta@example.com",
+            phone_number="+201122334455",
+        )
+        self.create_membership(
+            self.staff_b,
+            self.club_b,
+            ClubMembership.Role.STAFF,
+            court=self.court_b,
+        )
+
+        # Staff in Club C (unrelated club)
+        self.staff_c = self.create_user(
+            "staff_gamma",
+            first_name="Alo",
+            last_name="External",
+            email="gamma@example.com",
+            phone_number="+201233445566",
+        )
+        self.create_membership(
+            self.staff_c,
+            self.club_c,
+            ClubMembership.Role.STAFF,
+            court=self.court_c,
+        )
+
+        # External Owner of Club C
+        self.owner_c = self.create_user("owner_c")
+        self.create_membership(self.owner_c, self.club_c, ClubMembership.Role.OWNER)
+
+        # Platform Admin
+        self.platform_admin = self.create_platform_admin()
+
+    def list_ids(self, response):
+        return {item["id"] for item in response.data["results"]}
+
+    def test_owner_can_list_staff_across_owned_clubs(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.get(reverse("user-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = self.list_ids(response)
+        self.assertIn(self.staff_a1.id, ids)
+        self.assertIn(self.staff_a2.id, ids)
+        self.assertIn(self.staff_b.id, ids)
+        self.assertNotIn(self.staff_c.id, ids)
+        self.assertNotIn(self.manager_a.id, ids)
+        self.assertNotIn(self.owner.id, ids)
+        self.assertNotIn(self.owner_c.id, ids)
+        self.assertNotIn(self.platform_admin.id, ids)
+
+    def test_owner_can_search_staff_by_name(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.get(reverse("user-list"), {"search": "alo"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = self.list_ids(response)
+        self.assertEqual(ids, {self.staff_a2.id})
+        self.assertNotIn(self.staff_c.id, ids)
+
+    def test_owner_can_search_staff_by_phone_variants(self):
+        self.client.force_authenticate(user=self.owner)
+        resp_local = self.client.get(reverse("user-list"), {"search": "01012345678"})
+        self.assertEqual(resp_local.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(resp_local), {self.staff_a1.id})
+
+        resp_intl = self.client.get(reverse("user-list"), {"search": "+201012345678"})
+        self.assertEqual(self.list_ids(resp_intl), {self.staff_a1.id})
+
+        resp_spaced = self.client.get(reverse("user-list"), {"search": "010 1234 5678"})
+        self.assertEqual(self.list_ids(resp_spaced), {self.staff_a1.id})
+
+    def test_owner_cannot_escape_scope_with_role_filter(self):
+        self.client.force_authenticate(user=self.owner)
+        resp_owner = self.client.get(reverse("user-list"), {"role": "OWNER"})
+        self.assertEqual(resp_owner.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(resp_owner), set())
+
+        resp_mgr = self.client.get(reverse("user-list"), {"role": "MANAGER"})
+        self.assertEqual(resp_mgr.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(resp_mgr), set())
+
+        resp_staff = self.client.get(reverse("user-list"), {"role": "STAFF"})
+        self.assertEqual(resp_staff.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self.list_ids(resp_staff),
+            {self.staff_a1.id, self.staff_a2.id, self.staff_b.id},
+        )
+
+    def test_owner_cannot_escape_scope_with_club_filter(self):
+        self.client.force_authenticate(user=self.owner)
+        resp_c = self.client.get(reverse("user-list"), {"club": "club-gamma"})
+        self.assertEqual(resp_c.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(resp_c), set())
+
+        resp_a = self.client.get(reverse("user-list"), {"club": "club-alpha"})
+        self.assertEqual(resp_a.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(resp_a), {self.staff_a1.id, self.staff_a2.id})
+
+        resp_b = self.client.get(reverse("user-list"), {"club": self.club_b.id})
+        self.assertEqual(resp_b.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(resp_b), {self.staff_b.id})
+
+    def test_owner_can_filter_by_is_active(self):
+        self.staff_a2.is_active = False
+        self.staff_a2.save(update_fields=["is_active"])
+
+        self.client.force_authenticate(user=self.owner)
+        resp_active = self.client.get(reverse("user-list"), {"is_active": "true"})
+        self.assertEqual(resp_active.status_code, status.HTTP_200_OK)
+        self.assertIn(self.staff_a1.id, self.list_ids(resp_active))
+        self.assertNotIn(self.staff_a2.id, self.list_ids(resp_active))
+
+        resp_inactive = self.client.get(reverse("user-list"), {"is_active": "false"})
+        self.assertEqual(resp_inactive.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(resp_inactive), {self.staff_a2.id})
+
+    def test_owner_can_retrieve_own_staff_detail(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.get(
+            reverse("user-detail", kwargs={"pk": self.staff_a1.pk})
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], self.staff_a1.id)
+        self.assertEqual(response.data["username"], self.staff_a1.username)
+
+    def test_owner_cannot_retrieve_out_of_scope_user(self):
+        self.client.force_authenticate(user=self.owner)
+        resp_c = self.client.get(reverse("user-detail", kwargs={"pk": self.staff_c.pk}))
+        self.assertEqual(resp_c.status_code, status.HTTP_404_NOT_FOUND)
+
+        resp_mgr = self.client.get(
+            reverse("user-detail", kwargs={"pk": self.manager_a.pk})
+        )
+        self.assertEqual(resp_mgr.status_code, status.HTTP_404_NOT_FOUND)
+
+        resp_admin = self.client.get(
+            reverse("user-detail", kwargs={"pk": self.platform_admin.pk})
+        )
+        self.assertEqual(resp_admin.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_owner_cannot_create_or_patch_users(self):
+        self.client.force_authenticate(user=self.owner)
+        create_resp = self.client.post(
+            reverse("user-list"),
+            {
+                "username": "new_staff",
+                "password": "password123",
+                "is_platform_admin": False,
+            },
+            format="json",
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        patch_resp = self.client.patch(
+            reverse("user-detail", kwargs={"pk": self.staff_a1.pk}),
+            {"first_name": "Hacked"},
+            format="json",
+        )
+        self.assertEqual(patch_resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_manager_cannot_access_users_endpoint(self):
+        self.client.force_authenticate(user=self.manager_a)
+        response = self.client.get(reverse("user-list"))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        search_response = self.client.get(reverse("user-list"), {"search": "alo"})
+        self.assertEqual(search_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_staff_cannot_access_users_endpoint(self):
+        self.client.force_authenticate(user=self.staff_a1)
+        response = self.client.get(reverse("user-list"))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_soft_deleted_staff_membership_is_excluded(self):
+        from django.utils import timezone
+
+        ClubMembership.objects.filter(user=self.staff_a2, club=self.club_a).update(
+            deleted_at=timezone.now()
+        )
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.get(reverse("user-list"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = self.list_ids(response)
+        self.assertNotIn(self.staff_a2.id, ids)
+
+    def test_deactivated_owner_cannot_access_users_endpoint(self):
+        ClubMembership.objects.filter(user=self.owner).update(is_active=False)
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.get(reverse("user-list"))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_query_count_is_bounded_for_list(self):
+        self.client.force_authenticate(user=self.owner)
+        with CaptureQueriesContext(connection) as capture_three:
+            resp_three = self.client.get(reverse("user-list"))
+        self.assertEqual(resp_three.status_code, status.HTTP_200_OK)
+        queries_three = len(capture_three)
+
+        for i in range(10):
+            extra_staff = self.create_user(f"extra_staff_{i}")
+            self.create_membership(
+                extra_staff,
+                self.club_a,
+                ClubMembership.Role.STAFF,
+                court=self.court_a,
+            )
+
+        with CaptureQueriesContext(connection) as capture_thirteen:
+            resp_thirteen = self.client.get(reverse("user-list"))
+        self.assertEqual(resp_thirteen.status_code, status.HTTP_200_OK)
+        queries_thirteen = len(capture_thirteen)
+
+        self.assertEqual(queries_three, queries_thirteen)

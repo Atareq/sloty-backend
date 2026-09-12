@@ -1,3 +1,4 @@
+from datetime import time
 from decimal import Decimal
 
 from django.conf import settings
@@ -6,6 +7,7 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 from apps.clubs.models import Club
+from apps.courts.pricing import is_valid_period_bounds
 
 
 class Court(models.Model):
@@ -138,7 +140,10 @@ class CourtWorkingHourPricePeriod(models.Model):
         ordering = ("starts_at", "id")
         constraints = [
             models.CheckConstraint(
-                check=models.Q(starts_at__lt=models.F("ends_at")),
+                check=(
+                    models.Q(starts_at__lt=models.F("ends_at"))
+                    | (models.Q(ends_at=time(0, 0)) & ~models.Q(starts_at=time(0, 0)))
+                ),
                 name="court_price_period_starts_before_ends",
             ),
             models.CheckConstraint(
@@ -153,7 +158,11 @@ class CourtWorkingHourPricePeriod(models.Model):
     def clean(self):
         super().clean()
         errors = {}
-        if self.starts_at and self.ends_at and self.starts_at >= self.ends_at:
+        if (
+            self.starts_at
+            and self.ends_at
+            and not is_valid_period_bounds(self.starts_at, self.ends_at)
+        ):
             errors["starts_at"] = "starts_at must be before ends_at."
         if self.price is not None and self.price < Decimal("0.00"):
             errors["price"] = "Price must be greater than or equal to zero."

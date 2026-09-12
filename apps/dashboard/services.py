@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db.models import Count, DecimalField, F, Q, Sum, Value
@@ -13,7 +13,7 @@ from apps.bookings.filters import (
 )
 from apps.bookings.models import Booking
 from apps.courts.models import CourtWorkingHour
-from apps.courts.pricing import working_hour_bounds
+from apps.courts.pricing import datetime_for_local_date, working_hour_bounds
 from apps.settlements.models import Settlement
 from apps.settlements.services import (
     aggregate_current_custody,
@@ -39,9 +39,8 @@ def money_sum(expression, *, filter=None):
     )
 
 
-def datetime_for_date(date_value, time_value):
-    naive = datetime.combine(date_value, time_value)
-    return timezone.make_aware(naive, timezone.get_current_timezone())
+def datetime_for_date(date_value, time_value, *, is_end=False):
+    return datetime_for_local_date(date_value, time_value, is_end=is_end)
 
 
 def build_court_availability_payload(*, club, court, date):
@@ -81,8 +80,8 @@ def build_court_availability_payload(*, club, court, date):
     base_response["opens_at"] = opens_at
     base_response["closes_at"] = closes_at
     base_response["is_closed"] = False
-    opens_at = datetime_for_date(date, opens_at)
-    closes_at = datetime_for_date(date, closes_at)
+    opens_at = datetime_for_date(date, opens_at, is_end=False)
+    closes_at = datetime_for_date(date, closes_at, is_end=True)
     slot_delta = timedelta(minutes=court.slot_duration_minutes)
 
     blocking_bookings = list(
@@ -862,8 +861,8 @@ def available_minutes_for_court(court, working_hours_by_weekday, date_from, date
         if bounds is None:
             continue
         opens_at, closes_at, _pricing_periods = bounds
-        opens_at = datetime_for_date(date_value, opens_at)
-        closes_at = datetime_for_date(date_value, closes_at)
+        opens_at = datetime_for_date(date_value, opens_at, is_end=False)
+        closes_at = datetime_for_date(date_value, closes_at, is_end=True)
         clipped_start = max(opens_at, date_from)
         clipped_end = min(closes_at, date_to)
         if clipped_start < clipped_end:

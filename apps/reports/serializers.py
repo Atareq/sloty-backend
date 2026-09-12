@@ -7,6 +7,7 @@ from rest_framework.exceptions import PermissionDenied
 
 from apps.accounts.models import User
 from apps.courts.models import Court
+from apps.courts.pricing import is_valid_period_bounds
 from apps.reports.constants import (
     ALLOWED_USAGE_STATUSES,
     DEFAULT_USAGE_STATUSES,
@@ -79,7 +80,7 @@ class CourtUsageReportQuerySerializer(serializers.Serializer):
                     _("hour_from and hour_to are required for custom period."),
                     "CUSTOM_REPORT_HOURS_REQUIRED",
                 )
-            if attrs["hour_from"] >= attrs["hour_to"]:
+            if not is_valid_period_bounds(attrs["hour_from"], attrs["hour_to"]):
                 raise self.coded_error(
                     "hour_to",
                     _("hour_to must be after hour_from."),

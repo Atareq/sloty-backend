@@ -1044,3 +1044,204 @@ class AuditSeedSchemaTests(AuditAPITestCase):
             self.assertIn(field_name, audit_list_fields)
             self.assertIn(field_name, audit_detail_fields)
         self.assertEqual(audit_list_fields["summary"]["type"], "object")
+
+
+class AuditBookingPhoneSearchTests(AuditAPITestCase):
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin("audit-phone-admin")
+        self.club = self.create_club("Audit Phone Club", slug="audit-phone")
+        self.other_club = self.create_club("Other Phone Club", slug="other-phone")
+        self.court = self.create_court(self.club, "Audit Phone Court")
+        self.other_court = self.create_court(self.other_club, "Other Phone Court")
+        self.client.force_authenticate(user=self.platform_admin)
+
+        self.booking_1 = self.create_booking(
+            self.court,
+            customer_name="Customer One",
+            customer_phone="+201012345678",
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+        )
+        self.booking_1_created_log = self.create_audit_log(
+            self.club,
+            court=self.court,
+            actor=self.platform_admin,
+            action=AuditLog.Action.BOOKING_CREATED,
+            entity_type="Booking",
+            entity_id=self.booking_1.id,
+        )
+        self.booking_1_completed_log = self.create_audit_log(
+            self.club,
+            court=self.court,
+            actor=self.platform_admin,
+            action=AuditLog.Action.BOOKING_COMPLETED,
+            entity_type="Booking",
+            entity_id=self.booking_1.id,
+        )
+
+        self.booking_2 = self.create_booking(
+            self.court,
+            customer_name="Customer Two",
+            customer_phone="+201098765432",
+            start_time=self.time_at(12),
+            end_time=self.time_at(13),
+        )
+        self.booking_2_created_log = self.create_audit_log(
+            self.club,
+            court=self.court,
+            actor=self.platform_admin,
+            action=AuditLog.Action.BOOKING_CREATED,
+            entity_type="Booking",
+            entity_id=self.booking_2.id,
+        )
+
+        self.non_booking_log = self.create_audit_log(
+            self.club,
+            court=self.court,
+            actor=self.platform_admin,
+            action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
+            entity_type="Settlement",
+            entity_id=999,
+        )
+
+        self.other_club_booking = self.create_booking(
+            self.other_court,
+            customer_name="Other Club Customer",
+            customer_phone="+201012345678",
+            start_time=self.time_at(14),
+            end_time=self.time_at(15),
+        )
+        self.other_club_log = self.create_audit_log(
+            self.other_club,
+            court=self.other_court,
+            actor=self.platform_admin,
+            action=AuditLog.Action.BOOKING_CREATED,
+            entity_type="Booking",
+            entity_id=self.other_club_booking.id,
+        )
+
+    def test_search_by_exact_egyptian_phone(self):
+        response = self.client.get(
+            self.audit_list_url(self.club),
+            {"search": "01012345678"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self.list_ids(response),
+            {self.booking_1_created_log.id, self.booking_1_completed_log.id},
+        )
+        self.assertNotIn(self.booking_2_created_log.id, self.list_ids(response))
+        self.assertNotIn(self.non_booking_log.id, self.list_ids(response))
+        self.assertNotIn(self.other_club_log.id, self.list_ids(response))
+
+    def test_search_by_plus_20_and_20_prefixes(self):
+        plus_20_response = self.client.get(
+            self.audit_list_url(self.club),
+            {"search": "+201012345678"},
+        )
+        prefix_20_response = self.client.get(
+            self.audit_list_url(self.club),
+            {"search": "201012345678"},
+        )
+        expected_ids = {self.booking_1_created_log.id, self.booking_1_completed_log.id}
+        self.assertEqual(self.list_ids(plus_20_response), expected_ids)
+        self.assertEqual(self.list_ids(prefix_20_response), expected_ids)
+
+    def test_search_by_spaced_and_trimmed_phone(self):
+        spaced_response = self.client.get(
+            self.audit_list_url(self.club),
+            {"search": "010 1234 5678"},
+        )
+        trimmed_response = self.client.get(
+            self.audit_list_url(self.club),
+            {"search": "  01012345678  "},
+        )
+        expected_ids = {self.booking_1_created_log.id, self.booking_1_completed_log.id}
+        self.assertEqual(self.list_ids(spaced_response), expected_ids)
+        self.assertEqual(self.list_ids(trimmed_response), expected_ids)
+
+    def test_search_preserves_non_booking_records_when_search_is_omitted_or_empty(self):
+        omitted_response = self.client.get(self.audit_list_url(self.club))
+        empty_response = self.client.get(
+            self.audit_list_url(self.club),
+            {"search": ""},
+        )
+        whitespace_response = self.client.get(
+            self.audit_list_url(self.club),
+            {"search": "   "},
+        )
+        all_club_ids = {
+            self.booking_1_created_log.id,
+            self.booking_1_completed_log.id,
+            self.booking_2_created_log.id,
+            self.non_booking_log.id,
+        }
+        self.assertEqual(self.list_ids(omitted_response), all_club_ids)
+        self.assertEqual(self.list_ids(empty_response), all_club_ids)
+        self.assertEqual(self.list_ids(whitespace_response), all_club_ids)
+
+    def test_search_respects_club_tenant_isolation(self):
+        club_response = self.client.get(
+            self.audit_list_url(self.club),
+            {"search": "01012345678"},
+        )
+        other_club_response = self.client.get(
+            self.audit_list_url(self.other_club),
+            {"search": "01012345678"},
+        )
+        self.assertEqual(
+            self.list_ids(club_response),
+            {self.booking_1_created_log.id, self.booking_1_completed_log.id},
+        )
+        self.assertEqual(
+            self.list_ids(other_club_response),
+            {self.other_club_log.id},
+        )
+
+    def test_search_combines_with_other_audit_filters(self):
+        combined_response = self.client.get(
+            self.audit_list_url(self.club),
+            {
+                "search": "01012345678",
+                "action": AuditLog.Action.BOOKING_COMPLETED,
+            },
+        )
+        self.assertEqual(
+            self.list_ids(combined_response),
+            {self.booking_1_completed_log.id},
+        )
+
+    def test_search_no_match_returns_empty_results(self):
+        no_match_response = self.client.get(
+            self.audit_list_url(self.club),
+            {"search": "01199999999"},
+        )
+        self.assertEqual(self.list_ids(no_match_response), set())
+
+    def test_search_query_scaling_constant_queries(self):
+        with CaptureQueriesContext(connection) as captured:
+            response = self.client.get(
+                self.audit_list_url(self.club),
+                {"search": "01012345678"},
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        single_page_queries = len(captured)
+
+        # Add more audit rows for the matching booking
+        for _ in range(10):
+            self.create_audit_log(
+                self.club,
+                court=self.court,
+                actor=self.platform_admin,
+                action=AuditLog.Action.BOOKING_COMPLETED,
+                entity_type="Booking",
+                entity_id=self.booking_1.id,
+            )
+
+        with CaptureQueriesContext(connection) as captured_after:
+            response_after = self.client.get(
+                self.audit_list_url(self.club),
+                {"search": "01012345678"},
+            )
+        self.assertEqual(response_after.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(captured_after), single_page_queries)

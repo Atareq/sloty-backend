@@ -736,11 +736,15 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["court"], self.same_club_other_court.id)
         self.assertEqual(response.data["court_name"], self.same_club_other_court.name)
-        self.assertEqual(response.data["transaction_count"], 1)
-        self.assertEqual(response.data["total_amount"], "25.00")
+        self.assertEqual(response.data["transaction_count"], 3)
+        self.assertEqual(response.data["total_amount"], "150.00")
         self.assertEqual(
             {item["id"] for item in response.data["transactions"]},
-            {self.other_court_transaction.id},
+            {
+                self.first_transaction.id,
+                self.second_transaction.id,
+                self.other_court_transaction.id,
+            },
         )
 
     def test_preview_does_not_create_or_mutate_records(self):
@@ -820,8 +824,8 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.assertTrue(response.data["is_self_preview"])
         self.assertFalse(response.data["can_approve"])
         self.assertTrue(response.data["approval_required"])
-        self.assertEqual(response.data["transaction_count"], 2)
-        self.assertEqual(response.data["total_amount"], "125.00")
+        self.assertEqual(response.data["transaction_count"], 3)
+        self.assertEqual(response.data["total_amount"], "150.00")
         self.assertEqual(Settlement.objects.count(), before_settlements)
         self.assertEqual(SettlementTransaction.objects.count(), before_lines)
 
@@ -839,10 +843,10 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         response = self.client.get(self.settlement_preview_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["transaction_count"], 3)
-        self.assertEqual(response.data["booking_payments"], "125.00")
+        self.assertEqual(response.data["transaction_count"], 4)
+        self.assertEqual(response.data["booking_payments"], "150.00")
         self.assertEqual(response.data["booking_refunds"], "-25.00")
-        self.assertEqual(response.data["total_amount"], "100.00")
+        self.assertEqual(response.data["total_amount"], "125.00")
         refund_item = next(
             item for item in response.data["transactions"] if item["kind"] == "REFUND"
         )
@@ -1487,21 +1491,28 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
 
         self.assertEqual(all_courts.status_code, status.HTTP_200_OK)
         self.assertEqual(selected_court.status_code, status.HTTP_200_OK)
+        # Financial custody scope is Club + Collector, not restricted by Court
         self.assertIn(
             other_court_transaction.id,
             {row["id"] for row in all_courts.data["transactions"]},
         )
-        self.assertNotIn(
+        self.assertIn(
             other_court_transaction.id,
+            {row["id"] for row in selected_court.data["transactions"]},
+        )
+        self.assertEqual(
+            {row["id"] for row in all_courts.data["transactions"]},
             {row["id"] for row in selected_court.data["transactions"]},
         )
 
     def test_canonical_candidate_function_has_no_period_or_method_parameters(self):
         import inspect
 
+        from apps.settlements.services import get_unsettled_transactions_queryset
+
         self.assertEqual(
-            set(inspect.signature(get_current_unsettled_transactions).parameters),
-            {"access", "collected_by", "court", "lock"},
+            set(inspect.signature(get_unsettled_transactions_queryset).parameters),
+            {"club", "collector", "lock"},
         )
 
 
@@ -2384,3 +2395,348 @@ class SettlementUnsettledSummaryQueryScalingTests(SettlementAPITestCase):
         self.assertEqual(len(second_response.data["results"]), 30)
         self.assertLessEqual(len(second) - len(first), 2)
         self.assertLess(len(second), len(first) + 30)
+
+
+class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
+    """
+    Comprehensive tests for the Financial Custody Domain Spine:
+    Financial Scope = Club + optional Collector, NOT Court.
+    """
+
+    def setUp(self):
+        self.club = self.create_club("Financial Spine Club", slug="financial-spine")
+        self.other_club = self.create_club(
+            "Other Financial Club", slug="other-financial"
+        )
+
+        self.court_a = self.create_court(self.club, "Court A")
+        self.court_b = self.create_court(self.club, "Court B")
+        self.court_c = self.create_court(self.club, "Court C")
+        self.other_club_court = self.create_court(self.other_club, "Other Club Court")
+
+        self.owner = self.create_user("spine-owner")
+        self.manager = self.create_user("spine-manager")
+        self.staff_a = self.create_user("spine-staff-a")
+        self.staff_b = self.create_user("spine-staff-b")
+        self.other_club_staff = self.create_user("spine-other-staff")
+
+        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.create_membership(
+            self.manager,
+            self.club,
+            ClubMembership.Role.MANAGER,
+            manager_can_settle_transactions=True,
+        )
+        # Staff A is assigned to Court A only
+        self.create_membership(
+            self.staff_a,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court_a,
+        )
+        # Staff B is assigned to Court B only
+        self.create_membership(
+            self.staff_b,
+            self.club,
+            ClubMembership.Role.STAFF,
+            court=self.court_b,
+        )
+        self.create_membership(
+            self.other_club_staff,
+            self.other_club,
+            ClubMembership.Role.STAFF,
+            court=self.other_club_court,
+        )
+
+        self.booking_a = self.create_booking(
+            self.court_a, customer_name="Booking Court A"
+        )
+        self.booking_b = self.create_booking(
+            self.court_b, customer_name="Booking Court B"
+        )
+        self.booking_c = self.create_booking(
+            self.court_c, customer_name="Booking Court C"
+        )
+        self.other_club_booking = self.create_booking(
+            self.other_club_court, customer_name="Other Club Booking"
+        )
+
+        # Staff A collects transactions across Court A, Court B, and Court C
+        self.t1 = self.create_transaction(
+            self.booking_a,
+            amount=Decimal("100.00"),
+            created_by=self.staff_a,
+            payment_reference="SPINE-T1",
+        )
+        self.t2 = self.create_transaction(
+            self.booking_b,
+            amount=Decimal("150.00"),
+            created_by=self.staff_a,
+            payment_reference="SPINE-T2",
+        )
+        self.t3 = self.create_transaction(
+            self.booking_c,
+            amount=Decimal("200.00"),
+            created_by=self.staff_a,
+            payment_reference="SPINE-T3",
+        )
+
+        # Staff B collects on Court B
+        self.t_staff_b = self.create_transaction(
+            self.booking_b,
+            amount=Decimal("300.00"),
+            created_by=self.staff_b,
+            payment_reference="SPINE-STAFF-B",
+        )
+
+        # Other club transaction
+        self.t_other_club = self.create_transaction(
+            self.other_club_booking,
+            amount=Decimal("500.00"),
+            created_by=self.other_club_staff,
+            payment_reference="SPINE-OTHER-CLUB",
+        )
+
+    def test_1_staff_self_preview_includes_transactions_across_all_courts(self):
+        """
+        Staff self-preview must include all transactions collected by Staff
+        in this Club, across all courts.
+        """
+        self.client.force_authenticate(user=self.staff_a)
+        response = self.client.get(self.settlement_preview_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["transaction_count"], 3)
+        self.assertEqual(response.data["total_amount"], "450.00")
+        self.assertEqual(response.data["net_amount"], "450.00")
+        transaction_ids = {tx["id"] for tx in response.data["transactions"]}
+        self.assertEqual(transaction_ids, {self.t1.id, self.t2.id, self.t3.id})
+
+    def test_2_owner_preview_matches_staff_self_preview_exactly(self):
+        """
+        Owner previewing Staff A must resolve to the exact same transaction set
+        and net_amount as Staff A self-preview.
+        """
+        self.client.force_authenticate(user=self.staff_a)
+        staff_preview = self.client.get(self.settlement_preview_url(self.club))
+
+        self.client.force_authenticate(user=self.owner)
+        owner_preview = self.client.get(
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff_a.id},
+        )
+
+        self.assertEqual(staff_preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(owner_preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            staff_preview.data["transaction_count"],
+            owner_preview.data["transaction_count"],
+        )
+        self.assertEqual(
+            staff_preview.data["net_amount"], owner_preview.data["net_amount"]
+        )
+        self.assertEqual(
+            {tx["id"] for tx in staff_preview.data["transactions"]},
+            {tx["id"] for tx in owner_preview.data["transactions"]},
+        )
+
+    def test_3_manager_preview_matches_staff_self_preview_exactly(self):
+        """
+        Manager previewing Staff A must resolve to the exact same transaction
+        set and net_amount as Staff A self-preview.
+        """
+        self.client.force_authenticate(user=self.staff_a)
+        staff_preview = self.client.get(self.settlement_preview_url(self.club))
+
+        self.client.force_authenticate(user=self.manager)
+        manager_preview = self.client.get(
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff_a.id},
+        )
+
+        self.assertEqual(staff_preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(manager_preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            staff_preview.data["transaction_count"],
+            manager_preview.data["transaction_count"],
+        )
+        self.assertEqual(
+            staff_preview.data["net_amount"], manager_preview.data["net_amount"]
+        )
+        self.assertEqual(
+            {tx["id"] for tx in staff_preview.data["transactions"]},
+            {tx["id"] for tx in manager_preview.data["transactions"]},
+        )
+
+    def test_4_collector_isolation(self):
+        """Staff A preview must not receive transactions collected by Staff B."""
+        self.client.force_authenticate(user=self.staff_a)
+        preview_a = self.client.get(self.settlement_preview_url(self.club))
+
+        self.assertEqual(preview_a.status_code, status.HTTP_200_OK)
+        ids_a = {tx["id"] for tx in preview_a.data["transactions"]}
+        self.assertNotIn(self.t_staff_b.id, ids_a)
+
+        self.client.force_authenticate(user=self.staff_b)
+        preview_b = self.client.get(self.settlement_preview_url(self.club))
+
+        self.assertEqual(preview_b.status_code, status.HTTP_200_OK)
+        ids_b = {tx["id"] for tx in preview_b.data["transactions"]}
+        self.assertEqual(ids_b, {self.t_staff_b.id})
+
+    def test_5_club_isolation(self):
+        """Transactions from another Club must never appear in Current Custody."""
+        self.client.force_authenticate(user=self.owner)
+        preview = self.client.get(
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff_a.id},
+        )
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        ids = {tx["id"] for tx in preview.data["transactions"]}
+        self.assertNotIn(self.t_other_club.id, ids)
+
+        # Cross-club preview via get_unsettled_transactions_queryset
+        from apps.settlements.services import get_unsettled_transactions_queryset
+
+        club_txs = set(
+            get_unsettled_transactions_queryset(club=self.club).values_list(
+                "id", flat=True
+            )
+        )
+        self.assertNotIn(self.t_other_club.id, club_txs)
+
+    def test_6_no_collector_includes_all_eligible_unsettled_transactions_in_club(self):
+        """
+        collector=None must include all eligible unsettled transactions in the
+        scoped Club across all courts.
+        """
+        from apps.settlements.services import (
+            build_custody,
+            get_unsettled_transactions_queryset,
+        )
+
+        all_club_unsettled = set(
+            get_unsettled_transactions_queryset(
+                club=self.club, collector=None
+            ).values_list("id", flat=True)
+        )
+        self.assertEqual(
+            all_club_unsettled, {self.t1.id, self.t2.id, self.t3.id, self.t_staff_b.id}
+        )
+
+        custody_snapshot = build_custody(club=self.club, collector=None)
+        self.assertEqual(custody_snapshot["transaction_count"], 4)
+        self.assertEqual(custody_snapshot["net_amount"], Decimal("750.00"))
+
+    def test_7_settlement_mutation_consumes_same_candidate_source_as_preview(self):
+        """
+        Settlement create consumes the exact same eligible transactions as
+        preview.
+        """
+        self.client.force_authenticate(user=self.owner)
+        preview = self.client.get(
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff_a.id},
+        )
+        preview_ids = {tx["id"] for tx in preview.data["transactions"]}
+        self.assertEqual(preview_ids, {self.t1.id, self.t2.id, self.t3.id})
+
+        create_response = self.client.post(
+            self.settlement_list_url(self.club),
+            {"collected_by": self.staff_a.id},
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        settlement_obj = Settlement.objects.get(pk=create_response.data["id"])
+        settled_ids = set(settlement_obj.lines.values_list("transaction_id", flat=True))
+        self.assertEqual(settled_ids, preview_ids)
+        self.assertEqual(settlement_obj.total_amount, Decimal("450.00"))
+
+    def test_8_operational_transaction_authorization_remains_court_restricted(self):
+        """
+        Staff A cannot access cross-court transactions via operational
+        Transaction APIs.
+        """
+        self.client.force_authenticate(user=self.staff_a)
+        transactions_url = reverse(
+            "club-transaction-list", kwargs={"club_slug": self.club.slug}
+        )
+        response = self.client.get(transactions_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # Staff A is assigned to Court A only, so operational list must only
+        # show Court A transactions
+        accessible_tx_ids = {row["id"] for row in response.data["results"]}
+        self.assertIn(self.t1.id, accessible_tx_ids)
+        self.assertNotIn(self.t2.id, accessible_tx_ids)
+        self.assertNotIn(self.t3.id, accessible_tx_ids)
+        self.assertNotIn(self.t_staff_b.id, accessible_tx_ids)
+
+    def test_9_no_court_restriction_in_custody(self):
+        """
+        Current custody for a collector contains transactions across multiple
+        courts even if court is provided.
+        """
+        self.client.force_authenticate(user=self.owner)
+        preview = self.client.get(
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff_a.id, "court": self.court_a.id},
+        )
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        # Transactions on Court B and Court C must not be filtered out of custody
+        tx_ids = {tx["id"] for tx in preview.data["transactions"]}
+        self.assertEqual(tx_ids, {self.t1.id, self.t2.id, self.t3.id})
+        self.assertEqual(preview.data["transaction_count"], 3)
+        self.assertEqual(preview.data["total_amount"], "450.00")
+
+    def test_10_preview_is_strictly_side_effect_free(self):
+        """
+        Preview must not create Settlements, SettlementTransactions, or mutate
+        financial state.
+        """
+        settlements_count_before = Settlement.objects.count()
+        lines_count_before = SettlementTransaction.objects.count()
+        booking_statuses_before = {b.id: b.status for b in Booking.objects.all()}
+
+        self.client.force_authenticate(user=self.staff_a)
+        response = self.client.get(self.settlement_preview_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Settlement.objects.count(), settlements_count_before)
+        self.assertEqual(SettlementTransaction.objects.count(), lines_count_before)
+        for booking in Booking.objects.all():
+            self.assertEqual(booking.status, booking_statuses_before[booking.id])
+
+        # Transactions remain unsettled
+        self.assertFalse(
+            Transaction.objects.filter(
+                id__in=[self.t1.id, self.t2.id, self.t3.id],
+                settlement_line__isnull=False,
+            ).exists()
+        )
+
+    def test_11_repeated_preview_consistency(self):
+        """
+        Two successive previews with no intervening mutations must return
+        identical transaction sets and net amounts.
+        """
+        self.client.force_authenticate(user=self.owner)
+        preview_1 = self.client.get(
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff_a.id},
+        )
+        preview_2 = self.client.get(
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff_a.id},
+        )
+
+        self.assertEqual(preview_1.status_code, status.HTTP_200_OK)
+        self.assertEqual(preview_2.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            preview_1.data["transaction_count"], preview_2.data["transaction_count"]
+        )
+        self.assertEqual(preview_1.data["net_amount"], preview_2.data["net_amount"])
+        self.assertEqual(
+            {tx["id"] for tx in preview_1.data["transactions"]},
+            {tx["id"] for tx in preview_2.data["transactions"]},
+        )

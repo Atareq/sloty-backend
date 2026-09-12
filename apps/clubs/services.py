@@ -11,10 +11,7 @@ from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log
 from apps.clubs.models import ClubMembership
 from apps.common.exceptions import SlotyAPIException
-from apps.settlements.services import (
-    aggregate_current_custody,
-    get_current_unsettled_transactions,
-)
+from apps.settlements.services import build_custody
 
 MEMBERSHIP_ALREADY_DELETED_MESSAGE = _("This club membership has already been removed.")
 MEMBERSHIP_DELETED_CANNOT_REACTIVATE_MESSAGE = _(
@@ -149,11 +146,9 @@ def validate_membership_offboarding_current_custody(*, access, membership):
     if membership.role != ClubMembership.Role.STAFF:
         return
 
-    current_custody = aggregate_current_custody(
-        get_current_unsettled_transactions(
-            access=access,
-            collected_by=membership.user,
-        )
+    current_custody = build_custody(
+        club=access.club,
+        collector=membership.user,
     )
     if current_custody["net_amount"] == Decimal("0.00"):
         return

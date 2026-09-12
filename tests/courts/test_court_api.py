@@ -1,3 +1,4 @@
+from datetime import time
 from decimal import Decimal
 
 from django.urls import reverse
@@ -819,3 +820,159 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
                 )
 
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_nested_put_accepts_pricing_periods_ending_at_midnight(self):
+        self.client.force_authenticate(user=self.owner)
+        periods = [
+            {
+                "starts_at": "10:00:00",
+                "ends_at": "18:00:00",
+                "price": "200.00",
+            },
+            {
+                "starts_at": "18:00:00",
+                "ends_at": "00:00:00",
+                "price": "300.00",
+            },
+        ]
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(self.open_row(pricing_periods=periods)),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        monday = CourtWorkingHour.objects.get(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.MONDAY,
+        )
+        saved_periods = list(monday.pricing_periods.order_by("starts_at"))
+        self.assertEqual(len(saved_periods), 2)
+        self.assertEqual(saved_periods[0].starts_at, time(10, 0))
+        self.assertEqual(saved_periods[0].ends_at, time(18, 0))
+        self.assertEqual(saved_periods[1].starts_at, time(18, 0))
+        self.assertEqual(saved_periods[1].ends_at, time(0, 0))
+
+    def test_nested_put_rejects_pricing_period_after_midnight(self):
+        self.client.force_authenticate(user=self.owner)
+        periods = [
+            {
+                "starts_at": "10:00:00",
+                "ends_at": "00:00:00",
+                "price": "200.00",
+            },
+            {
+                "starts_at": "00:00:00",
+                "ends_at": "02:00:00",
+                "price": "300.00",
+            },
+        ]
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(self.open_row(pricing_periods=periods)),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("WORKING_HOUR_PRICING_OVERLAP", str(response.data))
+
+    def test_nested_put_rejects_misaligned_midnight_pricing_period(self):
+        self.court.slot_duration_minutes = 45
+        self.court.save(update_fields=["slot_duration_minutes"])
+        self.client.force_authenticate(user=self.owner)
+        periods = [
+            {
+                "starts_at": "10:00:00",
+                "ends_at": "00:00:00",
+                "price": "200.00",
+            },
+        ]
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(self.open_row(pricing_periods=periods)),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn(
+            "PRICING_PERIOD_NOT_ALIGNED_WITH_SLOT_DURATION",
+            str(response.data),
+        )
+
+    def test_model_clean_accepts_midnight_end_boundary(self):
+        working_hour = CourtWorkingHour.objects.create(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.TUESDAY,
+        )
+        period = CourtWorkingHourPricePeriod(
+            working_hour=working_hour,
+            starts_at=time(18, 0),
+            ends_at=time(0, 0),
+            price="200.00",
+        )
+        # Should not raise
+        period.full_clean()
+        period.save()
+        self.assertEqual(period.ends_at, time(0, 0))
+
+    def test_model_clean_rejects_zero_duration_at_midnight(self):
+        from django.core.exceptions import ValidationError
+
+        working_hour = CourtWorkingHour.objects.create(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.WEDNESDAY,
+        )
+        period = CourtWorkingHourPricePeriod(
+            working_hour=working_hour,
+            starts_at=time(0, 0),
+            ends_at=time(0, 0),
+            price="200.00",
+        )
+        with self.assertRaises(ValidationError):
+            period.full_clean()
+
+    def test_db_constraint_rejects_zero_duration_at_midnight(self):
+        from django.db import IntegrityError
+
+        working_hour = CourtWorkingHour.objects.create(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.THURSDAY,
+        )
+        with self.assertRaises(IntegrityError):
+            CourtWorkingHourPricePeriod.objects.create(
+                working_hour=working_hour,
+                starts_at=time(0, 0),
+                ends_at=time(0, 0),
+                price="200.00",
+            )
+
+    def test_early_morning_start_from_midnight_is_valid(self):
+        # 00:00 -> 06:00 is a valid normal same-day start
+        working_hour = CourtWorkingHour.objects.create(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.FRIDAY,
+        )
+        period = CourtWorkingHourPricePeriod(
+            working_hour=working_hour,
+            starts_at=time(0, 0),
+            ends_at=time(6, 0),
+            price="150.00",
+        )
+        period.full_clean()
+        period.save()
+        self.assertEqual(period.starts_at, time(0, 0))
+        self.assertEqual(period.ends_at, time(6, 0))
+
+    def test_arbitrary_overnight_period_rejected(self):
+        # 18:00 -> 01:00 is arbitrary overnight operation and must be rejected
+        from django.core.exceptions import ValidationError
+
+        working_hour = CourtWorkingHour.objects.create(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.SATURDAY,
+        )
+        period = CourtWorkingHourPricePeriod(
+            working_hour=working_hour,
+            starts_at=time(18, 0),
+            ends_at=time(1, 0),
+            price="200.00",
+        )
+        with self.assertRaises(ValidationError):
+            period.full_clean()

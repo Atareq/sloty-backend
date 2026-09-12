@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 from django.utils import timezone
@@ -8,6 +8,8 @@ from rest_framework import status
 from apps.common.exceptions import SlotyAPIException
 
 MONEY_QUANT = Decimal("0.01")
+MIDNIGHT_END_MINUTES = 24 * 60  # 1440
+MIDNIGHT_TIME = time(0, 0)
 
 BOOKING_OUTSIDE_WORKING_HOURS_MESSAGE = _(
     "The selected booking time is outside the court working hours."
@@ -23,23 +25,105 @@ BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID_MESSAGE = _(
 )
 
 
-def time_to_minutes(value):
+def time_to_minutes(value: time, *, is_end: bool = False) -> int:
+    """
+    Convert a time object to minutes from the start of the day.
+    When is_end=True, 00:00 represents 24:00 / next-day midnight (1440 minutes).
+    """
+    if is_end and value == MIDNIGHT_TIME:
+        return MIDNIGHT_END_MINUTES
     return value.hour * 60 + value.minute
 
 
-def datetime_for_local_date(date_value, time_value):
+def datetime_for_local_date(
+    date_value: date,
+    time_value: time,
+    *,
+    is_end: bool = False,
+) -> datetime:
+    """
+    Combine a local date and time into a timezone-aware datetime.
+    When is_end=True and time_value is 00:00, advances to next-day midnight
+    (date + 1 day at 00:00).
+    """
+    target_date = date_value
+    if is_end and time_value == MIDNIGHT_TIME:
+        target_date = date_value + timedelta(days=1)
     return timezone.make_aware(
-        datetime.combine(date_value, time_value),
+        datetime.combine(target_date, time_value),
         timezone.get_current_timezone(),
     )
+
+
+def is_valid_period_bounds(starts_at: time, ends_at: time) -> bool:
+    """
+    Validate that starts_at is strictly before ends_at, evaluating ends_at
+    with the shared end-boundary semantic (00:00 = 24:00 / 1440 min).
+    00:00 -> 00:00 is invalid.
+    """
+    if starts_at == MIDNIGHT_TIME and ends_at == MIDNIGHT_TIME:
+        return False
+    return time_to_minutes(starts_at, is_end=False) < time_to_minutes(
+        ends_at, is_end=True
+    )
+
+
+def compare_adjacent_period_bounds(current_start: time, previous_end: time) -> int:
+    """
+    Compare current period start with previous period end.
+    Returns:
+        < 0 if periods overlap
+        > 0 if there is a gap
+        == 0 if contiguous
+    """
+    return time_to_minutes(current_start, is_end=False) - time_to_minutes(
+        previous_end, is_end=True
+    )
+
+
+def is_same_operational_day(local_start: datetime, local_end: datetime) -> bool:
+    """
+    Check if an interval belongs to a single operational day.
+    Ending at 00:00 on date + 1 belongs to the operational day of start (24:00).
+    Crossing past next-day midnight is disallowed (no general overnight scheduling).
+    """
+    if local_start.date() == local_end.date():
+        return True
+    return (
+        local_end.date() == local_start.date() + timedelta(days=1)
+        and local_end.time() == MIDNIGHT_TIME
+    )
+
+
+def operational_end_date(local_datetime: datetime) -> date:
+    """
+    Return the operational date for an end datetime.
+    If the end datetime is at midnight (00:00:00), it belongs to the previous
+    calendar day.
+    """
+    if local_datetime.time() == MIDNIGHT_TIME:
+        return local_datetime.date() - timedelta(days=1)
+    return local_datetime.date()
 
 
 def minutes_between(start, end):
     return int((end - start).total_seconds() // 60)
 
 
-def is_aligned_to_slot_grid(*, boundary, opens_at, slot_duration_minutes):
-    offset = time_to_minutes(boundary) - time_to_minutes(opens_at)
+def is_aligned_to_slot_grid(
+    *,
+    boundary: time,
+    opens_at: time,
+    slot_duration_minutes: int,
+    is_end: bool = False,
+) -> bool:
+    """
+    Check if a boundary aligns with the court slot duration from opens_at.
+    When is_end=True, 00:00 is evaluated as 24:00 (1440 minutes).
+    """
+    offset = time_to_minutes(boundary, is_end=is_end) - time_to_minutes(
+        opens_at, is_end=False
+    )
     return offset >= 0 and offset % slot_duration_minutes == 0
 
 
@@ -81,7 +165,7 @@ def calculate_booking_price_from_schedule(
 ) -> Decimal:
     local_start = timezone.localtime(start_time)
     local_end = timezone.localtime(end_time)
-    if local_start.date() != local_end.date():
+    if not is_same_operational_day(local_start, local_end):
         raise_booking_error(
             "BOOKING_MULTIDAY_NOT_SUPPORTED",
             BOOKING_MULTIDAY_NOT_SUPPORTED_MESSAGE,
@@ -100,8 +184,8 @@ def calculate_booking_price_from_schedule(
         )
 
     opens_at, closes_at, pricing_periods = bounds
-    day_open = datetime_for_local_date(local_start.date(), opens_at)
-    day_close = datetime_for_local_date(local_start.date(), closes_at)
+    day_open = datetime_for_local_date(local_start.date(), opens_at, is_end=False)
+    day_close = datetime_for_local_date(local_start.date(), closes_at, is_end=True)
     if local_start < day_open or local_end > day_close:
         raise_booking_error(
             "BOOKING_OUTSIDE_WORKING_HOURS",
@@ -120,11 +204,13 @@ def calculate_booking_price_from_schedule(
             boundary=local_start.time(),
             opens_at=opens_at,
             slot_duration_minutes=slot_duration,
+            is_end=False,
         )
         and is_aligned_to_slot_grid(
             boundary=local_end.time(),
             opens_at=opens_at,
             slot_duration_minutes=slot_duration,
+            is_end=True,
         )
     ):
         raise_booking_error(
@@ -135,8 +221,12 @@ def calculate_booking_price_from_schedule(
     total = Decimal("0.00")
     cursor = local_start
     for period in pricing_periods:
-        period_start = datetime_for_local_date(local_start.date(), period.starts_at)
-        period_end = datetime_for_local_date(local_start.date(), period.ends_at)
+        period_start = datetime_for_local_date(
+            local_start.date(), period.starts_at, is_end=False
+        )
+        period_end = datetime_for_local_date(
+            local_start.date(), period.ends_at, is_end=True
+        )
         if period_end <= cursor:
             continue
         if period_start > cursor:

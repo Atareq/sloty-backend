@@ -1,12 +1,12 @@
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 from django.utils import timezone
 from django.utils.translation import pgettext
 
 from apps.bookings.models import Booking
-from apps.courts.pricing import working_hour_bounds
+from apps.courts.pricing import datetime_for_local_date, working_hour_bounds
 from apps.reports.constants import (
     DEMAND_BUCKET_MINUTES,
     EVENING_START_TIME,
@@ -57,11 +57,8 @@ def user_name(user):
     return user.get_full_name() or user.username
 
 
-def aware_combine(date_value, time_value):
-    return timezone.make_aware(
-        datetime.combine(date_value, time_value),
-        timezone.get_current_timezone(),
-    )
+def aware_combine(date_value, time_value, *, is_end=False):
+    return datetime_for_local_date(date_value, time_value, is_end=is_end)
 
 
 def daterange(start_date, end_date):
@@ -93,17 +90,29 @@ def period_window_for_working_hours(
         return None
 
     opens_at, closes_at, _pricing_periods = bounds
-    opens_at = aware_combine(date_value, opens_at)
-    closes_at = aware_combine(date_value, closes_at)
+    opens_at = aware_combine(date_value, opens_at, is_end=False)
+    closes_at = aware_combine(date_value, closes_at, is_end=True)
     if period == PERIOD_DAYTIME:
         period_start = opens_at
-        period_end = min(closes_at, aware_combine(date_value, EVENING_START_TIME))
+        period_end = min(
+            closes_at,
+            aware_combine(date_value, EVENING_START_TIME, is_end=False),
+        )
     elif period == PERIOD_EVENING:
-        period_start = max(opens_at, aware_combine(date_value, EVENING_START_TIME))
+        period_start = max(
+            opens_at,
+            aware_combine(date_value, EVENING_START_TIME, is_end=False),
+        )
         period_end = closes_at
     elif period == PERIOD_CUSTOM:
-        period_start = max(opens_at, aware_combine(date_value, hour_from))
-        period_end = min(closes_at, aware_combine(date_value, hour_to))
+        period_start = max(
+            opens_at,
+            aware_combine(date_value, hour_from, is_end=False),
+        )
+        period_end = min(
+            closes_at,
+            aware_combine(date_value, hour_to, is_end=True),
+        )
     else:
         period_start = opens_at
         period_end = closes_at
@@ -292,8 +301,8 @@ def get_court_usage_report(*, access, query):
                 by_staff[staff_key]["occupied_minutes"] += minutes
 
                 for key, bucket_metrics in demand_buckets.items():
-                    bucket_start = aware_combine(current_date, key[0])
-                    bucket_end = aware_combine(current_date, key[1])
+                    bucket_start = aware_combine(current_date, key[0], is_end=False)
+                    bucket_end = aware_combine(current_date, key[1], is_end=True)
                     bucket_minutes = overlap_minutes(
                         booking.start_time,
                         booking.end_time,

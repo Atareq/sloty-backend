@@ -115,6 +115,17 @@ class BookingFilter(django_filters.FilterSet):
             "in the future, including in-progress bookings."
         ),
     )
+    ordering = django_filters.ChoiceFilter(
+        choices=(
+            ("created", "created"),
+            ("-created", "-created"),
+        ),
+        method="filter_ordering",
+        help_text=(
+            "Order bookings by creation time ('created' for oldest first, "
+            "'-created' for newest first)."
+        ),
+    )
 
     class Meta:
         model = Booking
@@ -133,6 +144,7 @@ class BookingFilter(django_filters.FilterSet):
             "hold_expiring",
             "search",
             "upcoming",
+            "ordering",
         )
 
     def filter_date(self, queryset, name, value):
@@ -224,6 +236,13 @@ class BookingFilter(django_filters.FilterSet):
             status__in={Booking.Status.HOLD, Booking.Status.CONFIRMED},
             end_time__gt=timezone.now(),
         )
+
+    def filter_ordering(self, queryset, name, value):
+        if value == "created":
+            return queryset.order_by("created", "id")
+        if value == "-created":
+            return queryset.order_by("-created", "-id")
+        return queryset
 
 
 class BookingAttemptFilter(django_filters.FilterSet):

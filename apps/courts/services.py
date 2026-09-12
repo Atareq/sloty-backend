@@ -3,7 +3,12 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
-from apps.courts.pricing import is_aligned_to_slot_grid
+from apps.courts.pricing import (
+    compare_adjacent_period_bounds,
+    is_aligned_to_slot_grid,
+    is_valid_period_bounds,
+    time_to_minutes,
+)
 
 
 def format_time(value):
@@ -61,7 +66,10 @@ def serialize_weekly_working_hours(court):
 def validate_pricing_periods_for_row(*, court, row):
     pricing_periods = sorted(
         row.get("pricing_periods", []),
-        key=lambda period: (period["starts_at"], period["ends_at"]),
+        key=lambda period: (
+            time_to_minutes(period["starts_at"], is_end=False),
+            time_to_minutes(period["ends_at"], is_end=True),
+        ),
     )
 
     if not pricing_periods:
@@ -73,7 +81,7 @@ def validate_pricing_periods_for_row(*, court, row):
         starts_at = period["starts_at"]
         ends_at = period["ends_at"]
         price = period["price"]
-        if starts_at >= ends_at:
+        if not is_valid_period_bounds(starts_at, ends_at):
             raise coded_error(
                 "pricing_periods",
                 _("Pricing periods must cover the full working period without gaps."),
@@ -90,11 +98,13 @@ def validate_pricing_periods_for_row(*, court, row):
                 boundary=starts_at,
                 opens_at=day_start,
                 slot_duration_minutes=court.slot_duration_minutes,
+                is_end=False,
             )
             and is_aligned_to_slot_grid(
                 boundary=ends_at,
                 opens_at=day_start,
                 slot_duration_minutes=court.slot_duration_minutes,
+                is_end=True,
             )
         ):
             raise coded_error(
@@ -102,13 +112,14 @@ def validate_pricing_periods_for_row(*, court, row):
                 _("Pricing-period boundaries must align with the court slot duration."),
                 "PRICING_PERIOD_NOT_ALIGNED_WITH_SLOT_DURATION",
             )
-        if starts_at < previous_end:
+        boundary_gap = compare_adjacent_period_bounds(starts_at, previous_end)
+        if boundary_gap < 0:
             raise coded_error(
                 "pricing_periods",
                 _("Pricing periods must not overlap."),
                 "WORKING_HOUR_PRICING_OVERLAP",
             )
-        if starts_at != previous_end:
+        if boundary_gap != 0:
             raise coded_error(
                 "pricing_periods",
                 _("Pricing periods must cover the full working period without gaps."),
@@ -184,11 +195,13 @@ def validate_slot_duration_against_pricing(court, slot_duration_minutes):
                     boundary=period.starts_at,
                     opens_at=opens_at,
                     slot_duration_minutes=slot_duration_minutes,
+                    is_end=False,
                 )
                 and is_aligned_to_slot_grid(
                     boundary=period.ends_at,
                     opens_at=opens_at,
                     slot_duration_minutes=slot_duration_minutes,
+                    is_end=True,
                 )
             ):
                 raise coded_error(
