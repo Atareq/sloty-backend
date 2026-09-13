@@ -18,13 +18,14 @@ Code + Database Models
 Tests
         ↓
 Approved Product/API Contracts (under docs/)
+  including docs/architecture/security-architecture-v1.md (target only)
         ↓
 Scoped Domain AGENTS.md (under apps/<domain>/)
         ↓
 Root AGENTS.md
 ```
 
-**Rule**: Code and tests are authoritative. If any `AGENTS.md` file conflicts with actual implementation, **the code wins**. Update the documentation to reflect reality rather than introducing breaking code changes or assumptions.
+**Rule**: Code and tests are authoritative for **active behavior**. If any `AGENTS.md` or architecture reference conflicts with actual implementation, **the code wins**. Architecture docs under `docs/architecture/` describe the **future target and migration direction** — do not force implementation changes solely to match them. Update living guides to reflect reality rather than introducing breaking code changes or assumptions.
 
 ---
 
@@ -34,16 +35,18 @@ Domain-specific business rules, models, invariants, and workflows live inside sc
 
 | Domain / App | Path | Primary Ownership |
 | :--- | :--- | :--- |
-| **Accounts** | [`apps/accounts/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/AGENTS.md) | User identity, platform super admin authority, auth endpoints, orphan diagnostics. |
-| **Clubs** | [`apps/clubs/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/AGENTS.md) | Club tenant definitions, `ClubMembership` lifecycle, location validation, access engine. |
+| **Accounts** | [`apps/accounts/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/AGENTS.md) | Authentication identity (`User`), platform admin authority, auth endpoints, orphan diagnostics. |
+| **Players** | [`apps/players/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/AGENTS.md) | Global `PlayerProfile` + club-local `ClubPlayer` customer identity (see [`ADR-001`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-001-player-identity-and-booking-link.md)). |
+| **Clubs** | [`apps/clubs/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/AGENTS.md) | Club tenant definitions, `ClubMembership` operational actor lifecycle, location validation, legacy access engine. |
 | **Courts** | [`apps/courts/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/AGENTS.md) | Court settings, working hours, pricing periods, midnight/slot time semantics. |
-| **Bookings** | [`apps/bookings/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/bookings/AGENTS.md) | Booking lifecycle, agreed price snapshots, overlap protection, recurrence, hold expiry. |
+| **Bookings** | [`apps/bookings/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/bookings/AGENTS.md) | Booking lifecycle, agreed price snapshots, overlap protection, recurrence, hold expiry (see [`ADR-002`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-002-booking-identity-and-authorization-migration.md)). |
 | **Transactions** | [`apps/transactions/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/transactions/AGENTS.md) | Immutable financial ledger, payment thresholds, cancellation/correction workflow. |
 | **Settlements** | [`apps/settlements/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/settlements/AGENTS.md) | Cash closing, Current Custody (Club + Collector), preview/settle workflows. |
 | **Audit** | [`apps/audit/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/audit/AGENTS.md) | Append-only activity trail, stable machine actions, event snapshot architecture. |
 | **Dashboard** | [`apps/dashboard/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/dashboard/AGENTS.md) | Operational vs. financial metrics, calendar, public availability contract. |
 | **Reports** | [`apps/reports/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/reports/AGENTS.md) | Analytical reports, court usage metrics, 31-day window, occupancy clipping. |
-| **Common** | [`apps/common/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/AGENTS.md) | Egypt locations, standardized error handling (`SlotyAPIException`), search, middleware. |
+| **Common** | [`apps/common/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/AGENTS.md) | Egypt locations, standardized error handling (`SlotyAPIException`), Authorization Spine, search, middleware. |
+| **Security Architecture (target)** | [`docs/architecture/security-architecture-v1.md`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md) | Long-term identity/auth/authorization target and migration guideline (not active-behavior authority). |
 
 ---
 
@@ -59,75 +62,38 @@ The repository follows a modular-monolith pattern:
 URL Routing → ViewSet/APIView → Serializer Validation → Service / Validator → ORM Models → Response Serializer
 ```
 
-- **URLs**: Route requests and extract URL parameters (e.g. `club_slug`).
+- **URLs**: Route requests and extract URL parameters (e.g. `club_slug`). Prefer exposing security boundaries in the URL when those boundaries are required (see [`security-architecture-v1.md`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md) §13).
 - **Views**: Handle HTTP status, permissions, serializer selection, and queryset scoping.
 - **Serializers**: Validate request payload shape and format response representation. The code, serializers, and OpenAPI schemas (`/api/v1/schema/`) are the authoritative contract for request/response shapes.
-- **Services**: Own transactions, domain state machines, concurrency locks, multi-model writes, and audit recording.
+- **Services**: Own transactions, domain state machines, concurrency locks, multi-model writes, and audit recording. Services must **not** normally branch on `role == ...` or re-check club/court access — that belongs to the Authorization Spine / domain authorization boundary.
 - **Models**: Define database constraints, schema invariants, indexes, and relationships.
 
 ---
 
-## 5. Authorization Spine Architecture
+## 5. Security Architecture Reference
 
-The authorization spine separates facts, permissions, query scoping, and business rules:
+> [!IMPORTANT]
+> The official long-term security architecture lives in:
+> [`docs/architecture/security-architecture-v1.md`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md)
+>
+> That document is the **future target and migration guideline**. The current repository is transitional. **Code + tests remain the source of truth for active behavior.** Do not force domain refactors solely because they do not yet match the target.
 
-```text
-Authentication
-      ↓
-request.user / profile
-Scope Resolution (resolve_club_scope)
-      ↓
-URL club scope
-RequestAccessContext (Facts: user, role, club, court, admin flag)
-      ↓
-SlotyBasePermission (Role + ViewSet + DRF Action → allow / deny)
-      ↓
-QuerySet Scoping (data filtering)
-      ↓
-Object Permission (extension hook for domain object rules)
-      ↓
-Serializer Validation
-      ↓
-Domain Service (state machines, concurrency locks, audit logs)
-```
-### Architectural Principles
-- **Context = Facts**: [`RequestAccessContext`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/context.py) provides factual data only. It contains **no** endpoint authorization decisions (`can_create_booking()`, etc.) and **no** queryset logic.
-- **Scope Resolution**: [`resolve_club_scope()`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/resolver.py) enforces URL club authority for `/api/v1/clubs/{club_slug}/...`. Missing or revoked access raises `CLUB_ACCESS_REVOKED` (403). Context is cached on `request._access_context`.
-- **Role Matrix**: Centralized in [`ROLE_PERMISSIONS`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/matrix.py) with four operational roles (`ADMIN`, `OWNER`, `MANAGER`, `STAFF`). Strict default deny. No capability abstraction.
-- **Base Permission**: [`SlotyBasePermission`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/permissions.py) evaluates `Role + ViewSet + DRF Action`. Exposes `has_object_permission` as a clean extension hook.
+### Summary (do not duplicate the full reference here)
 
-### Authorization Spine v2 — Resource Query Foundation
+| Concern | Target direction |
+| :--- | :--- |
+| Identity | `User` (auth) · `ClubMembership` (ops) · `PlayerProfile` → `ClubPlayer` (customers, future) |
+| Authentication | Answers “who?” only (JWT, future password change). Never club/court/resource access. |
+| Authorization | Spine owns WHERE/WHO · domain `authorization.py` owns special business rules only |
+| Resource config | Implemented `authorization_config` contract only — no second metadata format |
+| ViewSets | Compose optional `SlotyScopedResourceMixin` with DRF; do not replace `ModelViewSet` |
+| Migration | Courts ✅ · Transactions ✅ · Settlements ✅ · Identity Foundation ✅ → Bookings → Dashboard → Reports → Audit → remove legacy |
 
-Authorization Spine v2 adds a model-driven, fail-closed resource-query layer without modifying DRF's `ModelViewSet`:
+### Transitional runtime notes
 
-```text
-Resolved RequestAccessContext
-        ↓
-Model authorization_config
-        ↓
-Club boundary (always first)
-        ↓
-Required resource scope (for example, Court)
-        ↓
-Mandatory model relation loading
-        ↓
-ViewSet relation additions and narrowing-only domain filters
-```
-
-- **Scope keys**: `ResourceScope.NONE` denies generic resource access, `ResourceScope.CLUB` applies the club boundary, and `ResourceScope.COURT` applies club then court access. Future string scope keys are supported when both the model path and corresponding context fact are declared.
-- **Model contract**: Every participating model exposes one `authorization_config` mapping. It declares `scopes`, `default_scope`, `select_related`, and `prefetch_related`. Scope `path` values are ORM relation traversals to the scoped entity; use the reserved `"self"` path when the resource is itself the boundary entity. Do not use model-name conditionals in the resolver.
-- **Generic resolver**: `scoped_queryset(access_context, model, scope=...)` reconstructs the model's default manager, validates the context and configuration, applies the club boundary first, and returns `.none()` for an unauthorized context or `NONE` scope. Missing/malformed configuration raises `ImproperlyConfigured`; it never falls back to an unscoped queryset.
-- **ViewSet composition**: Put `SlotyScopedResourceMixin` before DRF `ModelViewSet`, `GenericViewSet`, or `ViewSet`. Declare `authorization_model` or a model `queryset`; optionally set `authorization_scope`, `authorization_select_related`, and `authorization_prefetch_related`.
-- **Override rule**: Do not replace `get_queryset()` or start again from `Model.objects`. Narrow the secured queryset through `filter_scoped_queryset(queryset)`. Standard DRF filter backends remain downstream and may only narrow it. Add action-specific relation loading through the `get_authorization_*_related()` hooks.
-- **Participation is explicit**: The v2 foundation is available under `apps/common/authorization/`. **Courts** (`Court`, `CourtWorkingHour`) is migrated to v2 (`authorization_config` + `SlotyScopedResourceMixin`). No other Booking, Settlement, or remaining domain model/ViewSet is migrated by this foundation task.
-- **Operational resources vs. financial custody**: Court is an **operational** resource — its scope boundary is `Club → Court` and Staff may be granted court-level access to it (`ResourceScope.COURT`). Financial custody (cash-in-hand accountability for `Settlement`/`Transaction`) is scoped strictly to `Club + Collector (user)` and **never** to Court; do not reuse the Court resource scope as a proxy for financial authority.
-
-> [!NOTE]
-> **Transitional State**:
-> Authorization Spine v1 and the v2 resource-query foundation are implemented under [`apps/common/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/). **Transactions** operates on the v1 migration (`ClubScopedViewMixin` + `RequestAccessContext` + domain `apps/transactions/authorization.py`). **Courts** operates on the v2 resource-query foundation (`SlotyScopedResourceMixin` + `authorization_config`). All other domains still operate on the legacy access layer (`ClubAccessContext`, `ClubScopedAccessMixin`) until explicitly migrated domain-by-domain. Do not infer domain migration merely because the v2 primitives exist.
-
-> [!NOTE]
-> **Authorization is not presence/sync tracking**: `ClubMembership.last_sync_at` (offline/PWA sync bookkeeping) is updated **only** by the explicit `POST /api/v1/me/sync-heartbeat/` endpoint (`apps/accounts/views.py::SyncHeartbeatAPIView`). It is intentionally **not** an implicit side effect of any authorization mixin (legacy `ClubScopedAccessMixin` still updates it for domains not yet migrated, purely for backward compatibility — do not port that side effect into `ClubScopedViewMixin` or `SlotyScopedResourceMixin` when migrating further domains).
+- Spine code: [`apps/common/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/)
+- Legacy access (`ClubAccessContext` / `ClubScopedAccessMixin`) still serves unmigrated domains.
+- `ClubMembership.last_sync_at` is updated **only** by `POST /api/v1/me/sync-heartbeat/` — never by spine mixins.
 
 ---
 

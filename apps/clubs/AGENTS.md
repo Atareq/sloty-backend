@@ -4,6 +4,14 @@
 
 `apps/clubs/` owns club tenant definitions, location validation, club membership lifecycle, and hosts the repository's current-state club-scoped access layer (`ClubAccessContext`).
 
+## Locked Identity Role
+
+Per root [`AGENTS.md` §5.1](file:///home/tarek/Desktop/sloty/sloty-backend/AGENTS.md):
+
+- `ClubMembership` is the **club operational actor** (role + court + manager flags). It is not a separate Staff/Owner/Manager profile table and must not be duplicated as one.
+- Authentication identity remains `User` (`apps/accounts`).
+- Customer identity (`PlayerProfile` / `ClubPlayer`) belongs in `apps/players/` (Phase 1) — not in clubs.
+
 ## Domain Invariants
 
 - **Membership Authority**: Authority inside a club is derived exclusively from active `ClubMembership` records.
@@ -52,20 +60,7 @@
 ## Current-State Authorization Engine
 
 > [!WARNING]
-> **Legacy / Current-State Notice**: The access layer below represents the existing implementation. It is under architectural review and will be redesigned. Do **not** treat it as target architecture or assume this structure must be preserved in future tasks.
-
-Future target direction:
-```text
-Authentication
-      ↓
-request.user / profile
-      ↓
-URL club scope
-      ↓
-role → API capability
-      ↓
-object permission only when genuinely required
-```
+> **Legacy / Current-State Notice**: The access layer below is the existing implementation for domains not yet migrated. Target architecture is the Authorization Spine in root [`AGENTS.md` §5](file:///home/tarek/Desktop/sloty/sloty-backend/AGENTS.md) and `apps/common/authorization/`. Do **not** extend this legacy layer to new domains.
 
 Current components in this app:
 - [`ClubAccessContext`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/access.py): Central access engine instantiated per request (`from_request(request, club_slug)`).

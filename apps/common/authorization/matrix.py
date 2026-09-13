@@ -84,6 +84,8 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
             "availability",
         },
         "CourtUsageReportViewSet": {"list", "retrieve"},
+        "PlayerProfileViewSet": {"list", "retrieve", "create"},
+        "ClubPlayerViewSet": {"list", "retrieve", "create"},
     },
     Role.OWNER: {
         "ClubViewSet": {"list", "retrieve", "update", "partial_update"},
@@ -146,6 +148,8 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
             "availability",
         },
         "CourtUsageReportViewSet": {"list", "retrieve"},
+        "PlayerProfileViewSet": {"list", "retrieve", "create"},
+        "ClubPlayerViewSet": {"list", "retrieve", "create"},
     },
     Role.MANAGER: {
         "ClubViewSet": {"list", "retrieve"},
@@ -194,6 +198,8 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
             "availability",
         },
         "CourtUsageReportViewSet": {"list", "retrieve"},
+        "PlayerProfileViewSet": {"list", "retrieve", "create"},
+        "ClubPlayerViewSet": {"list", "retrieve", "create"},
     },
     Role.STAFF: {
         "ClubViewSet": {"list", "retrieve"},
@@ -217,6 +223,8 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         "TransactionAttemptViewSet": {"list", "retrieve", "dismiss"},
         "SettlementViewSet": {"list", "retrieve", "preview"},
         "DashboardViewSet": {"summary", "calendar", "availability"},
+        "PlayerProfileViewSet": {"list", "retrieve", "create"},
+        "ClubPlayerViewSet": {"list", "retrieve", "create"},
     },
 }
 

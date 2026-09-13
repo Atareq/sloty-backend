@@ -8,6 +8,7 @@ from django.utils import timezone
 from apps.accounts.models import User
 from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
+from apps.bookings.services import resolve_booking_club_player
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.courts.services import replace_weekly_working_hours
@@ -493,13 +494,24 @@ class Command(BaseCommand):
                 start_time = self.demo_time(day_offset=club_index, hour=hour)
                 court = courts[club_key][1]
                 phone = f"+2010{club_index + 1}{booking_index:07d}"
+                customer_name = f"Demo {club_key} {customer_label}"
+                # Identity resolution: seeded bookings bypass create_booking()
+                # (update_or_create is used for idempotent re-seeding), but
+                # must still resolve a real ClubPlayer — Booking.club_player
+                # is the identity link every other creation path populates.
+                club_player = resolve_booking_club_player(
+                    club=club,
+                    customer_name=customer_name,
+                    customer_phone=phone,
+                )
                 booking, _ = Booking.objects.update_or_create(
                     club=club,
                     court=court,
                     customer_phone=phone,
                     start_time=start_time,
                     defaults={
-                        "customer_name": f"Demo {club_key} {customer_label}",
+                        "customer_name": customer_name,
+                        "club_player": club_player,
                         "end_time": start_time + timedelta(minutes=60),
                         "total_price": court.default_price,
                         "status": status,
@@ -518,17 +530,24 @@ class Command(BaseCommand):
                     start_time = self.demo_time(day_offset=1, hour=hour)
                     court = courts[club_key][2]
                     phone = f"+2010{club_index + 1}{index:07d}"
+                    customer_name = (
+                        "Demo A Court 2 Hold Customer"
+                        if index == 13
+                        else "Demo A Court 2 Confirmed Customer"
+                    )
+                    club_player = resolve_booking_club_player(
+                        club=club,
+                        customer_name=customer_name,
+                        customer_phone=phone,
+                    )
                     booking, _ = Booking.objects.update_or_create(
                         club=club,
                         court=court,
                         customer_phone=phone,
                         start_time=start_time,
                         defaults={
-                            "customer_name": (
-                                "Demo A Court 2 Hold Customer"
-                                if index == 13
-                                else "Demo A Court 2 Confirmed Customer"
-                            ),
+                            "customer_name": customer_name,
+                            "club_player": club_player,
                             "end_time": start_time + timedelta(minutes=60),
                             "total_price": court.default_price,
                             "status": status,

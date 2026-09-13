@@ -52,10 +52,10 @@
 
 ## Architecture & Authorization Spine Integration
 
-Settlement is migrated to the Task 2 authorization spine (`apps/common/authorization/`).
+Settlement is on Authorization Spine **v1** (`ClubScopedViewMixin` + `RequestAccessContext` + `SlotyBasePermission`) with domain business rules in `apps/settlements/authorization.py`.
 
 ```text
-RequestAccessContext (Role, Club, Court, Admin)
+RequestAccessContext (Role, Club, Admin; court not used for custody)
          ↓
 SlotyBasePermission (Role + SettlementViewSet + DRF Action)
          ↓
@@ -66,7 +66,31 @@ Serializer / Domain Authorization Layer (apps/settlements/authorization.py)
 Pure Financial Custody Services (apps/settlements/services.py)
 ```
 
+### Locked Scope Direction (v2 queryset target)
+
+Per root [`AGENTS.md` §5](file:///home/tarek/Desktop/sloty/sloty-backend/AGENTS.md):
+
+- Financial custody scope is **Club + Collector**, **never Court**.
+- When Settlement querysets move to Spine v2, use:
+
+```python
+authorization_config = {
+    "scopes": {
+        "club": {"path": "club"},
+    },
+    "default_scope": "club",
+    "select_related": (),
+    "prefetch_related": (),
+}
+```
+
+- Collector filtering stays as **domain business narrowing** in `authorization.py` / view filters — not a Court scope and not a second security engine.
+- URLs remain club-scoped: `/api/v1/clubs/{club_slug}/settlements/` (do not inject court into settlement URLs).
+
 ### Authorization Boundary (`apps/settlements/authorization.py`)
+
+Allowed here: true business invariants (self-approval bans, manager settle flags, collector gates). Forbidden: re-implementing club isolation the spine already owns.
+
 User authority is evaluated at the API/domain boundary *before* calling pure financial services:
 - `validate_preview_authority(*, context, collector)`
 - `validate_settlement_authority(*, context, collector)`

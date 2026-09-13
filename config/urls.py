@@ -14,6 +14,7 @@ urlpatterns = [
     path("api/v1/", include("apps.common.urls")),
     path("api/v1/", include("apps.clubs.urls")),
     path("api/v1/", include("apps.courts.urls")),
+    path("api/v1/", include("apps.players.urls")),
     path("api/v1/", include("apps.bookings.urls")),
     path("api/v1/", include("apps.transactions.urls")),
     path("api/v1/", include("apps.settlements.urls")),

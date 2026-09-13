@@ -33,6 +33,10 @@ from apps.courts.pricing import (
     slot_price_from_schedule,
     working_hour_bounds,
 )
+from apps.players.services import (
+    find_or_create_player_profile,
+    get_or_create_club_player,
+)
 from apps.transactions.models import Transaction
 from apps.transactions.services import (
     annotate_booking_paid_amount,
@@ -74,6 +78,9 @@ PREVIOUS_BOOKING_ATTEMPT_REJECTED_MESSAGE = _(
 COURT_CLOSED_ON_THIS_DAY_MESSAGE = _("The court is closed on this day.")
 PRICING_NOT_CONFIGURED_LABEL = _("Pricing not configured")
 BOOKING_NOT_IN_CLUB_MESSAGE = _("Booking must belong to the selected club.")
+BOOKING_CLUB_PLAYER_MISMATCH_MESSAGE = _(
+    "Booking club_player must belong to the same club as the booking."
+)
 BOOKING_ALREADY_CANCELLED_MESSAGE = _("This booking is already cancelled.")
 INVALID_BOOKING_STATUS_TRANSITION_MESSAGE = _(
     "This booking status transition is not allowed."
@@ -1005,6 +1012,49 @@ def generate_booking_slots(*, access, court, date_from, date_to):
     return response
 
 
+def validate_booking_club_player(*, club, club_player):
+    """
+    Enforce the identity invariant: Booking.club_id == Booking.club_player.club_id.
+
+    A booking from one club must never reference another club's ClubPlayer.
+    This is defensive — create_booking() always resolves club_player from
+    the same locked_court.club, so this should never trip in practice — but
+    it protects any future/alternate creation path from silently violating
+    the invariant. See also Booking.clean() and the Postgres composite FK
+    (bookings.0008 migration) for the DB-level guard.
+    """
+    if club_player.club_id != club.id:
+        raise SlotyAPIException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="BOOKING_CLUB_PLAYER_MISMATCH",
+            message=BOOKING_CLUB_PLAYER_MISMATCH_MESSAGE,
+        )
+
+
+def resolve_booking_club_player(*, club, customer_name, customer_phone):
+    """
+    Resolve (find-or-create) the ClubPlayer identity for a booking.
+
+    Flow (see apps/bookings/AGENTS.md "Customer Identity Architecture"):
+        find_or_create_player_profile(phone) -> get_or_create_club_player(club, profile)
+
+    The frontend never supplies player_profile_id / club_player_id — only
+    customer_name / customer_phone. Identity resolution is entirely owned
+    by this service layer.
+    """
+    player_profile, _ = find_or_create_player_profile(
+        phone_number=customer_phone,
+        full_name=customer_name or "",
+    )
+    club_player, _ = get_or_create_club_player(
+        club=club,
+        player_profile=player_profile,
+        display_name=customer_name or "",
+    )
+    validate_booking_club_player(club=club, club_player=club_player)
+    return club_player
+
+
 def create_booking(
     *,
     created_by,
@@ -1071,9 +1121,16 @@ def create_booking(
             else:
                 validate_no_availability_conflict(locked_court, start_time, end_time)
 
+            club_player = resolve_booking_club_player(
+                club=locked_court.club,
+                customer_name=booking_data.get("customer_name"),
+                customer_phone=booking_data.get("customer_phone"),
+            )
+
             created_booking = Booking.objects.create(
                 club=locked_court.club,
                 court=locked_court,
+                club_player=club_player,
                 start_time=start_time,
                 end_time=end_time,
                 total_price=total_price,
@@ -1726,9 +1783,24 @@ def complete_booking(
             next_start = next_plan["next_start_time"]
             next_end = next_plan["next_end_time"]
             next_price = next_plan["next_total_price"]
+            # Identity propagation: the recurring continuation is the SAME
+            # customer as the anchor booking — reuse the anchor's club_player
+            # directly rather than re-resolving. Re-resolving would be wrong
+            # even if it happened to work: ClubPlayer is append-only/historical
+            # (apps/players/AGENTS.md "ClubPlayer Lifecycle"), and this is the
+            # same booking series, not a new customer interaction, so there is
+            # no "current identity at this moment" to re-resolve — the anchor's
+            # club_player (whichever version was active when the series was
+            # created) is the correct reference for every occurrence in it.
+            if locked_booking.club_player_id is not None:
+                validate_booking_club_player(
+                    club=locked_booking.club,
+                    club_player=locked_booking.club_player,
+                )
             next_booking = Booking.objects.create(
                 club=locked_booking.club,
                 court=locked_court,
+                club_player=locked_booking.club_player,
                 customer_name=locked_booking.customer_name,
                 customer_phone=locked_booking.customer_phone,
                 start_time=next_start,

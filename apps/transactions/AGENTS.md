@@ -52,15 +52,15 @@
 - `POST .../transactions/{id}/cancel/`: Transaction correction endpoint requiring `cancellation_reason`.
 - `/api/v1/clubs/{club_slug}/transaction-attempts/`: Traceability list/detail and dismissal for rejected attempts.
 
-## Authorization & Scoping (Current-State)
 ## Authorization & Scoping
 
 > [!NOTE]
-> Current-state/legacy authorization rules. Do not treat as target architecture.
+> Spine v1 + domain business rules. Club/court “WHERE” belongs to the Authorization Spine (root AGENTS.md §5). `apps/transactions/authorization.py` may keep **business conditions** only (Staff `created_by` visibility/cancel rules, object gates). Do not use it to re-implement club/court scoping once/if Transaction models adopt v2 `authorization_config` (`default_scope="court"`).
+
 - **Centralized Spine**: `TransactionViewSet` and `TransactionAttemptViewSet` use `ClubScopedViewMixin`, `RequestAccessContext`, and `SlotyBasePermission`.
-- **Domain Authorization Module**: Scoping and object authorization logic live in [`apps/transactions/authorization.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/transactions/authorization.py) (do not add `apps/transactions/permissions.py`).
+- **Domain Authorization Module**: Business-rule authorization lives in [`apps/transactions/authorization.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/transactions/authorization.py) (do not add `apps/transactions/permissions.py`).
 - **Staff Operational Scope**:
-  - Constrained by assigned Court scope (`CourtStaffAssignment`).
+  - Constrained by assigned Court scope.
   - Staff can view and list only transactions they personally collected (`created_by == request.user`) on their assigned court(s).
   - Staff can create transactions only for bookings on their assigned court(s).
 - **Management Operational Scope**:
@@ -72,11 +72,6 @@
   - Operational Transaction API authorization = `Club + Court (+ created_by for Staff)`.
   - Current Custody / Settlement = `Club + optional Collector, NEVER Court`.
   - Staff operational court constraints never leak into financial settlements or custody calculation.
-
-- Centralized via `ClubAccessContext` (do not add `apps/transactions/permissions.py`).
-- Staff can see and list only transactions they collected (`created_by == request.user`) on their assigned court.
-- Owners, managers, and platform admins see club-wide transactions.
-- Cancellation authority: Platform admins can cancel any eligible transaction; owners, managers, and staff may cancel only their own collected transactions.
 
 ## Cross-App Dependencies
 
