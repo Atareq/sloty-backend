@@ -131,7 +131,55 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 - **Test Strategy**:
   - Test services for business logic, status transitions, and domain invariants.
   - Test viewsets for authorization, scoping, validation errors, and response contracts.
-  - Run targeted tests before committing changes (e.g., `pytest tests/bookings`).
+  - Run targeted tests before committing changes.
+
+### Default test execution
+
+Prefer parallel execution with database reuse for normal verification:
+
+```bash
+pytest -n 4 --reuse-db
+```
+
+Do **not** default to sequential `pytest`. This repository supports parallel workers (`pytest-xdist`) and `--reuse-db` is the validated database strategy. Together they significantly reduce verification time.
+
+Domain examples:
+
+```bash
+pytest -n 4 --reuse-db tests/players/
+pytest -n 4 --reuse-db tests/bookings/
+pytest -n 4 --reuse-db tests/transactions/
+pytest -n 4 --reuse-db tests/settlements/
+```
+
+Combined regression:
+
+```bash
+pytest -n 4 --reuse-db tests/players/ tests/bookings/ tests/transactions/ tests/settlements/
+```
+
+Before a large suite, confirm `pytest-xdist` is available (`pytest -n 4 --collect-only` or `python -c "import xdist"`) and that `--reuse-db` is accepted (`pytest --help` lists it via `pytest-django`). Use the optimized command by default. Fall back to sequential `pytest` only when a specific test cannot safely run in parallel.
+
+### Failure classification (parallel runs)
+
+When parallel tests fail, do **not** immediately assume a code regression. Classify first:
+
+1. Real application regression.
+2. Existing flaky test.
+3. Database concurrency / infrastructure issue.
+4. Test isolation problem exposed by parallel execution.
+
+Investigate before changing application code.
+
+### Database handling
+
+Do not unnecessarily recreate the test database. Prefer `--reuse-db` unless:
+
+- schema changes require recreation (`--create-db` after migrations),
+- database corruption is confirmed,
+- migrations themselves are being tested.
+
+---
 
 ---
 
