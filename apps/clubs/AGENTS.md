@@ -31,7 +31,7 @@
   - `is_active`: Controls club operational status.
 - [`ClubMembership`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/models.py):
   - QuerySets: `.current()` excludes soft-deleted; `.granting_access()` filters `is_active=True` and non-deleted.
-  - `last_sync_at`: Nullable server timestamp updated by `ClubScopedAccessMixin` on successful authenticated requests. Read-only to clients.
+  - `last_sync_at`: Nullable server timestamp. Read-only to clients. Updated exclusively by the explicit `POST /api/v1/me/sync-heartbeat/` endpoint (`apps/accounts/views.py::SyncHeartbeatAPIView`; see `apps/accounts/AGENTS.md`). Legacy behavior still updates it as a side effect of `ClubScopedAccessMixin` on successful authenticated requests for domains not yet migrated off that mixin (backward-compatible carryover, not a pattern to extend) — domains migrated to the Authorization Spine (`ClubScopedViewMixin` / `SlotyScopedResourceMixin`) never update it implicitly.
 
 ## Service Layer
 

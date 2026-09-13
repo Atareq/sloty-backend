@@ -85,6 +85,20 @@ class Court(models.Model):
             models.Index(fields=["sport_type"]),
         ]
 
+    # Authorization Spine v2 resource-query contract (apps/common/authorization/).
+    # Court is the court-scope boundary entity itself, hence the reserved
+    # "self" path. See apps/common/authorization/contracts.py for the
+    # required shape (scopes / default_scope / select_related / prefetch_related).
+    authorization_config = {
+        "scopes": {
+            "club": {"path": "club"},
+            "court": {"path": "self"},
+        },
+        "default_scope": "court",
+        "select_related": ("club",),
+        "prefetch_related": (),
+    }
+
     def __str__(self) -> str:
         return f"{self.club} - {self.name}"
 
@@ -117,6 +131,18 @@ class CourtWorkingHour(models.Model):
         indexes = [
             models.Index(fields=["court", "weekday"]),
         ]
+
+    # Authorization Spine v2 resource-query contract. Club boundary is
+    # reached through the owning Court; court scope is the direct FK.
+    authorization_config = {
+        "scopes": {
+            "club": {"path": "court__club"},
+            "court": {"path": "court"},
+        },
+        "default_scope": "court",
+        "select_related": ("court", "court__club"),
+        "prefetch_related": ("pricing_periods",),
+    }
 
     def __str__(self) -> str:
         return f"{self.court} - {self.get_weekday_display()}"

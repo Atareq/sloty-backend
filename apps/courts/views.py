@@ -12,10 +12,12 @@ from rest_framework.mixins import (
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
-from apps.clubs.mixins import ClubScopedAccessMixin
-from apps.clubs.permissions import CanManageClubCourts, CanManageClubWorkingHours
+from apps.common.authorization.mixins import SlotyScopedResourceMixin
+from apps.common.authorization.permissions import SlotyBasePermission
+from apps.common.authorization.scopes import ResourceScope
 from apps.common.exceptions import SlotyAPIException
-from apps.courts.models import Court
+from apps.courts.authorization import can_manage_working_hours
+from apps.courts.models import Court, CourtWorkingHour
 from apps.courts.serializers import (
     CourtCreateSerializer,
     CourtDetailSerializer,
@@ -46,28 +48,29 @@ from apps.courts.services import (
     ),
 )
 class CourtViewSet(
-    ClubScopedAccessMixin,
+    SlotyScopedResourceMixin,
     ListModelMixin,
     CreateModelMixin,
     RetrieveModelMixin,
     UpdateModelMixin,
     GenericViewSet,
 ):
-    permission_classes = (CanManageClubCourts,)
+    """
+    Authorization: club boundary + Court.authorization_config (court scope)
+    resolve the authorized queryset (Staff limited to assigned court(s);
+    Owner/Manager/Admin see all club courts). SlotyBasePermission +
+    ROLE_PERMISSIONS["CourtViewSet"] gate create/update to Admin/Owner only.
+    """
+
+    authorization_model = Court
+    authorization_scope = ResourceScope.COURT
+    authorization_select_related = ("created_by",)
+    authorization_prefetch_related = ("working_hours__pricing_periods",)
+    permission_classes = (SlotyBasePermission,)
     http_method_names = ("get", "post", "patch", "head", "options")
 
-    def get_queryset(self):
-        if getattr(self, "swagger_fake_view", False):
-            from apps.courts.models import Court
-
-            return Court.objects.none()
-        return (
-            self.get_access_context()
-            .scoped_courts_queryset()
-            .select_related("club", "created_by")
-            .prefetch_related("working_hours__pricing_periods")
-            .order_by("id")
-        )
+    def filter_scoped_queryset(self, queryset):
+        return queryset.order_by("id")
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -78,9 +81,16 @@ class CourtViewSet(
             return CourtUpdateSerializer
         return CourtDetailSerializer
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if not getattr(self, "swagger_fake_view", False):
+            context["access_context"] = self.access_context
+            context["club_access"] = self.access_context
+        return context
+
     def perform_create(self, serializer):
         serializer.save(
-            club=self.get_club(),
+            club=self.get_access_context().club,
             created_by=self.request.user,
             default_price="0.00",
         )
@@ -101,29 +111,37 @@ class CourtViewSet(
     ),
 )
 class CourtWorkingHourViewSet(
-    ClubScopedAccessMixin,
+    SlotyScopedResourceMixin,
     ListModelMixin,
     CreateModelMixin,
     RetrieveModelMixin,
     UpdateModelMixin,
     GenericViewSet,
 ):
+    """
+    Deprecated, read-compatible legacy endpoint. Writes always reject with
+    WORKING_HOURS_USE_WEEKLY_ENDPOINT. Reuses the CourtWeeklyWorkingHoursViewSet
+    matrix entries (same role/action authority) via `permission_view_name`
+    rather than duplicating a second set of matrix rows for a deprecated
+    endpoint with identical role authority.
+    """
+
+    authorization_model = CourtWorkingHour
+    authorization_scope = ResourceScope.COURT
+    permission_view_name = "CourtWeeklyWorkingHoursViewSet"
     serializer_class = CourtWorkingHourSerializer
-    permission_classes = (CanManageClubWorkingHours,)
+    permission_classes = (SlotyBasePermission,)
     http_method_names = ("get", "post", "patch", "head", "options")
 
-    def get_queryset(self):
-        if getattr(self, "swagger_fake_view", False):
-            from apps.courts.models import CourtWorkingHour
+    def filter_scoped_queryset(self, queryset):
+        return queryset.order_by("court_id", "weekday", "id")
 
-            return CourtWorkingHour.objects.none()
-        return (
-            self.get_access_context()
-            .scoped_working_hours_queryset()
-            .select_related("court", "court__club")
-            .prefetch_related("pricing_periods")
-            .order_by("court_id", "weekday", "id")
-        )
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if not getattr(self, "swagger_fake_view", False):
+            context["access_context"] = self.access_context
+            context["club_access"] = self.access_context
+        return context
 
     def reject_individual_write(self):
         raise SlotyAPIException(
@@ -153,30 +171,28 @@ class CourtWorkingHourViewSet(
         responses=CourtWeeklyWorkingHoursSerializer,
     ),
 )
-class CourtWeeklyWorkingHoursViewSet(ClubScopedAccessMixin, GenericViewSet):
+class CourtWeeklyWorkingHoursViewSet(SlotyScopedResourceMixin, GenericViewSet):
+    """
+    Authorization: `court_id` in the URL is resolved and validated (club +
+    existence) generically by resolve_club_scope() before permissions run.
+    The scoped queryset then enforces Staff assigned-court isolation for the
+    same explicitly targeted court. SlotyBasePermission +
+    ROLE_PERMISSIONS["CourtWeeklyWorkingHoursViewSet"] gate list to any club
+    member and update/create-adjacent actions to Admin/Owner/Manager. The one
+    rule the matrix cannot express -- a Manager's per-membership
+    `manager_can_change_pricing` delegation -- is checked explicitly via
+    apps.courts.authorization.can_manage_working_hours().
+    """
+
+    authorization_model = Court
+    authorization_scope = ResourceScope.COURT
+    authorization_prefetch_related = ("working_hours__pricing_periods",)
     serializer_class = CourtWeeklyWorkingHoursSerializer
-    permission_classes = (CanManageClubWorkingHours,)
+    permission_classes = (SlotyBasePermission,)
     http_method_names = ("get", "put", "head", "options")
 
-    def get_queryset(self):
-        if getattr(self, "swagger_fake_view", False):
-            return Court.objects.none()
-        return (
-            self.get_access_context()
-            .scoped_courts_queryset()
-            .prefetch_related("working_hours__pricing_periods")
-        )
-
     def get_court(self):
-        access = self.get_access_context()
-        court = get_object_or_404(
-            self.get_queryset(),
-            pk=self.kwargs["court_id"],
-            club=access.club,
-        )
-        if not access.can_access_court(court):
-            raise PermissionDenied("You cannot access this court.")
-        return court
+        return get_object_or_404(self.get_queryset(), pk=self.kwargs["court_id"])
 
     def build_response_data(self, court):
         return {
@@ -193,7 +209,7 @@ class CourtWeeklyWorkingHoursViewSet(ClubScopedAccessMixin, GenericViewSet):
     def update(self, request, *args, **kwargs):
         access = self.get_access_context()
         court = self.get_court()
-        if not access.can_manage_working_hours(court):
+        if not can_manage_working_hours(access, court):
             raise PermissionDenied("You cannot manage working hours for this court.")
 
         serializer = self.get_serializer(data=request.data)
@@ -202,10 +218,5 @@ class CourtWeeklyWorkingHoursViewSet(ClubScopedAccessMixin, GenericViewSet):
             court=court,
             working_hours=serializer.validated_data["working_hours"],
         )
-        court = (
-            self.get_access_context()
-            .scoped_courts_queryset()
-            .prefetch_related("working_hours__pricing_periods")
-            .get(pk=court.pk)
-        )
+        court = self.get_scoped_queryset().get(pk=court.pk)
         return Response(self.build_response_data(court))

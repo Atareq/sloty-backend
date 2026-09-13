@@ -96,9 +96,38 @@ Domain Service (state machines, concurrency locks, audit logs)
 - **Role Matrix**: Centralized in [`ROLE_PERMISSIONS`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/matrix.py) with four operational roles (`ADMIN`, `OWNER`, `MANAGER`, `STAFF`). Strict default deny. No capability abstraction.
 - **Base Permission**: [`SlotyBasePermission`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/permissions.py) evaluates `Role + ViewSet + DRF Action`. Exposes `has_object_permission` as a clean extension hook.
 
+### Authorization Spine v2 — Resource Query Foundation
+
+Authorization Spine v2 adds a model-driven, fail-closed resource-query layer without modifying DRF's `ModelViewSet`:
+
+```text
+Resolved RequestAccessContext
+        ↓
+Model authorization_config
+        ↓
+Club boundary (always first)
+        ↓
+Required resource scope (for example, Court)
+        ↓
+Mandatory model relation loading
+        ↓
+ViewSet relation additions and narrowing-only domain filters
+```
+
+- **Scope keys**: `ResourceScope.NONE` denies generic resource access, `ResourceScope.CLUB` applies the club boundary, and `ResourceScope.COURT` applies club then court access. Future string scope keys are supported when both the model path and corresponding context fact are declared.
+- **Model contract**: Every participating model exposes one `authorization_config` mapping. It declares `scopes`, `default_scope`, `select_related`, and `prefetch_related`. Scope `path` values are ORM relation traversals to the scoped entity; use the reserved `"self"` path when the resource is itself the boundary entity. Do not use model-name conditionals in the resolver.
+- **Generic resolver**: `scoped_queryset(access_context, model, scope=...)` reconstructs the model's default manager, validates the context and configuration, applies the club boundary first, and returns `.none()` for an unauthorized context or `NONE` scope. Missing/malformed configuration raises `ImproperlyConfigured`; it never falls back to an unscoped queryset.
+- **ViewSet composition**: Put `SlotyScopedResourceMixin` before DRF `ModelViewSet`, `GenericViewSet`, or `ViewSet`. Declare `authorization_model` or a model `queryset`; optionally set `authorization_scope`, `authorization_select_related`, and `authorization_prefetch_related`.
+- **Override rule**: Do not replace `get_queryset()` or start again from `Model.objects`. Narrow the secured queryset through `filter_scoped_queryset(queryset)`. Standard DRF filter backends remain downstream and may only narrow it. Add action-specific relation loading through the `get_authorization_*_related()` hooks.
+- **Participation is explicit**: The v2 foundation is available under `apps/common/authorization/`. **Courts** (`Court`, `CourtWorkingHour`) is migrated to v2 (`authorization_config` + `SlotyScopedResourceMixin`). No other Booking, Settlement, or remaining domain model/ViewSet is migrated by this foundation task.
+- **Operational resources vs. financial custody**: Court is an **operational** resource — its scope boundary is `Club → Court` and Staff may be granted court-level access to it (`ResourceScope.COURT`). Financial custody (cash-in-hand accountability for `Settlement`/`Transaction`) is scoped strictly to `Club + Collector (user)` and **never** to Court; do not reuse the Court resource scope as a proxy for financial authority.
+
 > [!NOTE]
 > **Transitional State**:
-> The new authorization spine foundation is implemented under [`apps/common/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/). Existing domains still operate on the legacy access layer (`ClubAccessContext`, `ClubScopedAccessMixin`) until migrated domain-by-domain in subsequent tasks.
+> Authorization Spine v1 and the v2 resource-query foundation are implemented under [`apps/common/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/). **Transactions** operates on the v1 migration (`ClubScopedViewMixin` + `RequestAccessContext` + domain `apps/transactions/authorization.py`). **Courts** operates on the v2 resource-query foundation (`SlotyScopedResourceMixin` + `authorization_config`). All other domains still operate on the legacy access layer (`ClubAccessContext`, `ClubScopedAccessMixin`) until explicitly migrated domain-by-domain. Do not infer domain migration merely because the v2 primitives exist.
+
+> [!NOTE]
+> **Authorization is not presence/sync tracking**: `ClubMembership.last_sync_at` (offline/PWA sync bookkeeping) is updated **only** by the explicit `POST /api/v1/me/sync-heartbeat/` endpoint (`apps/accounts/views.py::SyncHeartbeatAPIView`). It is intentionally **not** an implicit side effect of any authorization mixin (legacy `ClubScopedAccessMixin` still updates it for domains not yet migrated, purely for backward compatibility — do not port that side effect into `ClubScopedViewMixin` or `SlotyScopedResourceMixin` when migrating further domains).
 
 ---
 

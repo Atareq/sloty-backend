@@ -1614,8 +1614,15 @@ class ClubMembershipLastSyncAPITests(ClubAPITestCase):
             court=self.court,
         )
 
-    def court_list_url(self, club):
-        return reverse("club-court-list", kwargs={"club_slug": club.slug})
+    def legacy_scoped_url(self, club):
+        # ClubMembership.last_sync_at is updated only by the legacy
+        # ClubScopedAccessMixin.finalize_response() side effect. The Courts
+        # domain has migrated to the Authorization Spine (SlotyScopedResourceMixin
+        # / ClubScopedViewMixin), which intentionally does NOT perform this
+        # update (see apps.accounts.views.SyncHeartbeatAPIView for the
+        # explicit replacement mechanism). Use a still-legacy-mixin endpoint
+        # here so this suite keeps exercising ClubScopedAccessMixin itself.
+        return reverse("club-dashboard-summary", kwargs={"club_slug": club.slug})
 
     def test_successful_club_scoped_contact_updates_selected_membership_last_sync(self):
         sync_time = timezone.datetime(
@@ -1629,7 +1636,7 @@ class ClubMembershipLastSyncAPITests(ClubAPITestCase):
         self.client.force_authenticate(user=self.staff)
 
         with patch("apps.clubs.mixins.timezone.now", return_value=sync_time):
-            response = self.client.get(self.court_list_url(self.club))
+            response = self.client.get(self.legacy_scoped_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.staff_membership.refresh_from_db()
@@ -1652,17 +1659,17 @@ class ClubMembershipLastSyncAPITests(ClubAPITestCase):
         self.client.force_authenticate(user=self.staff)
 
         with patch("apps.clubs.mixins.timezone.now", return_value=request_time):
-            response = self.client.get(self.court_list_url(self.club))
+            response = self.client.get(self.legacy_scoped_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.staff_membership.refresh_from_db()
         self.assertEqual(self.staff_membership.last_sync_at, original_sync_time)
 
     def test_failed_access_does_not_update_last_sync(self):
-        unauthenticated_response = self.client.get(self.court_list_url(self.club))
+        unauthenticated_response = self.client.get(self.legacy_scoped_url(self.club))
 
         self.client.force_authenticate(user=self.revoked_staff)
-        revoked_response = self.client.get(self.court_list_url(self.club))
+        revoked_response = self.client.get(self.legacy_scoped_url(self.club))
 
         self.revoked_membership.refresh_from_db()
         self.assertEqual(
@@ -1678,7 +1685,7 @@ class ClubMembershipLastSyncAPITests(ClubAPITestCase):
         self.inactive_user.save(update_fields=["is_active"])
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
 
-        response = self.client.get(self.court_list_url(self.club))
+        response = self.client.get(self.legacy_scoped_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(response.data["code"], "USER_INACTIVE")
@@ -1702,7 +1709,7 @@ class ClubMembershipLastSyncAPITests(ClubAPITestCase):
         self.client.force_authenticate(user=self.staff)
 
         with patch("apps.clubs.mixins.timezone.now", return_value=sync_time):
-            response = self.client.get(self.court_list_url(self.club))
+            response = self.client.get(self.legacy_scoped_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         selected_membership = ClubMembership.objects.get(

@@ -238,8 +238,9 @@ class TransactionCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         request = self.context["request"]
         occurred_at_provided = validated_data.pop("_sloty_occurred_at_provided", False)
+        access = self.context.get("access_context") or self.context.get("club_access")
         return create_booking_transaction(
-            access=self.context["club_access"],
+            access=access,
             created_by=request.user,
             occurred_at_provided=occurred_at_provided,
             **validated_data,

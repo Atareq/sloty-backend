@@ -31,6 +31,8 @@
   - Auth failure codes: Expired tokens raise `SESSION_EXPIRED`; inactive accounts return `USER_INACTIVE`; deleted accounts return `USER_DELETED`.
 - **User Profile**:
   - `GET /api/v1/me/`: Returns current authenticated user profile, creator details (`account_created_by`), and active memberships. Must prefetch memberships with `to_attr="active_memberships_for_me"` selecting club and court to avoid per-membership queries.
+- **Sync Heartbeat**:
+  - `POST /api/v1/me/sync-heartbeat/` (`SyncHeartbeatAPIView`): Authenticated-only, no request payload. Updates `last_sync_at` (server `timezone.now()`, never client-supplied) on **all** of the authenticated user's active, access-granting `ClubMembership` rows (`ClubMembership.objects.granting_access().filter(user=request.user)`), and returns `{"last_sync_at": ...}`. This is the **only** mechanism that updates `last_sync_at`. Authorization (authentication, role authority, club/resource scope) and sync/presence tracking are separate concerns by design: neither `ClubScopedViewMixin` nor `SlotyScopedResourceMixin` (Authorization Spine, `apps/common/authorization/`) update `last_sync_at` as an implicit response side effect. The legacy `ClubScopedAccessMixin` (`apps/clubs/mixins.py`) still does this for domains not yet migrated off it, purely as a backward-compatible carryover — do not extend that side effect to new code or migrate it into the Spine.
 - **Platform User Management**:
   - `/api/v1/users/`: Restricted to Platform Super Admins for full CRUD. Club Owners have read-only access to staff within their club scope. Creating active business users here is prohibited.
 - Serializers and schemas define the authoritative request/response shape (e.g., [`UserMeSerializer`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/serializers.py), [`UserListSerializer`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/serializers.py)).
@@ -53,4 +55,5 @@
 - Key test files:
   - `test_user_model.py`: Identity constraints and platform admin checks.
   - `test_account_api.py`: `/api/v1/me/` and `/api/v1/users/` permissions and serialization.
+  - `test_sync_heartbeat_api.py`: `/api/v1/me/sync-heartbeat/` contract, backend-authoritative timestamp, multi-membership fan-out, user isolation, and the regression guard that ordinary API traffic (e.g. Courts) never updates `last_sync_at` implicitly.
   - `test_seed_demo_data.py`: Multi-club demo seed data creation.

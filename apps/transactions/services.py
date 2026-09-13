@@ -484,11 +484,13 @@ def should_record_rejected_transaction_attempt(exc):
 
 
 def can_record_transaction_attempt(*, access, booking):
-    return (
-        booking is not None
-        and booking.club_id == access.club.id
-        and access.can_access_court(booking.court)
-    )
+    if booking is None or access is None or booking.club_id != access.club.id:
+        return False
+    if hasattr(access, "can_access_court"):
+        return access.can_access_court(booking.court)
+    from apps.transactions.authorization import can_access_court
+
+    return can_access_court(access, booking.court)
 
 
 def record_rejected_transaction_attempt(
@@ -568,7 +570,16 @@ def dismiss_transaction_attempt(*, access, attempt, actor):
             .select_related("club", "court", "booking", "attempted_by", "transaction")
             .get(pk=attempt.pk)
         )
-        if not access.can_dismiss_transaction_attempt(locked_attempt):
+        can_dismiss = (
+            access.can_dismiss_transaction_attempt(locked_attempt)
+            if hasattr(access, "can_dismiss_transaction_attempt")
+            else None
+        )
+        if can_dismiss is None:
+            from apps.transactions.authorization import can_dismiss_transaction_attempt
+
+            can_dismiss = can_dismiss_transaction_attempt(access, locked_attempt)
+        if not can_dismiss:
             raise PermissionDenied("You cannot dismiss this payment attempt.")
         if locked_attempt.resolution == TransactionAttempt.Resolution.DISMISSED:
             return locked_attempt
@@ -601,7 +612,16 @@ def validate_booking_transaction_data(
             code="TRANSACTION_BOOKING_NOT_IN_CLUB",
             message=TRANSACTION_BOOKING_NOT_IN_CLUB_MESSAGE,
         )
-    if not access.can_create_transaction_for_booking(booking):
+    can_create = (
+        access.can_create_transaction_for_booking(booking)
+        if hasattr(access, "can_create_transaction_for_booking")
+        else None
+    )
+    if can_create is None:
+        from apps.transactions.authorization import can_create_transaction_for_booking
+
+        can_create = can_create_transaction_for_booking(access, booking)
+    if not can_create:
         raise PermissionDenied("You cannot create transactions for this booking.")
     if booking.status not in {Booking.Status.HOLD, Booking.Status.CONFIRMED}:
         raise SlotyAPIException(
@@ -859,7 +879,16 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
         )
         locked_transaction.booking = locked_booking
 
-        if not access.can_cancel_transaction(locked_transaction):
+        can_cancel = (
+            access.can_cancel_transaction(locked_transaction)
+            if hasattr(access, "can_cancel_transaction")
+            else None
+        )
+        if can_cancel is None:
+            from apps.transactions.authorization import can_cancel_transaction
+
+            can_cancel = can_cancel_transaction(access, locked_transaction)
+        if not can_cancel:
             raise PermissionDenied("You cannot cancel this transaction.")
         if locked_transaction.is_cancelled:
             raise SlotyAPIException(

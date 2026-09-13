@@ -52,10 +52,56 @@
 - Detects exact duplicates and logs potential N+1 heuristics (`[PERF:N+1?]`). Parameters, bodies, and Authorization headers are never logged.
 
 ### 5. Authorization Spine Foundation ([`apps/common/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/))
-- **RequestAccessContext**: Fact container (`user`, `role`, `club`, `membership`, `court`, `is_platform_admin`). Zero permissions logic.
+- **RequestAccessContext**: Fact container (`user`, `role`, `club`, `membership`, explicitly targeted `court`, `is_platform_admin`). Zero permissions logic and no loaded Court object for club-wide requests.
 - **Scope Resolver**: `resolve_club_scope(request, club_slug, court_id=None)` enforces URL club authority, returns cached context on `request.access_context`, raises `CLUB_ACCESS_REVOKED` (403) on revoked/missing membership.
 - **Role Matrix & Permission**: `SlotyBasePermission` evaluates centralized `ROLE_PERMISSIONS[role][viewset][action]` with strict default deny. Exposes clean `has_object_permission()` extension hook.
 - **ClubScopedViewMixin**: ViewSet mixin attaching context during `perform_authentication` before permission checks.
+
+### 6. Authorization Spine v2 Resource Query Contract
+
+The v2 foundation secures model-backed querysets without modifying DRF classes and without migrating any domain automatically.
+
+#### Scope Keys
+
+- `ResourceScope.NONE` (`"none"`): explicit fail-closed scope; returns `.none()`.
+- `ResourceScope.CLUB` (`"club"`): filters by the validated URL club.
+- `ResourceScope.COURT` (`"court"`): applies the club filter first, then an explicitly targeted court or the staff member's active court assignment. Owners, managers, and platform admins remain bounded to all court-backed rows inside the selected club when no court is explicitly targeted.
+- Future keys are allowed as strings. A future scope requires a declared model path and a same-named fact (or `<scope>_ids`) on the resolved context; absence returns `.none()`.
+
+#### Participating Model Contract
+
+Every model that opts into v2 must expose exactly one configuration mapping:
+
+```python
+authorization_config = {
+    "scopes": {
+        "club": {"path": "club"},
+        "court": {"path": "court"},
+    },
+    "default_scope": "court",
+    "select_related": (),
+    "prefetch_related": (),
+}
+```
+
+Rules:
+
+- `path` is an ORM relation traversal from the resource model to the scoped entity. Nested paths such as `booking__club` are valid. The reserved `"self"` path scopes a boundary model such as `Court` by its own primary key. Do not branch on concrete model classes in common authorization code.
+- Every non-`NONE` resource declares a `club` path because club isolation is always applied first.
+- The default scope must be `none` or a key declared in `scopes`.
+- `select_related` and `prefetch_related` are mandatory load plans for every authorized queryset of that model. `Prefetch` objects are supported.
+- Missing or malformed configuration raises `ImproperlyConfigured`; common code must never recover by returning `Model.objects.all()`.
+
+#### Generic Resolver and ViewSet Mixin
+
+- `scoped_queryset(access_context, model, scope=...)` owns security boundaries and mandatory relation loading. It always starts from `model._default_manager`, validates the context, applies club first, and only then applies court or a future scope.
+- `SlotyScopedResourceMixin` resolves/reuses `request.access_context`, discovers the model from `authorization_model` or the declared `queryset`, and exposes `get_scoped_queryset()` plus the standard `get_queryset()` integration.
+- Compose it before DRF's class: `class ExampleViewSet(SlotyScopedResourceMixin, ModelViewSet): ...`. DRF `ModelViewSet` itself remains untouched.
+- ViewSets may add relations with `authorization_select_related`, `authorization_prefetch_related`, or their getter hooks. They must not remove mandatory model relations.
+- Domain filtering belongs in `filter_scoped_queryset(queryset)` or standard DRF filter backends. Both receive the already-authorized queryset and may only narrow it.
+- A participating ViewSet must not override `get_queryset()` to start from a model manager, use a second access context, or accept client-provided tenant IDs.
+- Domain migrations remain separate, deliberate tasks. The legacy `ClubAccessContext` and `ClubScopedAccessMixin` stay in place until each domain's behavior and tests are migrated. **Courts** (`Court`, `CourtWorkingHour`) is migrated onto this v2 foundation — see `apps/courts/AGENTS.md` for its concrete `authorization_config` and the one remaining domain-specific helper (`manager_can_change_pricing`) the matrix cannot express. All other domains besides Courts (v2) and Transactions (v1) remain on the legacy layer.
+- **Not a presence/activity tracker**: The Spine (`RequestAccessContext`, `ClubScopedViewMixin`, `SlotyScopedResourceMixin`) intentionally has no request-level side effects beyond authorization/scoping. `ClubMembership.last_sync_at` (offline/PWA sync bookkeeping) is updated only by the dedicated `POST /api/v1/me/sync-heartbeat/` endpoint (`apps/accounts/`), never implicitly by any Spine mixin. Do not add such side effects when migrating further domains.
 
 ## Testing
 
@@ -66,5 +112,6 @@
 - Key test files:
   - `test_context_and_resolver.py`: Scope resolution, caching, missing access, court non-loading.
   - `test_base_permission_and_matrix.py`: Matrix verification, default deny, custom actions, object permission hook.
+  - `test_scoped_resources.py`: Model configuration, club/court/future scoping, fail-closed behavior, relation loading, and DRF ViewSet composition.
   - `test_egypt_locations.py` / `test_locations_api.py`: Choice validation and API endpoint.
   - `test_sql_query_stats_middleware.py`: Middleware counting and threshold logging.

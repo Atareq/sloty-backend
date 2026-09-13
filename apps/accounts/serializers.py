@@ -154,6 +154,16 @@ class UserMembershipSerializer(serializers.ModelSerializer):
         return UserMembershipPermissionsSerializer(permissions).data
 
 
+class SyncHeartbeatResponseSerializer(serializers.Serializer):
+    """
+    Response for the explicit offline/PWA sync heartbeat endpoint
+    (POST /api/v1/me/sync-heartbeat/). The timestamp always originates from
+    the server clock; clients never supply it.
+    """
+
+    last_sync_at = serializers.DateTimeField(read_only=True)
+
+
 class AccountCreatorSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     name = serializers.CharField()

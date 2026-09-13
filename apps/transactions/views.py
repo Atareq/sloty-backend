@@ -2,12 +2,21 @@ from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.exceptions import MethodNotAllowed
 from rest_framework.mixins import CreateModelMixin, ListModelMixin, RetrieveModelMixin
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
-from apps.clubs.mixins import ClubScopedAccessMixin
-from apps.clubs.permissions import CanManageTransactionAttempts, HasClubAccess
+from apps.common.authorization.mixins import ClubScopedViewMixin
+from apps.common.authorization.permissions import SlotyBasePermission
+from apps.transactions.authorization import (
+    can_access_transaction,
+    can_access_transaction_attempt,
+    can_cancel_transaction,
+    can_dismiss_transaction_attempt,
+    scoped_transaction_attempts_queryset,
+    scoped_transactions_queryset,
+)
 from apps.transactions.filters import TransactionAttemptFilter, TransactionFilter
 from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.serializers import (
@@ -33,22 +42,31 @@ from apps.transactions.services import cancel_transaction, dismiss_transaction_a
     ),
 )
 class TransactionAttemptViewSet(
-    ClubScopedAccessMixin,
+    ClubScopedViewMixin,
     ListModelMixin,
     RetrieveModelMixin,
     GenericViewSet,
 ):
-    permission_classes = (CanManageTransactionAttempts,)
+    permission_classes = (SlotyBasePermission,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = TransactionAttemptFilter
     http_method_names = ("get", "post", "head", "options")
+
+    def initial(self, request, *args, **kwargs):
+        if request.method.lower() not in self.http_method_names:
+            raise MethodNotAllowed(request.method)
+        super().initial(request, *args, **kwargs)
+
+    def check_object_permission(self, request, obj) -> bool:
+        if self.action == "dismiss":
+            return can_dismiss_transaction_attempt(self.access_context, obj)
+        return can_access_transaction_attempt(self.access_context, obj)
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return TransactionAttempt.objects.none()
         return (
-            self.get_access_context()
-            .scoped_transaction_attempts_queryset()
+            scoped_transaction_attempts_queryset(self.access_context)
             .select_related(
                 "booking",
                 "club",
@@ -66,6 +84,13 @@ class TransactionAttemptViewSet(
             return TransactionAttemptDismissSerializer
         return TransactionAttemptDetailSerializer
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if not getattr(self, "swagger_fake_view", False):
+            context["access_context"] = self.access_context
+            context["club_access"] = self.access_context
+        return context
+
     @extend_schema(
         tags=["Transaction Attempts"],
         request=TransactionAttemptDismissSerializer,
@@ -73,7 +98,7 @@ class TransactionAttemptViewSet(
     )
     @action(detail=True, methods=["post"])
     def dismiss(self, request, *args, **kwargs):
-        access = self.get_access_context()
+        access = self.access_context
         attempt = self.get_object()
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -108,23 +133,32 @@ class TransactionAttemptViewSet(
     ),
 )
 class TransactionViewSet(
-    ClubScopedAccessMixin,
+    ClubScopedViewMixin,
     ListModelMixin,
     CreateModelMixin,
     RetrieveModelMixin,
     GenericViewSet,
 ):
-    permission_classes = (HasClubAccess,)
+    permission_classes = (SlotyBasePermission,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = TransactionFilter
     http_method_names = ("get", "post", "head", "options")
+
+    def initial(self, request, *args, **kwargs):
+        if request.method.lower() not in self.http_method_names:
+            raise MethodNotAllowed(request.method)
+        super().initial(request, *args, **kwargs)
+
+    def check_object_permission(self, request, obj) -> bool:
+        if self.action == "cancel":
+            return can_cancel_transaction(self.access_context, obj)
+        return can_access_transaction(self.access_context, obj)
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return Transaction.objects.none()
         return (
-            self.get_access_context()
-            .scoped_transactions_queryset()
+            scoped_transactions_queryset(self.access_context)
             .select_related("booking", "club", "court", "created_by", "cancelled_by")
             .order_by("-created", "-id")
         )
@@ -137,6 +171,13 @@ class TransactionViewSet(
         if self.action == "cancel":
             return TransactionCancelSerializer
         return TransactionDetailSerializer
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if not getattr(self, "swagger_fake_view", False):
+            context["access_context"] = self.access_context
+            context["club_access"] = self.access_context
+        return context
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -157,7 +198,7 @@ class TransactionViewSet(
     )
     @action(detail=True, methods=["post"])
     def cancel(self, request, *args, **kwargs):
-        access = self.get_access_context()
+        access = self.access_context
         transaction_obj = self.get_object()
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)

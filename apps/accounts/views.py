@@ -1,4 +1,5 @@
 from django.db.models import Prefetch, Subquery
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework.generics import RetrieveAPIView
@@ -9,6 +10,8 @@ from rest_framework.mixins import (
     UpdateModelMixin,
 )
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.viewsets import GenericViewSet
 from rest_framework_simplejwt.views import TokenObtainPairView
 
@@ -17,6 +20,7 @@ from apps.accounts.models import User
 from apps.accounts.permissions import CanAccessUsers, IsPlatformSuperAdmin
 from apps.accounts.serializers import (
     SlotyTokenObtainPairSerializer,
+    SyncHeartbeatResponseSerializer,
     UserCreateSerializer,
     UserListSerializer,
     UserMeSerializer,
@@ -48,6 +52,33 @@ class MeAPIView(RetrieveAPIView):
             )
             .get(pk=self.request.user.pk)
         )
+
+
+@extend_schema(tags=["Accounts"], responses=SyncHeartbeatResponseSerializer)
+class SyncHeartbeatAPIView(APIView):
+    """
+    Explicit offline/PWA sync heartbeat.
+
+    ARCHITECTURAL NOTE:
+    This is the ONLY mechanism that updates `ClubMembership.last_sync_at`.
+    Ordinary authenticated API traffic (Courts, Transactions, Bookings, etc.)
+    never updates it as an implicit response side effect. Authorization
+    (authentication, role authority, club/resource scope, authorized
+    queryset construction) and sync/presence tracking are separate
+    concerns; the Authorization Spine (apps/common/authorization/) owns
+    only the former. The frontend/PWA is expected to call this endpoint
+    periodically (e.g. every ~5 minutes) while active so the backend clock
+    remains the single source of truth for "last synced" state.
+    """
+
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request, *args, **kwargs):
+        now = timezone.now()
+        ClubMembership.objects.granting_access().filter(user=request.user).update(
+            last_sync_at=now
+        )
+        return Response(SyncHeartbeatResponseSerializer({"last_sync_at": now}).data)
 
 
 @extend_schema_view(

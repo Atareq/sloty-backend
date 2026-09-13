@@ -53,9 +53,25 @@
 - `/api/v1/clubs/{club_slug}/transaction-attempts/`: Traceability list/detail and dismissal for rejected attempts.
 
 ## Authorization & Scoping (Current-State)
+## Authorization & Scoping
 
 > [!NOTE]
 > Current-state/legacy authorization rules. Do not treat as target architecture.
+- **Centralized Spine**: `TransactionViewSet` and `TransactionAttemptViewSet` use `ClubScopedViewMixin`, `RequestAccessContext`, and `SlotyBasePermission`.
+- **Domain Authorization Module**: Scoping and object authorization logic live in [`apps/transactions/authorization.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/transactions/authorization.py) (do not add `apps/transactions/permissions.py`).
+- **Staff Operational Scope**:
+  - Constrained by assigned Court scope (`CourtStaffAssignment`).
+  - Staff can view and list only transactions they personally collected (`created_by == request.user`) on their assigned court(s).
+  - Staff can create transactions only for bookings on their assigned court(s).
+- **Management Operational Scope**:
+  - Owners, managers, and platform admins have club-wide transaction and transaction attempt visibility.
+- **Cancellation Authority**:
+  - Platform admins can cancel any eligible transaction across the club.
+  - Owners, managers, and staff may cancel only their own collected transactions (`created_by == request.user`) within their authorized court scope.
+- **Custody vs. Transaction Scope Separation Invariant**:
+  - Operational Transaction API authorization = `Club + Court (+ created_by for Staff)`.
+  - Current Custody / Settlement = `Club + optional Collector, NEVER Court`.
+  - Staff operational court constraints never leak into financial settlements or custody calculation.
 
 - Centralized via `ClubAccessContext` (do not add `apps/transactions/permissions.py`).
 - Staff can see and list only transactions they collected (`created_by == request.user`) on their assigned court.

@@ -1,7 +1,6 @@
 from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
-from rest_framework.exceptions import PermissionDenied
 
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.courts.services import (
@@ -44,7 +43,7 @@ class CourtWorkingHourSerializer(serializers.ModelSerializer):
         read_only_fields = ("id", "pricing_periods")
 
     def validate(self, attrs):
-        access = self.context["club_access"]
+        access = self.context["access_context"]
         court = attrs.get("court", getattr(self.instance, "court", None))
         weekday = attrs.get("weekday", getattr(self.instance, "weekday", None))
         if (
@@ -59,8 +58,6 @@ class CourtWorkingHourSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"court": "Court must belong to the selected club."}
             )
-        if not access.can_manage_working_hours(court):
-            raise PermissionDenied("You cannot manage working hours for this court.")
 
         duplicate = CourtWorkingHour.objects.filter(court=court, weekday=weekday)
         if self.instance is not None:
@@ -203,8 +200,6 @@ class CourtCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ("id",)
 
     def validate(self, attrs):
-        access = self.context["club_access"]
-
         if "default_price" in self.initial_data:
             raise serializers.ValidationError(
                 {"default_price": _("Court default_price is deprecated.")}
@@ -217,9 +212,6 @@ class CourtCreateSerializer(serializers.ModelSerializer):
             attrs.get("internal_hold_expiry_hours", 12),
             "internal_hold_expiry_hours",
         )
-
-        if not access.can_create_court():
-            raise PermissionDenied("You cannot create courts for this club.")
 
         return attrs
 
@@ -243,7 +235,6 @@ class CourtUpdateSerializer(serializers.ModelSerializer):
         )
 
     def validate(self, attrs):
-        access = self.context["club_access"]
         court = self.instance
 
         if "default_price" in self.initial_data:
@@ -261,9 +252,6 @@ class CourtUpdateSerializer(serializers.ModelSerializer):
                 attrs["internal_hold_expiry_hours"],
                 "internal_hold_expiry_hours",
             )
-
-        if not access.can_update_court(court, attrs):
-            raise PermissionDenied("You cannot update this court.")
 
         return attrs
 
