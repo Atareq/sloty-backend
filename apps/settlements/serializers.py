@@ -1,11 +1,23 @@
 from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import extend_schema_field
-from rest_framework import serializers
+from rest_framework import serializers, status
 
 from apps.accounts.models import User
+from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
+from apps.settlements.authorization import (
+    can_approve_collector,
+    validate_preview_authority,
+    validate_settlement_authority,
+)
 from apps.settlements.models import Settlement, SettlementTransaction
-from apps.settlements.services import preview_custody, settle_custody
+from apps.settlements.services import (
+    NO_UNSETTLED_TRANSACTIONS_MESSAGE,
+    build_custody,
+    get_user_display_name,
+    serialize_preview_transactions,
+    settle_custody,
+)
 
 
 def user_display_name(user):
@@ -81,6 +93,9 @@ class SettlementLineSerializer(serializers.ModelSerializer):
     )
     court = serializers.IntegerField(source="transaction.court_id", read_only=True)
     court_name = serializers.CharField(source="transaction.court.name", read_only=True)
+    amount = serializers.DecimalField(
+        source="transaction.amount", max_digits=10, decimal_places=2, read_only=True
+    )
     payment_method = serializers.CharField(
         source="transaction.payment_method",
         read_only=True,
@@ -201,9 +216,10 @@ class SettlementCreateSerializer(serializers.ModelSerializer):
         extra_kwargs = {"notes": {"required": False, "allow_blank": True}}
 
     def validate(self, attrs):
-        access = self.context["club_access"]
+        context = self.context.get("access_context") or self.context.get("club_access")
+        club = getattr(context, "club", None)
         court = attrs.get("court")
-        if court is not None and court.club_id != access.club.id:
+        if court is not None and club is not None and court.club_id != club.id:
             raise serializers.ValidationError(
                 {
                     "court": [
@@ -214,15 +230,19 @@ class SettlementCreateSerializer(serializers.ModelSerializer):
                     ],
                 }
             )
+        validate_settlement_authority(
+            context=context,
+            collector=attrs["collected_by"],
+        )
         return attrs
 
     def create(self, validated_data):
+        context = self.context.get("access_context") or self.context.get("club_access")
         request = self.context["request"]
         return settle_custody(
-            access=self.context["club_access"],
-            actor=request.user,
+            club=context.club,
             collector=validated_data["collected_by"],
-            court=validated_data.get("court"),
+            actor=request.user,
             notes=validated_data.get("notes", ""),
         )
 
@@ -248,9 +268,10 @@ class SettlementPreviewRequestSerializer(serializers.Serializer):
         raise NotImplementedError
 
     def validate(self, attrs):
-        access = self.context["club_access"]
+        context = self.context.get("access_context") or self.context.get("club_access")
+        club = getattr(context, "club", None)
         court = attrs.get("court")
-        if court is not None and court.club_id != access.club.id:
+        if court is not None and club is not None and court.club_id != club.id:
             raise serializers.ValidationError(
                 {
                     "court": [
@@ -262,16 +283,47 @@ class SettlementPreviewRequestSerializer(serializers.Serializer):
                 }
             )
         attrs.setdefault("collected_by", self.context["request"].user)
+        validate_preview_authority(
+            context=context,
+            collector=attrs["collected_by"],
+        )
         return attrs
 
     def preview(self):
+        context = self.context.get("access_context") or self.context.get("club_access")
         request = self.context["request"]
-        return preview_custody(
-            access=self.context["club_access"],
-            actor=request.user,
-            collector=self.validated_data["collected_by"],
-            court=self.validated_data.get("court"),
+        collector = self.validated_data["collected_by"]
+        court = self.validated_data.get("court")
+        custody = build_custody(
+            club=context.club,
+            collector=collector,
         )
+        if not custody["transactions"]:
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="NO_UNSETTLED_TRANSACTIONS",
+                message=NO_UNSETTLED_TRANSACTIONS_MESSAGE,
+            )
+        can_approve = can_approve_collector(context, collector.id)
+        return {
+            "club": context.club.id,
+            "collected_by": collector.id,
+            "collected_by_name": get_user_display_name(collector),
+            "court": court.id if court else None,
+            "court_name": court.name if court else "",
+            "is_self_preview": bool(request.user and collector.id == request.user.id),
+            "can_approve": can_approve,
+            "approval_required": not can_approve,
+            "period_start": custody["period_start"],
+            "period_end": custody["period_end"],
+            "transaction_count": custody["transaction_count"],
+            "total_amount": custody["net_amount"],
+            "booking_payments": custody["booking_payments"],
+            "booking_refunds": custody["booking_refunds"],
+            "net_amount": custody["net_amount"],
+            "totals_by_payment_method": custody["totals_by_payment_method"],
+            "transactions": serialize_preview_transactions(custody["transactions"]),
+        }
 
 
 class SettlementPreviewTransactionSerializer(serializers.Serializer):
@@ -330,9 +382,10 @@ class SettlementUnsettledSummaryRequestSerializer(serializers.Serializer):
         raise NotImplementedError
 
     def validate(self, attrs):
-        access = self.context["club_access"]
+        context = self.context.get("access_context") or self.context.get("club_access")
+        club = getattr(context, "club", None)
         court = attrs.get("court")
-        if court is not None and court.club_id != access.club.id:
+        if court is not None and club is not None and court.club_id != club.id:
             raise serializers.ValidationError(
                 {
                     "court": [

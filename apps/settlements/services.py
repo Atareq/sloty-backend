@@ -4,6 +4,17 @@ Settlements & Current Custody Domain Services.
 PRIMARY ARCHITECTURAL INVARIANT:
 Current Custody and Settlement are financially scoped by CLUB + optional COLLECTOR,
 never by COURT.
+PRIMARY ARCHITECTURAL INVARIANTS:
+1. Financial custody scope is Club + optional Collector.
+   Court is NEVER part of Current Custody or Settlement financial scope.
+2. Financial layer has ZERO knowledge of authorization.
+   Authorization is evaluated at the boundary before calling financial services.
+   These functions do not inspect roles, permissions, court assignments, or
+   RequestAccessContext.
+3. Operational Transaction authorization (which is Court-scoped for Staff)
+   must NOT be reused for financial custody.
+4. Preview and Settlement derive candidate transactions from the exact same
+   unsettled transaction query (get_unsettled_transactions_queryset).
 
 Financial Custody Scope = Club + optional Collector + unsettled financial transactions.
 NOT: Club + Court + Collector.
@@ -34,6 +45,11 @@ Responsibilities:
    Consumes the exact same authoritative custody query
    (get_unsettled_transactions_queryset),
    locking candidate transactions and mutating settlement records atomically.
+Structure:
+- get_unsettled_transactions_queryset(*, club, collector=None, lock=False)
+- build_custody(*, club, collector=None, period_end=None)
+- settle_custody(*, club, collector, actor, notes="")
+- mark_settlement_settled(*, settlement, actor)
 """
 
 from decimal import Decimal
@@ -411,15 +427,20 @@ def build_custody(
     *,
     club,
     collector=None,
-    lock=False,
     period_end=None,
+    lock=False,
 ):
     """
     Authoritative, side-effect-free Current Custody calculation.
 
-    ARCHITECTURAL INVARIANT:
-    Current Custody is a financial scope, not an operational Court scope.
-    Financial scope = Club + optional Collector + unsettled transactions.
+    ARCHITECTURAL INVARIANTS:
+    1. Financial custody scope is strictly Club + optional Collector.
+       Court is never part of custody scope.
+    2. Authorization is resolved BEFORE this function is called.
+       This function must NOT perform authorization, inspect roles,
+       or check permissions.
+    3. Both preview and settlement query the identical candidates via
+       get_unsettled_transactions_queryset to guarantee mathematical parity.
 
     Why Court must NOT be used:
     A collector's custody contains every unsettled transaction collected by
@@ -439,10 +460,9 @@ def build_custody(
     transactional consistency.
 
     Semantics:
-    - collector=None: All unsettled transactions in the Club (e.g. for club
-      overview).
-    - collector=User: All unsettled transactions in the Club collected by
-      that specific user.
+    - collector=None: All unsettled transactions in the Club across all courts.
+    - collector=User: All unsettled transactions in the Club created by that user
+      across all courts.
     """
     queryset = get_unsettled_transactions_queryset(
         club=club,
@@ -638,32 +658,30 @@ def build_unsettled_collector_summaries(
 
 def settle_custody(
     *,
-    access,
-    actor,
+    club,
     collector,
+    actor,
     notes="",
-    court=None,
 ):
     """
-    Settlement mutation operation.
+    Consumes the exact same authoritative custody query
+    (get_unsettled_transactions_queryset), locking candidate transactions
+    and creating Settlement and SettlementTransaction lines atomically.
 
-    1. Authorization / Scope Guard: validates settlement authority.
-    2. Authoritative Custody: locks and retrieves the exact same candidate
-       set resolved by get_unsettled_transactions_queryset (Club + Collector,
-       NOT Court).
-    3. Mutation: creates Settlement and SettlementTransaction lines atomically.
+    ARCHITECTURAL INVARIANTS:
+    1. Financial custody scope is strictly Club + Collector.
+       Court is never part of custody scope.
+    2. Authorization is evaluated at the boundary BEFORE this service is reached.
+       This function does NOT inspect roles, permissions, court assignments, or
+       RequestAccessContext.
+    3. Preview and settlement derive candidate transactions from the exact same
+       query (get_unsettled_transactions_queryset) to guarantee mathematical parity.
     """
     try:
         with transaction.atomic():
-            validate_settlement_authority(
-                access=access,
-                actor=actor,
-                collector=collector,
-                court=court,
-            )
             candidates = list(
                 get_unsettled_transactions_queryset(
-                    club=access.club,
+                    club=club,
                     collector=collector,
                     lock=True,
                 )
@@ -678,8 +696,8 @@ def settle_custody(
             custody = summarize_current_custody_transactions(candidates)
             settled_at = timezone.now()
             created_settlement = Settlement.objects.create(
-                club=access.club,
-                court=court,
+                club=club,
+                court=None,
                 collected_by=collector,
                 period_start=custody["period_start"],
                 period_end=custody["period_end"],
@@ -728,47 +746,47 @@ def settle_custody(
         ) from exc
 
 
-def create_approved_settlement(*, access, collected_by, notes="", actor, court=None):
-    """Legacy alias for settle_custody."""
-    return settle_custody(
-        access=access,
-        actor=actor,
-        collector=collected_by,
-        notes=notes,
-        court=court,
-    )
-
-
-def process_settlement_request(
+def create_approved_settlement(
     *,
-    access,
-    actor,
-    collected_by,
-    court=None,
+    club=None,
+    access=None,
+    collected_by=None,
+    collector=None,
     notes="",
+    actor=None,
+    created_by=None,
+    court=None,
 ):
-    """Legacy alias for settle_custody."""
+    """Legacy backward-compatibility wrapper for settle_custody."""
+    target_club = club or (access.club if access else None)
+    target_collector = collector if collector is not None else collected_by
+    target_actor = actor or created_by
+    if access is not None:
+        validate_settlement_authority(
+            access=access,
+            actor=target_actor,
+            collector=target_collector,
+            court=court,
+        )
     return settle_custody(
-        access=access,
-        actor=actor,
-        collector=collected_by,
-        court=court,
+        club=target_club,
+        collector=target_collector,
+        actor=target_actor,
         notes=notes,
     )
 
 
-def create_settlement(*, access, collected_by, notes="", created_by, court=None):
-    """Legacy alias for settle_custody."""
-    return settle_custody(
-        access=access,
-        actor=created_by,
-        collector=collected_by,
-        court=court,
-        notes=notes,
-    )
+process_settlement_request = create_approved_settlement
+create_settlement = create_approved_settlement
 
 
-def mark_settlement_settled(*, access, settlement, actor):
+def mark_settlement_settled(*, settlement, actor, access=None):
+    """
+    Transition a PENDING settlement to SETTLED atomically.
+
+    Authorization is evaluated at the view/boundary layer before this
+    function is reached.
+    """
     with transaction.atomic():
         locked_settlement = (
             Settlement.objects.select_for_update(of=("self",))
@@ -781,10 +799,11 @@ def mark_settlement_settled(*, access, settlement, actor):
             )
             .get(pk=settlement.pk)
         )
-        if not access.can_access_settlement(locked_settlement):
-            raise PermissionDenied("You cannot access this settlement.")
-        if not access.can_manage_settlements():
-            raise PermissionDenied("You cannot manage settlements for this club.")
+        if access is not None:
+            if not access.can_access_settlement(locked_settlement):
+                raise PermissionDenied("You cannot access this settlement.")
+            if not access.can_manage_settlements():
+                raise PermissionDenied("You cannot manage settlements for this club.")
         if locked_settlement.status == Settlement.Status.SETTLED:
             raise SlotyAPIException(
                 status_code=status.HTTP_409_CONFLICT,

@@ -2,12 +2,18 @@ from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.exceptions import MethodNotAllowed, PermissionDenied
 from rest_framework.mixins import CreateModelMixin, ListModelMixin, RetrieveModelMixin
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
-from apps.clubs.mixins import ClubScopedAccessMixin
-from apps.clubs.permissions import CanManageClubSettlements
+from apps.common.authorization.mixins import ClubScopedViewMixin
+from apps.common.authorization.permissions import SlotyBasePermission
+from apps.settlements.authorization import (
+    build_unsettled_summary,
+    can_access_settlement,
+    can_manage_settlements,
+)
 from apps.settlements.filters import SettlementFilter
 from apps.settlements.models import Settlement
 from apps.settlements.serializers import (
@@ -19,10 +25,7 @@ from apps.settlements.serializers import (
     SettlementUnsettledSummaryRequestSerializer,
     SettlementUnsettledSummaryResponseSerializer,
 )
-from apps.settlements.services import (
-    build_unsettled_collector_summaries,
-    mark_settlement_settled,
-)
+from apps.settlements.services import mark_settlement_settled
 
 
 @extend_schema_view(
@@ -35,32 +38,46 @@ from apps.settlements.services import (
     retrieve=extend_schema(tags=["Settlements"], responses=SettlementDetailSerializer),
 )
 class SettlementViewSet(
-    ClubScopedAccessMixin,
+    ClubScopedViewMixin,
     ListModelMixin,
     CreateModelMixin,
     RetrieveModelMixin,
     GenericViewSet,
 ):
-    permission_classes = (CanManageClubSettlements,)
+    permission_classes = (SlotyBasePermission,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = SettlementFilter
     http_method_names = ("get", "post", "head", "options")
 
+    def initial(self, request, *args, **kwargs):
+        if request.method.lower() not in self.http_method_names:
+            raise MethodNotAllowed(request.method)
+        super().initial(request, *args, **kwargs)
+
+    def check_object_permission(self, request, obj) -> bool:
+        return can_access_settlement(self.access_context, obj)
+
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return Settlement.objects.none()
-        queryset = (
-            self.get_access_context()
-            .scoped_settlements_queryset()
-            .select_related("club", "court", "collected_by", "created_by", "settled_by")
-            .order_by("-created", "-id")
-        )
+        context = self.access_context
+        queryset = Settlement.objects.filter(club=context.club)
+        if not can_manage_settlements(context):
+            queryset = queryset.filter(collected_by=context.user)
+        queryset = queryset.select_related(
+            "club", "court", "collected_by", "created_by", "settled_by"
+        ).order_by("-created", "-id")
         if self.action == "retrieve":
             queryset = queryset.prefetch_related(
                 "lines__transaction__booking",
                 "lines__transaction__court",
             )
         return queryset
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["access_context"] = self.access_context
+        return context
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -122,10 +139,10 @@ class SettlementViewSet(
             context=self.get_serializer_context(),
         )
         serializer.is_valid(raise_exception=True)
-        payload = build_unsettled_collector_summaries(
-            access=self.get_access_context(),
-            actor=request.user,
-            **serializer.validated_data,
+        collector = serializer.validated_data.get("collected_by")
+        payload = build_unsettled_summary(
+            context=self.access_context,
+            collector=collector,
         )
         response_serializer = SettlementUnsettledSummaryResponseSerializer(payload)
         return Response(response_serializer.data)
@@ -137,13 +154,15 @@ class SettlementViewSet(
     )
     @action(detail=True, methods=["post"], url_path="mark-settled")
     def mark_settled(self, request, *args, **kwargs):
-        settlement = mark_settlement_settled(
-            access=self.get_access_context(),
-            settlement=self.get_object(),
+        if not can_manage_settlements(self.access_context):
+            raise PermissionDenied("You cannot manage settlements for this club.")
+        settlement = self.get_object()
+        settled_settlement = mark_settlement_settled(
+            settlement=settlement,
             actor=request.user,
         )
         serializer = SettlementDetailSerializer(
-            settlement,
+            settled_settlement,
             context=self.get_serializer_context(),
         )
         return Response(serializer.data)

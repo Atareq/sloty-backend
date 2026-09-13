@@ -7,9 +7,9 @@
 ## Domain Invariants
 
 - **Financial Custody Scope: Club + Collector (NEVER Court)**:
-  - Current Custody and Settlement are financially scoped by **CLUB + optional COLLECTOR, NEVER BY COURT**.
+  - Current Custody and Settlement are financially scoped strictly by **CLUB + optional COLLECTOR, NEVER BY COURT**.
   - A collector's custody includes all unsettled transactions collected by that user across all courts in the club.
-  - Optional `court` filtering applies only when callers explicitly request court-specific slices (such as court-filtered dashboard metrics).
+  - Court is an operational booking/scheduling construct and is never part of financial custody.
 - **Current Custody Definition**:
   - Authoritative rule: All signed transactions in the selected club where:
     ```text
@@ -19,6 +19,9 @@
   - **All-Time State**: Current Custody is not date-filtered. It includes all unsettled signed transactions regardless of age, payment method, or booking lifecycle status.
   - Includes signed negative `REFUND` rows.
   - Zero-net and negative-net collectors remain visible if they have unsettled candidates. Zero candidates is a distinct state.
+- **Mathematical Parity Between Preview and Settle**:
+  - Preview (`preview_custody` / `build_custody`) and execution (`settle_custody`) consume the exact same underlying candidate query (`get_unsettled_transactions_queryset`).
+  - Guarantee: Whatever transactions are shown in preview are the exact rows locked and settled by execution.
 - **Role & Actor Naming**:
   - `collected_by`: The staff member/user whose collected money is being settled.
   - `created_by` / `settled_by`: The administrator/manager approving and executing the settlement.
@@ -47,29 +50,46 @@
 - [`SettlementTransaction`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/settlements/models.py):
   - Pivot table binding `settlement` and `transaction` (`OneToOneField`).
 
-## Service Layer
+## Architecture & Authorization Spine Integration
 
-- [`apps/settlements/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/settlements/services.py):
-  - `get_unsettled_transactions_queryset()`: Authoritative candidate query resolver. Scoped by Club + Collector, never Court.
-  - `build_custody()`: Calculates financial net, payments, refunds, and earliest candidate date.
-  - `preview_custody()`: Read-only preview with authorization guards.
-  - `settle_custody()`: Executes settlement in `transaction.atomic()`, locking candidate transactions with `select_for_update()`, creating `Settlement` and `SettlementTransaction` rows, and recording audit logs.
+Settlement is migrated to the Task 2 authorization spine (`apps/common/authorization/`).
+
+```text
+RequestAccessContext (Role, Club, Court, Admin)
+         ↓
+SlotyBasePermission (Role + SettlementViewSet + DRF Action)
+         ↓
+ViewSet & Object Permission (can_access_settlement)
+         ↓
+Serializer / Domain Authorization Layer (apps/settlements/authorization.py)
+         ↓
+Pure Financial Custody Services (apps/settlements/services.py)
+```
+
+### Authorization Boundary (`apps/settlements/authorization.py`)
+User authority is evaluated at the API/domain boundary *before* calling pure financial services:
+- `validate_preview_authority(*, context, collector)`
+- `validate_settlement_authority(*, context, collector)`
+- `validate_unsettled_summary_authority(*, context, collector=None)`
+- `can_manage_settlements(context)`
+- `can_access_settlement(context, settlement)`
+- `can_approve_collector(context, collector_id, roles=None)`
+
+### Pure Financial Custody Services (`apps/settlements/services.py`)
+Core financial functions have clean, unencumbered signatures with **zero knowledge of authorization**:
+- `get_unsettled_transactions_queryset(*, club, collector=None, lock=False)`
+- `build_custody(*, club, collector=None, period_end=None)`
+- `settle_custody(*, club, collector, actor, notes="")`
+- `mark_settlement_settled(*, settlement, actor)`
+
+**Invariant**: Never pass `context`, `access`, `court`, `request`, `role`, or `permission` into these pure financial functions.
 
 ## API Boundaries & Key Invariants
 
 - `/api/v1/clubs/{club_slug}/settlements/`: List and create settlements.
 - `/api/v1/clubs/{club_slug}/settlements/preview/`: Read-only preview of unsettled money for a collector (defaults to `request.user`).
 - `/api/v1/clubs/{club_slug}/settlements/unsettled-summary/`: Management overview of all collectors with unsettled custody.
-- `POST .../settlements/{id}/mark-settled/`: Legacy/test compatibility route for pending settlements.
-
-## Authorization & Scoping (Current-State)
-
-> [!NOTE]
-> Current-state/legacy authorization rules. Do not treat as target architecture.
-
-- Centralized via `ClubAccessContext` and [`CanManageClubSettlements`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/permissions.py).
-- Staff can preview only their own custody and view only their own settlements.
-- Managers without `manager_can_settle_transactions` cannot access management summary or approve settlements.
+- `POST .../settlements/{id}/mark-settled/`: Transition pending settlements to settled.
 
 ## Cross-App Dependencies
 
@@ -80,4 +100,4 @@
 ## Testing
 
 - Test suite: [`tests/settlements/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/settlements/).
-- Key test file: `test_settlement_api.py` (preview, summary, approval, self-approval prevention, locking).
+- Key test file: `test_settlement_api.py` (preview, summary, approval, self-approval prevention, locking, current custody scope).

@@ -51,9 +51,20 @@
 - Independent of `DEBUG`. Controlled via environment variables: `SQL_QUERY_STATS_ENABLED`, `SQL_QUERY_STATS_SLOW_QUERY_MS`, `SQL_QUERY_STATS_WARN_QUERY_COUNT`.
 - Detects exact duplicates and logs potential N+1 heuristics (`[PERF:N+1?]`). Parameters, bodies, and Authorization headers are never logged.
 
+### 5. Authorization Spine Foundation ([`apps/common/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/))
+- **RequestAccessContext**: Fact container (`user`, `role`, `club`, `membership`, `court`, `is_platform_admin`). Zero permissions logic.
+- **Scope Resolver**: `resolve_club_scope(request, club_slug, court_id=None)` enforces URL club authority, returns cached context on `request.access_context`, raises `CLUB_ACCESS_REVOKED` (403) on revoked/missing membership.
+- **Role Matrix & Permission**: `SlotyBasePermission` evaluates centralized `ROLE_PERMISSIONS[role][viewset][action]` with strict default deny. Exposes clean `has_object_permission()` extension hook.
+- **ClubScopedViewMixin**: ViewSet mixin attaching context during `perform_authentication` before permission checks.
+
 ## Testing
 
 - Test suite: [`tests/common/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/common/).
+- Test suites:
+  - Infrastructure: [`tests/common/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/common/).
+  - Authorization Spine: [`tests/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/authorization/).
 - Key test files:
+  - `test_context_and_resolver.py`: Scope resolution, caching, missing access, court non-loading.
+  - `test_base_permission_and_matrix.py`: Matrix verification, default deny, custom actions, object permission hook.
   - `test_egypt_locations.py` / `test_locations_api.py`: Choice validation and API endpoint.
   - `test_sql_query_stats_middleware.py`: Middleware counting and threshold logging.

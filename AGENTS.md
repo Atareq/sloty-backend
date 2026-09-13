@@ -67,27 +67,38 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 
 ---
 
-## 5. Authorization Architecture (Current State & Future Direction)
+## 5. Authorization Spine Architecture
 
-> [!WARNING]
-> **Notice on Current Authorization Architecture**:
-> Current authorization details are documented in [`apps/clubs/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/AGENTS.md) and [`apps/accounts/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/AGENTS.md).
-> This authorization system represents **current-state / legacy documentation**. Do **not** treat it as the target architecture or assume its current abstractions (`ClubAccessContext`, `ClubScopedAccessMixin`, permission wrappers) must be preserved indefinitely.
+The authorization spine separates facts, permissions, query scoping, and business rules:
 
-The planned future authorization direction:
 ```text
 Authentication
       ↓
 request.user / profile
+Scope Resolution (resolve_club_scope)
       ↓
 URL club scope
+RequestAccessContext (Facts: user, role, club, court, admin flag)
       ↓
-role → API capability
+SlotyBasePermission (Role + ViewSet + DRF Action → allow / deny)
       ↓
-object permission only when genuinely required
+QuerySet Scoping (data filtering)
+      ↓
+Object Permission (extension hook for domain object rules)
+      ↓
+Serializer Validation
+      ↓
+Domain Service (state machines, concurrency locks, audit logs)
 ```
+### Architectural Principles
+- **Context = Facts**: [`RequestAccessContext`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/context.py) provides factual data only. It contains **no** endpoint authorization decisions (`can_create_booking()`, etc.) and **no** queryset logic.
+- **Scope Resolution**: [`resolve_club_scope()`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/resolver.py) enforces URL club authority for `/api/v1/clubs/{club_slug}/...`. Missing or revoked access raises `CLUB_ACCESS_REVOKED` (403). Context is cached on `request._access_context`.
+- **Role Matrix**: Centralized in [`ROLE_PERMISSIONS`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/matrix.py) with four operational roles (`ADMIN`, `OWNER`, `MANAGER`, `STAFF`). Strict default deny. No capability abstraction.
+- **Base Permission**: [`SlotyBasePermission`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/permissions.py) evaluates `Role + ViewSet + DRF Action`. Exposes `has_object_permission` as a clean extension hook.
 
-*Note: Authorization redesign is scheduled for a dedicated future task. Do not refactor or redesign authorization during unrelated tasks.*
+> [!NOTE]
+> **Transitional State**:
+> The new authorization spine foundation is implemented under [`apps/common/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/). Existing domains still operate on the legacy access layer (`ClubAccessContext`, `ClubScopedAccessMixin`) until migrated domain-by-domain in subsequent tasks.
 
 ---
 
