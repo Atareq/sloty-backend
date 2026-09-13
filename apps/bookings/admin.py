@@ -22,6 +22,8 @@ class BookingAdmin(admin.ModelAdmin):
     search_fields = (
         "customer_name",
         "customer_phone",
+        "club_player__display_name",
+        "club_player__player_profile__phone_number",
         "court__name",
         "club__name",
     )

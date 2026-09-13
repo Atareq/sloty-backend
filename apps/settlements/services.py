@@ -37,6 +37,10 @@ from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
 from apps.audit.services import record_audit_log, settlement_audit_snapshot
+from apps.bookings.identity import (
+    booking_customer_display_name,
+    booking_customer_display_phone,
+)
 from apps.common.exceptions import SlotyAPIException
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
@@ -241,9 +245,13 @@ def get_unsettled_transactions_queryset(
         queryset = queryset.filter(created_by=collector)
     if lock:
         queryset = queryset.select_for_update(of=("self",))
-    return queryset.select_related("booking", "club", "court", "created_by").order_by(
-        "created", "id"
-    )
+    return queryset.select_related(
+        "booking",
+        "booking__club_player__player_profile",
+        "club",
+        "court",
+        "created_by",
+    ).order_by("created", "id")
 
 
 def get_current_unsettled_transactions(
@@ -282,8 +290,12 @@ def serialize_preview_transactions(transactions):
             "id": transaction_obj.id,
             "kind": transaction_obj.transaction_type,
             "booking": transaction_obj.booking_id,
-            "booking_customer_name": transaction_obj.booking.customer_name,
-            "booking_customer_phone": transaction_obj.booking.customer_phone,
+            "booking_customer_name": booking_customer_display_name(
+                transaction_obj.booking
+            ),
+            "booking_customer_phone": booking_customer_display_phone(
+                transaction_obj.booking
+            ),
             "booking_start_time": transaction_obj.booking.start_time,
             "booking_end_time": transaction_obj.booking.end_time,
             "court": transaction_obj.court_id,

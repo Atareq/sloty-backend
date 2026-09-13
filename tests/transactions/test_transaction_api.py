@@ -462,6 +462,44 @@ class TransactionResponseContextTests(TransactionAPITestCase):
         self.assertEqual(response.data["created_by_username"], "")
 
 
+class TransactionClubPlayerIdentityTests(TransactionAPITestCase):
+    def test_transaction_display_keeps_booking_club_player_version(self):
+        from datetime import time
+
+        from apps.bookings.services import create_booking
+        from apps.courts.models import CourtWorkingHour, CourtWorkingHourPricePeriod
+        from apps.players.services import create_club_player_version
+
+        admin = self.create_platform_admin("identity-tx-admin")
+        club = self.create_club("Identity Tx Club", slug="identity-tx-club")
+        court = self.create_court(club, "Identity Tx Court")
+        working_hour = CourtWorkingHour.objects.create(court=court, weekday=2)
+        CourtWorkingHourPricePeriod.objects.create(
+            working_hour=working_hour,
+            starts_at=time(9, 0),
+            ends_at=time(23, 0),
+            price=court.default_price,
+        )
+        booking = create_booking(
+            created_by=admin,
+            court=court,
+            start_time=self.time_at(20),
+            end_time=self.time_at(21),
+            customer_name="Ahmed Ali",
+            customer_phone="+201088880020",
+        )
+        create_club_player_version(
+            booking.club_player, display_name="Ahmed Salah", player_number=10
+        )
+        transaction_obj = self.create_transaction(booking, created_by=admin)
+        self.client.force_authenticate(user=admin)
+
+        response = self.client.get(self.transaction_detail_url(club, transaction_obj))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["booking_customer_name"], "Ahmed Ali")
+        self.assertEqual(response.data["booking_customer_phone"], "+201088880020")
+
+
 class TransactionCreateTests(TransactionAPITestCase):
     def setUp(self):
         self.platform_admin = self.create_platform_admin("create-admin")

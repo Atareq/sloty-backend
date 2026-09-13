@@ -9,6 +9,10 @@ from rest_framework.exceptions import PermissionDenied
 from apps.audit.models import AuditLog
 from apps.audit.services import booking_audit_snapshot, record_audit_log
 from apps.bookings.filters import compute_booking_hold_expires_at
+from apps.bookings.identity import (
+    booking_customer_display_name,
+    booking_customer_display_phone,
+)
 from apps.bookings.models import Booking, BookingAttempt
 from apps.bookings.services import (
     FREE_SLOT_STATUS,
@@ -85,6 +89,25 @@ class BookingRecurrenceReadMixin:
         return next_booking.id if next_booking else None
 
 
+class BookingIdentityReadMixin(serializers.Serializer):
+    """
+    Operational booking responses keep customer_name / customer_phone keys
+    but read them from ClubPlayer (exact version at booking time), falling
+    back to snapshot columns when club_player is null.
+    """
+
+    customer_name = serializers.SerializerMethodField()
+    customer_phone = serializers.SerializerMethodField()
+
+    @extend_schema_field(serializers.CharField())
+    def get_customer_name(self, obj) -> str:
+        return booking_customer_display_name(obj)
+
+    @extend_schema_field(serializers.CharField())
+    def get_customer_phone(self, obj) -> str:
+        return booking_customer_display_phone(obj)
+
+
 class BookingLastStatusActorMixin(serializers.Serializer):
     last_status_changed_by = serializers.SerializerMethodField()
     last_status_changed_by_name = serializers.SerializerMethodField()
@@ -109,6 +132,7 @@ class BookingLastStatusActorMixin(serializers.Serializer):
 
 
 class BookingListSerializer(
+    BookingIdentityReadMixin,
     BookingPaymentSummaryMixin,
     BookingHoldExpiresAtMixin,
     BookingRecurrenceReadMixin,
@@ -153,6 +177,7 @@ class BookingListSerializer(
 
 
 class BookingDetailSerializer(
+    BookingIdentityReadMixin,
     BookingPaymentSummaryMixin,
     BookingHoldExpiresAtMixin,
     BookingRecurrenceReadMixin,
@@ -209,6 +234,16 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         write_only=True,
     )
     requested_at = TimezoneAwareDateTimeField(required=False, write_only=True)
+    club_player_id = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=(
+            "Optional. Explicit ClubPlayer version to attach. Omit for "
+            "normal creation (backend uses the current version). Supply a "
+            "historical version id to book under an older club identity."
+        ),
+    )
 
     class Meta:
         model = Booking
@@ -217,6 +252,7 @@ class BookingCreateSerializer(serializers.ModelSerializer):
             "court",
             "customer_name",
             "customer_phone",
+            "club_player_id",
             "start_time",
             "end_time",
             "source",

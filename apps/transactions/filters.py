@@ -7,7 +7,7 @@ from django.utils.dateparse import parse_date, parse_datetime
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
-from apps.common.search import customer_phone_search_q
+from apps.bookings.identity import booking_identity_search_q
 from apps.transactions.models import Transaction, TransactionAttempt
 
 
@@ -69,7 +69,8 @@ class TransactionFilter(django_filters.FilterSet):
         method="filter_search",
         help_text=(
             "Search booking customer_name, booking customer_phone "
-            "(including Egyptian phone variants), and payment_reference."
+            "(including Egyptian phone variants), ClubPlayer identity, "
+            "and payment_reference."
         ),
     )
     ordering = django_filters.ChoiceFilter(
@@ -138,8 +139,7 @@ class TransactionFilter(django_filters.FilterSet):
         if not cleaned:
             return queryset
         return queryset.filter(
-            Q(booking__customer_name__icontains=cleaned)
-            | customer_phone_search_q("booking__customer_phone", cleaned)
+            booking_identity_search_q(cleaned, booking_prefix="booking__")
             | Q(payment_reference__icontains=cleaned)
         )
 

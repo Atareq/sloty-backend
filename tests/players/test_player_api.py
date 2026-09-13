@@ -3,24 +3,33 @@ API tests for ClubPlayer and PlayerProfile endpoints.
 
 Tests cover:
   - ClubPlayer list/create/retrieve (no update/partial_update — see
-    test_patch_club_player_is_rejected: ClubPlayer is append-oriented/
-    historical)
+    test_patch_club_player_is_rejected: ClubPlayer is a permanent,
+    versioned/append-only record)
   - Cross-club isolation (scoped queryset returns 404 for wrong club)
   - Role matrix: Owner/Manager/Staff can create
   - Phone find-or-create: same phone across clubs creates ONE PlayerProfile,
     TWO ClubPlayers
+  - Versioning: same phone + same display_name in one club reuses the
+    existing ClubPlayer; a different display_name records a new version
+    (both permanently coexist)
   - PlayerProfile list: only shows profiles linked to the current club
   - PlayerProfile create (find-or-create): 201 for new, 200 for existing
   - Authentication: unauthenticated request returns 401
   - Filter: search by display_name, player_number
 """
 
+from datetime import timedelta
+from decimal import Decimal
+
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
+from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
+from apps.courts.models import Court
 from apps.players.models import ClubPlayer, PlayerProfile
 
 
@@ -95,6 +104,8 @@ class ClubPlayerCRUDTests(PlayerAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["display_name"], "Ahmed H")
         self.assertEqual(response.data["player_number"], 10)
+        self.assertTrue(response.data["is_current_version"])
+        self.assertIsNone(response.data["previous_version"])
         self.assertIn("player_profile", response.data)
         self.assertFalse(response.data["player_profile"]["has_account"])
 
@@ -132,6 +143,8 @@ class ClubPlayerCRUDTests(PlayerAPITestCase):
         response = self.client.get(self.player_detail_url(self.club, cp.pk))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["display_name"], "Retrieve Player")
+        self.assertNotIn("last_used_at", response.data)
+        self.assertNotIn("updated_at", response.data)
 
     def test_patch_club_player_is_rejected(self):
         """
@@ -283,7 +296,13 @@ class ClubPlayerSamePhoneTwoClubsTests(PlayerAPITestCase):
 
 
 class ClubPlayerCreateIdempotentTests(PlayerAPITestCase):
-    """Creating with the same phone twice in one club returns the existing player."""
+    """
+    Creating with the same phone + same display_name/player_number twice in
+    one club returns/reuses the existing version. A different display_name
+    for the same phone records a brand-new version instead (ClubPlayer is
+    versioned/append-only — see apps/players/AGENTS.md "ClubPlayer Lifecycle
+    (Versioned, Append-Only)").
+    """
 
     def setUp(self):
         self.owner = self.create_user("idem-owner")
@@ -291,22 +310,47 @@ class ClubPlayerCreateIdempotentTests(PlayerAPITestCase):
         self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
         self.client.force_authenticate(user=self.owner)
 
-    def test_second_create_returns_existing_club_player(self):
+    def test_second_create_with_same_content_reuses_existing_club_player(self):
         phone = "+201055550001"
         self.client.post(
             self.player_list_url(self.club),
-            {"phone_number": phone, "display_name": "First"},
+            {"phone_number": phone, "display_name": "Same Name"},
             format="json",
         )
         response = self.client.post(
             self.player_list_url(self.club),
-            {"phone_number": phone, "display_name": "Second"},
+            {"phone_number": phone, "display_name": "Same Name"},
             format="json",
         )
         # Still 201 — service uses get_or_create
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        # Only one ClubPlayer row exists
+        # Only one ClubPlayer row exists — exact same content is reused.
         self.assertEqual(ClubPlayer.objects.filter(club=self.club).count(), 1)
+
+    def test_second_create_with_different_display_name_records_a_new_version(self):
+        phone = "+201055550002"
+        first_response = self.client.post(
+            self.player_list_url(self.club),
+            {"phone_number": phone, "display_name": "First"},
+            format="json",
+        )
+        second_response = self.client.post(
+            self.player_list_url(self.club),
+            {"phone_number": phone, "display_name": "Second"},
+            format="json",
+        )
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(first_response.data["id"], second_response.data["id"])
+        self.assertFalse(
+            ClubPlayer.objects.get(pk=first_response.data["id"]).is_current_version
+        )
+        self.assertTrue(second_response.data["is_current_version"])
+        self.assertEqual(
+            second_response.data["previous_version"], first_response.data["id"]
+        )
+        # Both versions permanently exist — nothing was overwritten or removed.
+        self.assertEqual(ClubPlayer.objects.filter(club=self.club).count(), 2)
 
 
 class ClubPlayerFilterTests(PlayerAPITestCase):
@@ -346,6 +390,12 @@ class ClubPlayerFilterTests(PlayerAPITestCase):
         ids = [r["id"] for r in response.data["results"]]
         self.assertIn(self.cp1.id, ids)
         self.assertNotIn(self.cp2.id, ids)
+
+    def test_filter_current_versions(self):
+        url = self.player_list_url(self.club) + "?is_current_version=true"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(all(r["is_current_version"] for r in response.data["results"]))
 
 
 class PlayerProfileViewSetTests(PlayerAPITestCase):
@@ -398,6 +448,66 @@ class PlayerProfileViewSetTests(PlayerAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["full_name"], "Retrieve Me")
         self.assertFalse(response.data["has_account"])
+
+    def test_retrieve_includes_club_player_versions_and_recommended_id(self):
+        p = self.create_profile("+201077770007", full_name="Ahmed")
+        v1 = self.create_club_player(self.club, p, "Ahmed Ali", player_number=7)
+        v1.is_current_version = False
+        v1.save(update_fields=["is_current_version"])
+        v2 = ClubPlayer.objects.create(
+            club=self.club,
+            player_profile=p,
+            display_name="Ahmed Salah",
+            player_number=10,
+            previous_version=v1,
+            is_current_version=True,
+        )
+        response = self.client.get(self.profile_detail_url(self.club, p.pk))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        version_ids = [row["id"] for row in response.data["club_player_versions"]]
+        self.assertEqual(set(version_ids), {v1.id, v2.id})
+        self.assertEqual(response.data["recommended_club_player_id"], v2.id)
+        for row in response.data["club_player_versions"]:
+            self.assertNotIn("last_used_at", row)
+            self.assertNotIn("updated_at", row)
+
+    def test_recommended_id_is_club_player_from_latest_booking(self):
+        p = self.create_profile("+201077770008", full_name="Ahmed")
+        v1 = self.create_club_player(self.club, p, "Ahmed Ali", player_number=7)
+        v1.is_current_version = False
+        v1.save(update_fields=["is_current_version"])
+        v2 = ClubPlayer.objects.create(
+            club=self.club,
+            player_profile=p,
+            display_name="Ahmed Salah",
+            player_number=10,
+            previous_version=v1,
+            is_current_version=True,
+        )
+        court = Court.objects.create(
+            club=self.club,
+            name="Profile Court",
+            default_price=Decimal("300.00"),
+            slot_duration_minutes=60,
+        )
+        start = timezone.now()
+        booking = Booking.objects.create(
+            club=self.club,
+            court=court,
+            club_player=v1,
+            customer_name="Ahmed Ali",
+            customer_phone="+201077770008",
+            start_time=start,
+            end_time=start + timedelta(hours=1),
+            total_price=Decimal("300.00"),
+        )
+        Booking.objects.filter(pk=booking.pk).update(
+            created=timezone.now() - timedelta(hours=1)
+        )
+        response = self.client.get(self.profile_detail_url(self.club, p.pk))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["recommended_club_player_id"], v1.id)
+        self.assertNotEqual(response.data["recommended_club_player_id"], v2.id)
 
     def test_has_account_true_when_user_linked(self):
         u = self.create_user("pp-linked-user")

@@ -13,8 +13,8 @@ from django.db.models import (
 from django.db.models.functions import Cast, Least
 from django.utils import timezone
 
+from apps.bookings.identity import booking_identity_search_q
 from apps.bookings.models import Booking, BookingAttempt
-from apps.common.search import customer_phone_search_q
 
 
 def compute_booking_hold_expires_at(booking):
@@ -105,7 +105,7 @@ class BookingFilter(django_filters.FilterSet):
         method="filter_search",
         help_text=(
             "Search customer_name, customer_phone (including Egyptian phone "
-            "variants), and notes."
+            "variants), ClubPlayer display name / profile phone, and notes."
         ),
     )
     upcoming = django_filters.BooleanFilter(
@@ -224,9 +224,7 @@ class BookingFilter(django_filters.FilterSet):
         if not cleaned:
             return queryset
         return queryset.filter(
-            Q(customer_name__icontains=cleaned)
-            | customer_phone_search_q("customer_phone", cleaned)
-            | Q(notes__icontains=cleaned)
+            booking_identity_search_q(cleaned) | Q(notes__icontains=cleaned)
         )
 
     def filter_upcoming(self, queryset, name, value):

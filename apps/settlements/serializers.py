@@ -3,6 +3,10 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers, status
 
 from apps.accounts.models import User
+from apps.bookings.identity import (
+    booking_customer_display_name,
+    booking_customer_display_phone,
+)
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
 from apps.settlements.authorization import (
@@ -80,14 +84,8 @@ class SettlementListSerializer(serializers.ModelSerializer):
 class SettlementLineSerializer(serializers.ModelSerializer):
     transaction = serializers.PrimaryKeyRelatedField(read_only=True)
     booking = serializers.IntegerField(source="transaction.booking_id", read_only=True)
-    booking_customer_name = serializers.CharField(
-        source="transaction.booking.customer_name",
-        read_only=True,
-    )
-    booking_customer_phone = serializers.CharField(
-        source="transaction.booking.customer_phone",
-        read_only=True,
-    )
+    booking_customer_name = serializers.SerializerMethodField()
+    booking_customer_phone = serializers.SerializerMethodField()
     booking_start_time = serializers.DateTimeField(
         source="transaction.booking.start_time",
         read_only=True,
@@ -145,6 +143,14 @@ class SettlementLineSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.CharField())
     def get_kind(self, obj):
         return obj.transaction.transaction_type
+
+    @extend_schema_field(serializers.CharField())
+    def get_booking_customer_name(self, obj) -> str:
+        return booking_customer_display_name(obj.transaction.booking)
+
+    @extend_schema_field(serializers.CharField())
+    def get_booking_customer_phone(self, obj) -> str:
+        return booking_customer_display_phone(obj.transaction.booking)
 
 
 class SettlementDetailSerializer(serializers.ModelSerializer):

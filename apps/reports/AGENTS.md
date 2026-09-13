@@ -18,6 +18,7 @@
   - Financial values use historical `Booking.total_price` snapshots, **not** current court pricing periods.
   - Financial totals sum non-cancelled attached transactions.
   - Booking revenue is attributed entirely to the booking's local start date, even if occupancy spans past midnight.
+- **Customer identity**: Court Usage Report does **not** display `customer_name` / `customer_phone` or ClubPlayer. It is occupancy and financial aggregation only. Tests create bookings with snapshot fields; that is fixture data, not a report identity contract.
 - **Demand Analysis Buckets**:
   - Demand is analyzed in 60-minute clock buckets (`DEMAND_BUCKET_MINUTES = 60`). Low-demand results must include zero-demand generated slots.
 

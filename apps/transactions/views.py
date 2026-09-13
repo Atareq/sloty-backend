@@ -69,6 +69,7 @@ class TransactionAttemptViewSet(
             scoped_transaction_attempts_queryset(self.access_context)
             .select_related(
                 "booking",
+                "booking__club_player__player_profile",
                 "club",
                 "court",
                 "attempted_by",
@@ -159,7 +160,14 @@ class TransactionViewSet(
             return Transaction.objects.none()
         return (
             scoped_transactions_queryset(self.access_context)
-            .select_related("booking", "club", "court", "created_by", "cancelled_by")
+            .select_related(
+                "booking",
+                "booking__club_player__player_profile",
+                "club",
+                "court",
+                "created_by",
+                "cancelled_by",
+            )
             .order_by("-created", "-id")
         )
 

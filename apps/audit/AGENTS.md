@@ -15,6 +15,7 @@
 - **Snapshot Architecture**:
   - To prevent N+1 database queries when rendering audit logs, business services use snapshot helpers (`booking_audit_snapshot`, `transaction_audit_snapshot`, `settlement_audit_snapshot`) to store event-time entity facts in JSON (`metadata`, `before_data`, `after_data`).
   - Serializers must consume these stored snapshots rather than querying current live entities.
+  - Sprint 4: audit JSON still stores `Booking.customer_name` / `customer_phone` as event-time **row** facts (including PATCH of those columns). Do not rewrite historical audit payloads from live ClubPlayer. Phone search on audit list also matches `club_player.player_profile.phone_number` to find related bookings.
 
 ## Important Models & Fields
 

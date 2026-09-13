@@ -75,7 +75,7 @@
 
 ## Cross-App Dependencies
 
-- Depends on `apps.bookings` (linked booking lifecycle and payment status updates).
+- Depends on `apps.bookings` (linked booking lifecycle and payment status updates). List/detail `booking_customer_name` / `booking_customer_phone` are sourced from `Booking.club_player` (exact version at booking time) with snapshot fallback — ClubPlayer is the historical identity, not a live rewrite.
 - Consumed by `apps.settlements` (unsettled transaction candidate set) and `apps.dashboard` (revenue analytics).
 
 ## Testing

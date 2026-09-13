@@ -19,6 +19,10 @@ from apps.bookings.filters import (
     annotate_booking_hold_expires_at,
     compute_booking_hold_expires_at,
 )
+from apps.bookings.identity import (
+    booking_customer_display_name,
+    booking_customer_display_phone,
+)
 from apps.bookings.models import Booking, BookingAttempt
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
@@ -33,6 +37,7 @@ from apps.courts.pricing import (
     slot_price_from_schedule,
     working_hour_bounds,
 )
+from apps.players.models import ClubPlayer
 from apps.players.services import (
     find_or_create_player_profile,
     get_or_create_club_player,
@@ -81,6 +86,11 @@ BOOKING_NOT_IN_CLUB_MESSAGE = _("Booking must belong to the selected club.")
 BOOKING_CLUB_PLAYER_MISMATCH_MESSAGE = _(
     "Booking club_player must belong to the same club as the booking."
 )
+BOOKING_CLUB_PLAYER_PHONE_MISMATCH_MESSAGE = _(
+    "Selected ClubPlayer does not belong to the player identified by "
+    "this booking's phone number."
+)
+BOOKING_CLUB_PLAYER_NOT_FOUND_MESSAGE = _("Selected ClubPlayer was not found.")
 BOOKING_ALREADY_CANCELLED_MESSAGE = _("This booking is already cancelled.")
 INVALID_BOOKING_STATUS_TRANSITION_MESSAGE = _(
     "This booking status transition is not allowed."
@@ -218,7 +228,7 @@ def active_recurring_anchor_queryset(court, *, exclude_booking=None):
         court=court,
         source=Booking.Source.RECURRING,
         recurrence_status=Booking.RecurrenceStatus.ACTIVE,
-    ).select_related("club", "court")
+    ).select_related("club", "court", "club_player__player_profile")
     if exclude_booking is not None:
         queryset = queryset.exclude(pk=exclude_booking.pk)
     return queryset.order_by("start_time", "id")
@@ -800,8 +810,8 @@ def booking_slot_payload(booking):
         "id": booking.id,
         "status": booking.status,
         "status_label": str(booking.get_status_display()),
-        "customer_name": booking.customer_name,
-        "customer_phone": str(booking.customer_phone),
+        "customer_name": booking_customer_display_name(booking),
+        "customer_phone": booking_customer_display_phone(booking),
         "total_booking_value": f"{booking.total_price:.2f}",
         "total_paid_amount": f"{paid_amount:.2f}",
         "remaining_amount": f"{remaining_amount:.2f}",
@@ -814,8 +824,8 @@ def booking_slot_payload(booking):
 def recurring_slot_context_payload(anchor):
     return {
         "anchor_booking_id": anchor.id,
-        "customer_name": anchor.customer_name,
-        "customer_phone": str(anchor.customer_phone),
+        "customer_name": booking_customer_display_name(anchor),
+        "customer_phone": booking_customer_display_phone(anchor),
         "recurrence_status": anchor.recurrence_status,
     }
 
@@ -869,7 +879,7 @@ def generate_booking_slots(*, access, court, date_from, date_to):
                 court=court,
                 status__in=Booking.BLOCKING_STATUSES,
                 end_time__gt=range_start,
-            )
+            ).select_related("club_player__player_profile")
         ).order_by("start_time", "id")
     )
     blocking_bookings = [
@@ -1031,21 +1041,49 @@ def validate_booking_club_player(*, club, club_player):
         )
 
 
-def resolve_booking_club_player(*, club, customer_name, customer_phone):
+def resolve_booking_club_player(
+    *, club, customer_name, customer_phone, club_player_id=None
+):
     """
-    Resolve (find-or-create) the ClubPlayer identity for a booking.
+    Resolve the ClubPlayer identity for a booking.
 
-    Flow (see apps/bookings/AGENTS.md "Customer Identity Architecture"):
-        find_or_create_player_profile(phone) -> get_or_create_club_player(club, profile)
+    Normal flow (frontend sends only customer_name / customer_phone):
+        phone -> PlayerProfile -> current ClubPlayer version -> Booking
 
-    The frontend never supplies player_profile_id / club_player_id — only
-    customer_name / customer_phone. Identity resolution is entirely owned
-    by this service layer.
+    Optional historical selection: if club_player_id is supplied, that exact
+    version is used (including historical rows) provided it belongs to this
+    club and to the PlayerProfile identified by customer_phone. Normal
+    booking creation does not send this id.
+
+    get_or_create_club_player() returns the current version when one exists
+    and only creates a first version when the club has never labeled this
+    player. A different customer_name on a later booking does not create a
+    new version — that is create_club_player_version()'s job.
     """
     player_profile, _ = find_or_create_player_profile(
         phone_number=customer_phone,
         full_name=customer_name or "",
     )
+    if club_player_id is not None:
+        try:
+            club_player = ClubPlayer.objects.select_related(
+                "club", "player_profile"
+            ).get(pk=club_player_id)
+        except ClubPlayer.DoesNotExist as exc:
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="BOOKING_CLUB_PLAYER_NOT_FOUND",
+                message=BOOKING_CLUB_PLAYER_NOT_FOUND_MESSAGE,
+            ) from exc
+        validate_booking_club_player(club=club, club_player=club_player)
+        if club_player.player_profile_id != player_profile.id:
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="BOOKING_CLUB_PLAYER_PHONE_MISMATCH",
+                message=BOOKING_CLUB_PLAYER_PHONE_MISMATCH_MESSAGE,
+            )
+        return club_player
+
     club_player, _ = get_or_create_club_player(
         club=club,
         player_profile=player_profile,
@@ -1121,10 +1159,12 @@ def create_booking(
             else:
                 validate_no_availability_conflict(locked_court, start_time, end_time)
 
+            club_player_id = booking_data.pop("club_player_id", None)
             club_player = resolve_booking_club_player(
                 club=locked_court.club,
                 customer_name=booking_data.get("customer_name"),
                 customer_phone=booking_data.get("customer_phone"),
+                club_player_id=club_player_id,
             )
 
             created_booking = Booking.objects.create(

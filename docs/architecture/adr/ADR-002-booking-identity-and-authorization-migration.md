@@ -321,7 +321,42 @@ This addendum documents the prerequisite groundwork that sprint's review identif
 
 ### What did not change
 
-- `Booking.customer_name` / `customer_phone` — untouched, still present, still permanent snapshots. Their eventual removal remains a separate, larger, explicitly deferred future sprint (see the architecture review referenced above).
-- `Booking`, its serializers, ViewSets, and authorization — untouched.
-- No HTTP endpoint yet calls `supersede_club_player()` — it exists as a service function only. Wiring it to an endpoint (and deciding whether `list`/`retrieve` should filter out historical rows by default) is deferred to a future sprint.
-- `apps/bookings/services.py`'s recurring-booking continuation path (`complete_booking()`) does not carry `club_player` forward to the next occurrence — a pre-existing gap identified by the same review, unrelated to and not fixed by this sprint.
+- `Booking.customer_name` / `customer_phone` — untouched in Sprint 1. Sprint 3 still does not remove them.
+- Booking authorization/ViewSets — untouched.
+
+## 7. Addendum — ClubPlayer Versioned Identity, Sprint 3 (2026-09-14)
+
+**Status:** Applied. Replaces the Sprint 1 soft-delete lifecycle.
+
+### Decision
+
+- `ClubPlayer` is an immutable versioned historical entity. No `deleted_at`. No soft delete. No `last_used_at`. No `updated_at`.
+- Fields: `previous_version`, `is_current_version`, `created_at`.
+- `UNIQUE(club, player_profile) WHERE is_current_version=True`.
+- Phone change = new `PlayerProfile`. No merging, no identity transfer, no name-based matching.
+- `PlayerProfile.full_name` (preferred personal name) is not auto-synchronized with `ClubPlayer.display_name`.
+- Booking default resolution uses the current version. Optional `club_player_id` selects a historical version.
+- Last-used / recommended version is the `club_player` on the latest `Booking` for that `player_profile_id` at the club.
+- `customer_name` / `customer_phone` remain until consumer migration. `Booking.club_player` stays nullable.
+- Authorization Spine and dashboard/transactions/settlements/reports/audit **authorization** are not migrated in this sprint.
+
+### What this supersedes
+
+Addendum §6 (`deleted_at`, `supersede_club_player()`, unique-active-where-not-deleted) is historical. Runtime behavior is the versioned model above.
+
+## 8. Addendum — Consumer Migration To ClubPlayer Identity, Sprint 4 (2026-09-14)
+
+**Status:** Applied.
+
+### Decision
+
+- Operational display and search read `Booking.club_player` (exact version at booking time) via `apps.bookings.identity`.
+- Public API keys (`customer_name`, `customer_phone`, `booking_customer_*`) are unchanged.
+- Snapshot columns remain for create/PATCH, idempotency, audit event JSON, and BookingAttempt payloads.
+- `Booking.club_player` stays nullable; helpers fall back to snapshots.
+- Reports do not display customer identity; no report identity change.
+- Snapshot **removal** is a later sprint.
+
+### What this supersedes
+
+Sprint 3 addendum's "consumers are not migrated" line. Runtime operational reads now go through ClubPlayer.

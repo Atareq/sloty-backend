@@ -66,6 +66,7 @@ class SettlementViewSet(
         if self.action == "retrieve":
             queryset = queryset.prefetch_related(
                 "lines__transaction__booking",
+                "lines__transaction__booking__club_player__player_profile",
                 "lines__transaction__court",
             )
         return queryset

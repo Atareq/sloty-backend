@@ -104,6 +104,7 @@ class BookingViewSet(
                     "last_status_changed_by",
                     "previous_recurring_booking",
                     "next_recurring_booking",
+                    "club_player__player_profile",
                 )
             )
         ).order_by("start_time", "id")
@@ -144,6 +145,7 @@ class BookingViewSet(
                 "last_status_changed_by",
                 "previous_recurring_booking",
                 "next_recurring_booking",
+                "club_player__player_profile",
             ),
             pk=self.kwargs[self.lookup_url_kwarg or self.lookup_field],
             club=access.club,

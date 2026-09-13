@@ -11,6 +11,10 @@ from apps.bookings.filters import (
     annotate_booking_hold_expires_at,
     booking_needs_action_q,
 )
+from apps.bookings.identity import (
+    booking_customer_display_name,
+    booking_customer_display_phone,
+)
 from apps.bookings.models import Booking
 from apps.courts.models import CourtWorkingHour
 from apps.courts.pricing import datetime_for_local_date, working_hour_bounds
@@ -171,7 +175,7 @@ def get_calendar_items(*, access, date_from, date_to, court=None, status=None):
     validate_calendar_access(access)
     queryset = annotate_booking_paid_amount(
         access.scoped_calendar_bookings_queryset()
-        .select_related("court")
+        .select_related("court", "club_player__player_profile")
         .filter(start_time__lt=date_to, end_time__gt=date_from)
     ).order_by("start_time", "id")
     if court is not None:
@@ -185,14 +189,16 @@ def get_calendar_items(*, access, date_from, date_to, court=None, status=None):
     for booking in queryset:
         paid_amount = money(booking.paid_amount)
         remaining_amount = booking.total_price - paid_amount
+        customer_name = booking_customer_display_name(booking)
+        customer_phone = booking_customer_display_phone(booking)
         items.append(
             {
                 "id": booking.id,
                 "court": booking.court_id,
                 "court_name": booking.court.name,
-                "title": booking.customer_name,
-                "customer_name": booking.customer_name,
-                "customer_phone": str(booking.customer_phone),
+                "title": customer_name,
+                "customer_name": customer_name,
+                "customer_phone": customer_phone,
                 "start_time": booking.start_time,
                 "end_time": booking.end_time,
                 "status": booking.status,

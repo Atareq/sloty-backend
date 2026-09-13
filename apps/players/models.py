@@ -1,6 +1,7 @@
 """
 PlayerProfile — global customer identity (keyed by phone number).
-ClubPlayer    — club-local representation of a player.
+ClubPlayer    — club-local representation of a player, stored as immutable
+                historical versions.
 
 Identity boundary:
   PlayerProfile is GLOBAL — no authorization_config. Phone uniqueness is the
@@ -13,10 +14,18 @@ Identity boundary:
   Spine v2 (SlotyScopedResourceMixin + scoped_queryset). Clubs cannot read or
   write each other's ClubPlayer rows.
 
-  ClubPlayer is append-oriented and historical, not a normal editable entity:
-  identity changes create a new row (see supersede_club_player() in
-  apps/players/services.py) rather than mutating an existing one. See the
-  ClubPlayer docstring below for the full lifecycle and enforcement model.
+  ClubPlayer is a permanent, versioned historical record — identity fields
+  are never edited and the row is never deleted (no soft delete, no
+  deleted_at). Identity changes create a new row, mark the previous row
+  is_current_version=False, and point previous_version at that older row.
+  At most one current version exists per (club, player_profile). Bookings
+  store the exact ClubPlayer version used at creation time and are never
+  rewritten when a newer version is recorded.
+
+  Recency is not stored on ClubPlayer. The last-used version for a person
+  at a club is the club_player on that player's latest Booking (matched
+  via club_player.player_profile_id). See apps/players/AGENTS.md
+  "ClubPlayer Lifecycle (Versioned, Append-Only)".
 """
 
 from django.conf import settings
@@ -31,7 +40,14 @@ class PlayerProfile(models.Model):
     Global customer identity record.
 
     A player does not need a user account. Phone number is the unique identity
-    key. A user FK may be populated later to link the player to an account
+    key. Same phone = same PlayerProfile. Different phone = different
+    PlayerProfile. There is no name-based matching, no automatic merging,
+    and no identity transfer when a phone number changes.
+
+    full_name is the player's own preferred personal name. Clubs do not
+    control it and it is never auto-synchronized with ClubPlayer.display_name.
+
+    A user FK may be populated later to link the player to an account
     (account linking phase — separate task).
 
     This model does NOT declare authorization_config because it has no club
@@ -48,7 +64,9 @@ class PlayerProfile(models.Model):
         max_length=255,
         blank=True,
         help_text=(
-            "Optional. Clubs may override with their own display_name via ClubPlayer."
+            "Player's own preferred personal name. Clubs do not overwrite "
+            "this; club-local naming lives on ClubPlayer.display_name and "
+            "is never auto-synchronized with this field."
         ),
     )
     verified = models.BooleanField(
@@ -88,62 +106,64 @@ class ClubPlayerQuerySet(models.QuerySet):
 
     Model.save() (below) blocks in-place mutation of identity fields for
     single-instance saves, but Django's QuerySet.update() bypasses save()
-    entirely (it issues a bulk SQL UPDATE without ever instantiating/calling
-    save() on matched rows). This override closes that gap so
-    `ClubPlayer.objects.filter(...).update(display_name=...)` is rejected the
-    same way `instance.save()` is.
+    entirely. This override closes that gap.
     """
 
-    _MUTABLE_FIELDS = frozenset({"deleted_at", "updated_at"})
+    _MUTABLE_FIELDS = frozenset({"is_current_version"})
+
+    def current(self):
+        return self.filter(is_current_version=True)
 
     def update(self, **kwargs):
         if not set(kwargs).issubset(self._MUTABLE_FIELDS):
             raise ValueError(
                 "Bulk update() of ClubPlayer is restricted to "
                 f"{sorted(self._MUTABLE_FIELDS)}. ClubPlayer rows are "
-                "immutable historical identity records after creation — use "
-                "apps.players.services.supersede_club_player() to change "
-                "identity information (it soft-deletes this row and creates "
-                "a new one)."
+                "permanent historical identity versions after creation — use "
+                "apps.players.services.create_club_player_version() to record "
+                "a new display_name/player_number (it creates a new row "
+                "rather than mutating this one)."
             )
         return super().update(**kwargs)
-
-    def active(self):
-        """Rows that are the current, non-superseded identity for their pair."""
-        return self.filter(deleted_at__isnull=True)
 
 
 class ClubPlayer(models.Model):
     """
-    Club-local representation of a player — an append-oriented historical
-    identity record, not a normal editable entity.
+    Club-local representation of a player — an immutable versioned
+    historical record, not a normal editable entity.
 
     Each club controls its own naming and numbering of a player independently.
     The same PlayerProfile may have different display_name and player_number
     values at different clubs — both are valid and expected.
 
-    Historical/append-only lifecycle:
-      A ClubPlayer row represents the identity state used by bookings made
-      while it was active. When a player's club-local name/number changes,
-      the existing row is never edited in place — instead
-      apps.players.services.supersede_club_player() soft-deletes it
-      (deleted_at) and creates a brand-new active row for the same
-      (club, player_profile) pair. Bookings that already reference the old
-      row keep pointing at it — that FK *is* the historical snapshot. See
-      apps/players/AGENTS.md "ClubPlayer Lifecycle (Append-Only)".
+    Versioned lifecycle (NOT soft delete):
+      A ClubPlayer row is one version of "how this club knew this player."
+      When display_name/player_number changes, the existing row is never
+      edited and never deleted. create_club_player_version() marks the
+      current row is_current_version=False and inserts a new current row
+      with previous_version pointing at the old one. Bookings that already
+      reference the old row keep pointing at it — that FK *is* the
+      historical snapshot.
 
-    Immutability enforcement (defense in depth, see save()/ClubPlayerQuerySet):
-      - API layer: ClubPlayerViewSet exposes no update/partial_update action.
-      - Model layer: save() rejects any in-place field change on an existing
-        row unless the caller explicitly restricts update_fields to
-        {"deleted_at", "updated_at"} (the only lifecycle transition allowed
-        post-creation: soft delete).
-      - QuerySet layer: ClubPlayerQuerySet.update() applies the same
-        restriction to bulk updates, which bypass save() entirely.
+      There is no last_used_at and no updated_at. Identity fields never
+      change, so an edit timestamp would be a lie. Recency is derived from
+      Booking: the last-used version is the club_player on the latest
+      Booking for this (club, player_profile).
 
-    Authorization Spine v2: default_scope="club". The queryset is always
-    bounded to the authenticated user's club; cross-club row access is
-    structurally impossible via scoped_queryset.
+    Default booking resolution uses the current version
+    (is_current_version=True). Staff may explicitly select a historical
+    version for a new booking; that booking then stores that exact
+    version id.
+
+    Immutability enforcement (defense in depth):
+      - API: ClubPlayerViewSet exposes no update/partial_update. POSTing a
+        new display_name/player_number for an existing phone+club records a
+        new version via create_club_player_version().
+      - Model: save() rejects in-place identity mutation unless
+        update_fields is restricted to is_current_version.
+      - QuerySet: ClubPlayerQuerySet.update() applies the same restriction.
+
+    Authorization Spine v2: default_scope="club".
     """
 
     club = models.ForeignKey(
@@ -160,40 +180,41 @@ class ClubPlayer(models.Model):
         max_length=255,
         blank=True,
         help_text=(
-            "Club-specific name override. Blank means the global full_name is used."
+            "Club-specific name for this version. Independent from "
+            "PlayerProfile.full_name and never auto-synchronized with it."
         ),
     )
     player_number = models.PositiveSmallIntegerField(
         null=True,
         blank=True,
-        help_text="Club-internal jersey or member number.",
+        help_text="Club-internal jersey or member number for this version.",
     )
-    deleted_at = models.DateTimeField(
+    previous_version = models.ForeignKey(
+        "self",
         null=True,
         blank=True,
+        on_delete=models.PROTECT,
+        related_name="next_versions",
+        help_text=(
+            "The ClubPlayer version this row replaced. NULL on the first "
+            "version for a (club, player_profile) pair."
+        ),
+    )
+    is_current_version = models.BooleanField(
+        default=True,
         db_index=True,
         help_text=(
-            "Soft-delete marker. NULL means this is the current/active "
-            "identity row for its (club, player_profile) pair. Set only by "
-            "apps.players.services.supersede_club_player() when this row's "
-            "identity information is replaced by a new ClubPlayer row. A "
-            "deleted row is never physically removed and never resurrected "
-            "— it remains permanently as the historical identity referenced "
-            "by any Booking that was created while it was active."
+            "True iff this is the current club-local identity for its "
+            "(club, player_profile) pair. At most one current version is "
+            "allowed per pair. Historical versions keep False forever."
         ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     objects = ClubPlayerQuerySet.as_manager()
 
-    # save() forbids changing club/player_profile/display_name/player_number
-    # on an existing row except through this explicit update_fields allowlist.
-    _MUTABLE_UPDATE_FIELDS = frozenset({"deleted_at", "updated_at"})
+    _MUTABLE_UPDATE_FIELDS = frozenset({"is_current_version"})
 
-    # Authorization Spine v2 resource-query contract.
-    # ClubPlayer is club-scoped only — no court scope.
-    # See apps/common/authorization/contracts.py for the required shape.
     authorization_config = {
         "scopes": {
             "club": {"path": "club"},
@@ -207,40 +228,31 @@ class ClubPlayer(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["club", "player_profile"],
-                condition=models.Q(deleted_at__isnull=True),
-                name="unique_active_club_player_profile",
+                condition=models.Q(is_current_version=True),
+                name="unique_current_club_player_profile",
             ),
         ]
         indexes = [
             models.Index(fields=["club"]),
             models.Index(fields=["player_profile"]),
             models.Index(fields=["club", "player_profile"]),
-            models.Index(fields=["deleted_at"]),
+            models.Index(fields=["is_current_version"]),
         ]
 
     def __str__(self) -> str:
         label = self.display_name or str(self.player_profile)
-        suffix = " [deleted]" if self.deleted_at is not None else ""
+        suffix = "" if self.is_current_version else " [historical]"
         return f"ClubPlayer({self.club_id}, {label}){suffix}"
-
-    @property
-    def is_active(self) -> bool:
-        """True if this row is the current identity (not superseded/soft-deleted)."""
-        return self.deleted_at is None
 
     def save(self, *args, **kwargs):
         """
         Block in-place mutation of an existing ClubPlayer.
 
-        New rows (self.pk is None) save normally — this only guards updates
-        to a row that already exists in the database. Existing rows may only
-        be saved with an explicit update_fields restricted to
-        {"deleted_at", "updated_at"} — the sole allowed post-creation
-        transition (soft delete). Any other update path (including a bare
-        `instance.save()` after mutating display_name/player_number/club/
-        player_profile) raises ValueError. Use
-        apps.players.services.supersede_club_player() to change identity
-        information — it creates a new row instead of mutating this one.
+        Existing rows may only be saved with update_fields restricted to
+        {is_current_version} — the current→historical transition. Identity
+        field changes must go through create_club_player_version(). There
+        is no last_used_at or updated_at: this row is not an editable
+        entity.
         """
         if self.pk is not None:
             update_fields = kwargs.get("update_fields")
@@ -250,10 +262,11 @@ class ClubPlayer(models.Model):
                 allowed = sorted(self._MUTABLE_UPDATE_FIELDS)
                 raise ValueError(
                     "ClubPlayer identity fields (club, player_profile, "
-                    "display_name, player_number) are immutable after "
-                    "creation. save() on an existing ClubPlayer must pass "
-                    f"update_fields restricted to {allowed}. Use "
-                    "apps.players.services.supersede_club_player() to "
-                    "change identity information."
+                    "display_name, player_number, previous_version) are "
+                    "immutable after creation. save() on an existing "
+                    "ClubPlayer must pass update_fields restricted to "
+                    f"{allowed}. Use "
+                    "apps.players.services.create_club_player_version() to "
+                    "record a new display_name/player_number version."
                 )
         super().save(*args, **kwargs)

@@ -118,6 +118,7 @@ Core financial functions have clean, unencumbered signatures with **zero knowled
 ## Cross-App Dependencies
 
 - Queries and locks [`Transaction`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/transactions/models.py) rows.
+- Preview and settlement-line customer fields are sourced from `Booking.club_player` (exact version) via `apps.bookings.identity`, with snapshot fallback. Response keys stay `booking_customer_name` / `booking_customer_phone`.
 - Used by [`apps/clubs/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/services.py) to block staff deactivation/deletion when unsettled custody is non-zero.
 - Used by [`apps/dashboard/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/dashboard/services.py) for all-time custody metrics.
 

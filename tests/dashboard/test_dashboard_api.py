@@ -558,6 +558,35 @@ class CalendarTests(DashboardDataMixin, DashboardAPITestCase):
             {item["id"] for item in response.data["items"]},
         )
 
+    def test_calendar_keeps_club_player_version_after_roster_change(self):
+        from apps.players.services import (
+            create_club_player_version,
+            find_or_create_player_profile,
+            get_or_create_club_player,
+        )
+
+        self.client.force_authenticate(user=self.platform_admin)
+        profile, _ = find_or_create_player_profile(
+            "+201000000102", full_name="Ahmed Ali"
+        )
+        v1, _ = get_or_create_club_player(
+            self.club, profile, display_name="Ahmed Ali", player_number=7
+        )
+        self.confirmed.club_player = v1
+        self.confirmed.save(update_fields=["club_player"])
+        create_club_player_version(v1, display_name="Ahmed Salah", player_number=10)
+
+        response = self.client.get(self.calendar_url(self.club), {"date": "2026-07-06"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item = next(
+            row for row in response.data["items"] if row["id"] == self.confirmed.id
+        )
+        self.assertEqual(item["title"], "Ahmed Ali")
+        self.assertEqual(item["customer_name"], "Ahmed Ali")
+        self.assertEqual(item["customer_phone"], "+201000000102")
+        self.assertNotEqual(item["customer_name"], "Ahmed Salah")
+        self.assertNotEqual(item["customer_name"], self.confirmed.customer_name)
+
 
 class DashboardOverviewTests(DashboardDataMixin, DashboardAPITestCase):
     def test_anonymous_rejected(self):

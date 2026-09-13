@@ -63,7 +63,10 @@ class AuditLogFilter(django_filters.FilterSet):
         if not cleaned:
             return queryset
         matching_bookings = Booking.objects.filter(
-            customer_phone_search_q("customer_phone", cleaned),
+            customer_phone_search_q("customer_phone", cleaned)
+            | customer_phone_search_q(
+                "club_player__player_profile__phone_number", cleaned
+            ),
             club_id=OuterRef("club_id"),
         )
         return queryset.filter(

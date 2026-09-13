@@ -40,85 +40,82 @@ Authentication Identity
 2. **Player ≠ account**: `PlayerProfile.user` is nullable. A player can exist with `user=NULL` and `verified=False`.
 3. **Club controls its own naming**: Two clubs may have different `display_name` and `player_number` for the same `PlayerProfile`. Both are correct.
 4. **Cross-club isolation**: `ClubPlayer` rows are invisible across clubs. The Spine v2 `scoped_queryset()` enforces this structurally — clubs cannot read or write each other's `ClubPlayer` rows.
-5. **Unique per club, per active identity**: `UNIQUE(club, player_profile) WHERE deleted_at IS NULL` — at most one **active** `ClubPlayer` row per (club, profile) pair. Historical (soft-deleted) rows for the same pair may coexist alongside the active one — see "ClubPlayer Lifecycle (Append-Only)" below.
-6. **`player_profile` FK is immutable, and so is everything else**: After a `ClubPlayer` is created, **none** of its identity fields (`club`, `player_profile`, `display_name`, `player_number`) can change — not just `player_profile`. There is no PATCH/update endpoint. See "ClubPlayer Lifecycle (Append-Only)" below.
-7. **No `StaffProfile` / `OwnerProfile`**: Do not create staff or owner profile tables here. `ClubMembership` is the operational actor; this app is purely for customer identity.
+5. **Unique current version per club+profile**: `UNIQUE(club, player_profile) WHERE is_current_version=True` — at most one **current** `ClubPlayer` row per pair. Historical versions (`is_current_version=False`) may coexist. There is no `deleted_at` / soft delete.
+6. **Phone is the only merge key**: same phone = same `PlayerProfile`. Different phone = different `PlayerProfile`. No name-based matching, no automatic merging, no identity transfer.
+7. **`PlayerProfile.full_name` is the player's preferred personal name.** Clubs do not control it. It is never auto-synchronized with `ClubPlayer.display_name`.
+8. **Identity fields are immutable after create**: `club`, `player_profile`, `display_name`, `player_number`, `previous_version`. The only allowed post-create update is `is_current_version` (current → historical pointer). No `last_used_at`. No `updated_at`. No PATCH endpoint.
+9. **No `StaffProfile` / `OwnerProfile`**: Do not create staff or owner profile tables here. `ClubMembership` is the operational actor; this app is purely for customer identity.
 
 ---
 
-## ClubPlayer Lifecycle (Append-Only) — Sprint 1 (Locked)
+## ClubPlayer Lifecycle (Versioned, Append-Only) — Sprint 3 (Locked)
 
-**`ClubPlayer` is a historical identity record, not a normal editable entity.** A `ClubPlayer` row represents the identity state that was in effect for bookings made while it was active. When a player's club-local `display_name`/`player_number` needs to change, the existing row is **never** updated in place.
+**`ClubPlayer` is an immutable historical version, not a normal editable entity and not a soft-deleted row.** A row is one version of "how this club knew this player." When club-local `display_name`/`player_number` changes, the existing row is never updated and never deleted.
 
 ```text
 Before:
-  ClubPlayer #10  (active)   display_name="Ahmed Ali"   player_number=7
+  ClubPlayer #10  is_current_version=True   display_name="Ahmed Ali"   player_number=7   previous_version=NULL
 
-supersede_club_player(club_player=#10, display_name="Ahmed Salah", player_number=11)
+create_club_player_version(#10, display_name="Ahmed Salah", player_number=10)
 
 After:
-  ClubPlayer #10  (deleted_at=<timestamp>)   display_name="Ahmed Ali"   player_number=7   ← unchanged, historical
-  ClubPlayer #20  (active)                   display_name="Ahmed Salah" player_number=11  ← new current identity
+  ClubPlayer #10  is_current_version=False  display_name="Ahmed Ali"   player_number=7    ← historical, unchanged
+  ClubPlayer #20  is_current_version=True   display_name="Ahmed Salah" player_number=10  previous_version=#10
 ```
 
-Any `Booking.club_player_id` that already pointed at `#10` **keeps pointing at `#10`** — that FK *is* the historical snapshot as of when the booking was made. `Booking` never needs to be touched when a `ClubPlayer` is superseded.
+Any `Booking.club_player_id` that already pointed at `#10` **keeps pointing at `#10`**. Bookings are historical events. They do **not** decide which version is current (`is_current_version`). They **do** decide which version was last used.
 
-### Soft delete field
+### Version fields
 
-- `ClubPlayer.deleted_at` (nullable `DateTimeField`). `NULL` = active/current identity. Non-`NULL` = historical/superseded — permanently retained, never physically deleted, never resurrected.
-- `ClubPlayer.is_active` — convenience property, `True` iff `deleted_at is None`.
+- `previous_version` — self-FK, `PROTECT`, nullable. NULL on the first version.
+- `is_current_version` — boolean. Exactly one True per `(club, player_profile)`. Roster current identity.
+- `created_at` — insert timestamp. There is **no** `updated_at` and **no** `last_used_at`. This row is not an editable entity; recency is derived from bookings.
 
-### Active uniqueness (not global uniqueness)
+### Last-used version (derived, not stored)
 
-`Meta.constraints` declares a **conditional** unique constraint:
+```text
+latest Booking at this club
+  where club_player.player_profile_id = this PlayerProfile.id
+  ordered by Booking.created DESC, id DESC
+→ that Booking.club_player  = last-used version
+```
+
+If this person has no booking at this club, last-used is unknown and recommendation falls back to the current roster version.
+
+### Current uniqueness
 
 ```python
 models.UniqueConstraint(
     fields=["club", "player_profile"],
-    condition=models.Q(deleted_at__isnull=True),
-    name="unique_active_club_player_profile",
+    condition=models.Q(is_current_version=True),
+    name="unique_current_club_player_profile",
 )
 ```
 
-This replaces the original unconditional `UNIQUE(club, player_profile)` from the identity-foundation phase. Multiple **deleted** rows may coexist for the same (club, profile) pair (one per historical version); only **one active row** is ever allowed at a time. Supported on both PostgreSQL and SQLite (Django emits it as a partial/conditional index on both backends) — no backend-specific migration branching was needed here, unlike the Booking↔ClubPlayer composite FK (see `apps/bookings/AGENTS.md`).
+### `create_club_player_version()` — identity-change transition
 
-### `supersede_club_player()` — the only supported identity-change transition
+Locks the current row, sets `is_current_version=False`, creates a new current row with `previous_version` pointing at the old one. Same content is idempotent (returns the current row). Raises `ValueError` if the input row is not current. Wired from `POST /players/` when a current version already exists with different `display_name`/`player_number`.
 
-```python
-def supersede_club_player(club_player: ClubPlayer, display_name="", player_number=None) -> ClubPlayer:
-    ...
-```
+### `get_or_create_club_player()` — current-version resolution
 
-- Locks the existing row (`select_for_update()`), verifies it is currently active (raises `ValueError` if it's already deleted — you cannot supersede a row that isn't the active identity), soft-deletes it (`deleted_at = now()`), then creates a brand-new active `ClubPlayer` for the same `(club, player_profile)` pair with the new `display_name`/`player_number`. Runs inside `transaction.atomic()`.
-- **Not yet wired to an HTTP endpoint** in this sprint — it exists as a service function only, callable from Django shell/admin scripting or a future ViewSet action. See "Remaining Work" below.
+Returns the **current** version for `(club, player_profile)` unchanged. Does **not** create a new version because the caller passed a different name — that is `create_club_player_version()`'s job. Creates the first version only when none exists. Used by booking default resolution. Does not write recency onto ClubPlayer.
 
-### `get_or_create_club_player()` — updated to respect the active/historical split
+### `get_preferred_club_player()` / recommendation
 
-- Only ever returns/matches the **active** row (`deleted_at__isnull=True`) for a `(club, player_profile)` pair.
-- If no active row exists — either because none was ever created, or because the only prior row was superseded — a **brand-new** active row is created. A deleted row is never returned and never resurrected.
-- Race-safety: mirrors Django's own `get_or_create()` pattern (`try create() / except IntegrityError: re-fetch`), since the conditional unique constraint can still legitimately raise under concurrent creation for the same pair.
+Returns last-used version (`get_last_used_club_player()` — latest booking's `club_player` for this `player_profile_id` at this club). Falls back to the current roster version when there is no booking. Search responses expose that id as `recommended_club_player_id`.
 
 ### Immutability enforcement (defense in depth)
 
-Three independent layers, from outermost to innermost — no single layer is trusted alone:
-
 | Layer | Mechanism |
 |---|---|
-| **API** | `ClubPlayerViewSet` exposes only `list`, `create`, `retrieve`. No `update`/`partial_update` action, no `ClubPlayerUpdateSerializer`, no `PATCH` route in `urls.py`, no `update`/`partial_update` grant in `ROLE_PERMISSIONS["ClubPlayerViewSet"]` for any role. A `PATCH` request to `/players/{pk}/` is rejected with `403` (the permission check runs before Django's method-not-allowed dispatch, since the action isn't bound to any HTTP verb at all). |
-| **Model (`save()`)** | `ClubPlayer.save()` raises `ValueError` on any save of an existing row (`self.pk is not None`) unless `update_fields` is explicitly passed and restricted to `{"deleted_at", "updated_at"}`. This blocks the common accidental-mutation pattern (`instance.display_name = "x"; instance.save()`) at the model layer, independent of whatever calls it (service, shell, future code). |
-| **QuerySet (`update()`)** | `ClubPlayerQuerySet.update()` (via `objects = ClubPlayerQuerySet.as_manager()`) applies the same field restriction to bulk `.filter(...).update(...)` calls, which bypass `save()` entirely in Django. Without this, `ClubPlayer.objects.filter(pk=x).update(display_name="y")` would silently succeed despite the `save()` guard. |
+| **API** | `ClubPlayerViewSet` exposes only `list`, `create`, `retrieve`. PATCH is 403. |
+| **Model (`save()`)** | Existing rows may only `save(update_fields⊆{is_current_version})`. |
+| **QuerySet (`update()`)** | Same allowlist on bulk `.update()`. |
 
-**Design decision or the "cleanest approach" (as required by the sprint spec):** immutability is enforced by restricting `update_fields`/`update()` kwargs to an explicit allowlist, rather than (a) a DB trigger, (b) diffing against a re-fetched DB copy on every `save()` (extra query per save), or (c) a signal-based guard (signals don't fire for `.update()` either, and the root `AGENTS.md` prohibits relying on signals for domain logic). The allowlist approach is a pure Python-level check, requires no extra queries, and is enforced identically at both the single-instance and bulk-update code paths.
-
-**Booking consumes only active `ClubPlayer` identities:** every `Booking.club_player` reference resolved by `apps.bookings.services` (`create_booking()` via `resolve_booking_club_player()`, and the demo/dev fixture seeder) goes through `get_or_create_club_player()` above — it can therefore only ever be linked to an **active** row at resolution time. A soft-deleted `ClubPlayer` is never assigned to a *new* booking. This does not retroactively change any *existing* `Booking.club_player_id` — that FK is a historical snapshot and is untouched by a later supersede (see `apps/bookings/AGENTS.md` "Customer Identity Architecture").
-
-### Remaining work (explicitly deferred — not part of this sprint)
-
-- No API endpoint calls `supersede_club_player()` yet. A future sprint must decide the shape (e.g. `POST /players/{pk}/supersede/`) and permissions.
-- `ClubPlayerViewSet.list()`/`.retrieve()` do **not** filter out soft-deleted rows — a club's roster currently includes historical/deleted `ClubPlayer` rows alongside active ones. Whether to default-filter to active-only, or expose `deleted_at`/an `include_deleted` query param, is an open API design question for the next sprint.
+**Booking default:** `resolve_booking_club_player()` uses the current version. Staff may optionally send `club_player_id` to attach a historical version; that id must belong to this club and to the `PlayerProfile` identified by `customer_phone`. Recurring continuation still copies the anchor's exact version.
 
 > [!NOTE]
-> The recurring-booking continuation gap noted here previously (`complete_booking()` next-occurrence creation not carrying `club_player` forward) was **fixed in Booking Identity Enforcement — Sprint 2**. See `apps/bookings/AGENTS.md` "Booking-Native Recurrence".
+> Recurring-booking continuation (`complete_booking()`) copies `club_player` from the anchor (Sprint 2). Soft delete was removed in Sprint 3.
 
 ---
 
@@ -130,14 +127,16 @@ All service functions are **pure** — no role checks. Role enforcement lives in
 
 | Function | Behavior |
 |---|---|
-| `find_or_create_player_profile(phone_number, full_name="")` | `get_or_create` by phone. Returns `(PlayerProfile, created)`. Does **not** overwrite `full_name` on existing profiles. |
-| `get_or_create_club_player(club, player_profile, display_name="", player_number=None)` | Finds the **active** (`deleted_at IS NULL`) `ClubPlayer` for `(club, player_profile)`, or creates one. Never returns/resurrects a soft-deleted row. Returns `(ClubPlayer, created)`. |
-| `supersede_club_player(club_player, display_name="", player_number=None)` | Soft-deletes `club_player` and creates a new active `ClubPlayer` for the same `(club, player_profile)` pair. The only supported way to change identity information. Raises `ValueError` if `club_player` is already deleted. Returns the new `ClubPlayer`. |
-| `link_player_to_user(player_profile, user)` | Sets `player_profile.user = user`. Idempotent if same user. Raises `SlotyAPIException(PLAYER_ALREADY_LINKED)` if already linked to a different user. |
+| `find_or_create_player_profile(phone_number, full_name="")` | `get_or_create` by phone. Does **not** overwrite `full_name` on existing profiles. No merging. |
+| `get_current_club_player(club, player_profile)` | Current version or `None`. |
+| `get_or_create_club_player(club, player_profile, display_name="", player_number=None)` | Current version, or first version if none exists. Does not version on name change. |
+| `create_club_player_version(club_player, display_name="", player_number=None)` | Marks current historical, creates new current with `previous_version`. |
+| `get_last_used_club_player(club, player_profile)` | ClubPlayer on the latest Booking for this profile at this club, or `None`. |
+| `get_preferred_club_player(club, player_profile)` | Last-used version, else current roster version. |
+| `link_player_to_user(player_profile, user)` | Sets `player_profile.user`. Raises `PLAYER_ALREADY_LINKED` on conflict. |
 
 All write functions wrap their DB writes in `transaction.atomic()`.
 
----
 
 ## Authorization
 
@@ -174,9 +173,9 @@ Entries in [`apps/common/authorization/matrix.py`](file:///home/tarek/Desktop/sl
 | MANAGER | list, retrieve, create | list, retrieve, create |
 | STAFF | list, retrieve, create | list, retrieve, create |
 
-No `update`/`partial_update` for any role — removed in Sprint 1 (ClubPlayer Historical Identity Foundation). See "ClubPlayer Lifecycle (Append-Only)" above.
+No `update`/`partial_update` for any role. See "ClubPlayer Lifecycle (Versioned, Append-Only)" above.
 
-No `destroy` action either. Player deletion has FK cascade implications (future bookings) and requires a deliberate separate decision.
+No `destroy` action either. ClubPlayer versions are never deleted.
 
 ---
 
@@ -204,9 +203,11 @@ All endpoints are club-scoped under `/api/v1/clubs/{club_slug}/`.
 }
 ```
 
-There is no update/partial_update payload — `ClubPlayer` has no PATCH endpoint. See "ClubPlayer Lifecycle (Append-Only)" above for how identity changes are handled instead (`supersede_club_player()`, not yet wired to an HTTP endpoint).
+There is no PATCH payload. POSTing a new `display_name`/`player_number` for an existing current version records a new current version via `create_club_player_version()`. Same content is idempotent.
 
-### PlayerProfile response shape
+List/retrieve include `is_current_version`, `previous_version`, and `created_at`. They do **not** include `last_used_at` or `updated_at`. Filter `is_current_version=true` to see only current roster rows.
+
+### PlayerProfile search/list response shape
 
 ```json
 {
@@ -214,41 +215,39 @@ There is no update/partial_update payload — `ClubPlayer` has no PATCH endpoint
   "phone_number": "+201012345678",
   "full_name": "Ahmed Hassan",
   "verified": false,
-  "has_account": false,    // true if user FK is populated
+  "has_account": false,
   "created_at": "...",
-  "updated_at": "..."
+  "updated_at": "...",
+  "club_player_versions": [
+    {"id": 10, "display_name": "Ahmed Ali", "player_number": 7, "is_current_version": false, "previous_version": null, "created_at": "..."},
+    {"id": 20, "display_name": "Ahmed Salah", "player_number": 10, "is_current_version": true, "previous_version": 10, "created_at": "..."}
+  ],
+  "recommended_club_player_id": 10
 }
 ```
 
 > [!NOTE]
 > `has_account` is a computed bool. The raw `user_id` is **never** exposed (privacy boundary between authentication identity and customer identity).
+> `recommended_club_player_id` is last-used (latest booking's `club_player` for this `player_profile_id` at this club). The example above is `10` because that version was on the latest booking even though `#20` is current. With no bookings it would be `20`.
 
 ---
 
 ## Booking Migration Path
 
 > [!IMPORTANT]
-> `Booking.customer_name` / `Booking.customer_phone` were **not** removed. They are locked-in permanent historical snapshot fields (see `apps/bookings/AGENTS.md` "Customer Identity Architecture").
+> `Booking.customer_name` / `Booking.customer_phone` were **not** removed. They remain snapshot write fields. Operational consumers now read through `Booking.club_player` (see `apps/bookings/identity.py`).
 
 - **Identity Foundation (Completed):** `PlayerProfile` and `ClubPlayer` exist.
-- **Booking Phase A (Completed):**
-  - Added a single nullable `club_player` FK to `Booking` — **not** a direct `player_profile` FK. `Booking` belongs to a `ClubPlayer`; `PlayerProfile` is reachable only transitively via `club_player.player_profile`. This refines the original [`ADR-002`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-002-booking-identity-and-authorization-migration.md) Decision 1 (two FKs) — see the ADR-002 addendum.
-  - `create_booking()` auto-resolves identity via `find_or_create_player_profile()` then `get_or_create_club_player()`; the frontend never sends `player_profile_id` / `club_player_id`.
-  - `customer_name` / `customer_phone` remain forever as historical snapshot fields — reviewed and kept intentionally (audit, dashboard calendar, transaction receipts, search), not merely preserved out of migration caution.
-  - No booking authorization/ViewSet/permission changes — that remains Phase B.
-- **ClubPlayer Historical Identity Foundation — Sprint 1 (Completed):**
-  - `ClubPlayer` became an append-oriented historical identity record: soft delete (`deleted_at`), conditional active-uniqueness, `supersede_club_player()` service, and model/queryset-level immutability enforcement. See "ClubPlayer Lifecycle (Append-Only)" above.
-  - `Booking.customer_name` / `Booking.customer_phone` were **not** touched — still present, still permanent snapshots (see `apps/bookings/AGENTS.md` "Customer Identity Architecture"). This sprint changed only how `ClubPlayer` itself behaves, not `Booking`.
-  - No new API endpoint calls `supersede_club_player()` yet — deferred (see "Remaining work" above).
-- **Booking Identity Enforcement — Sprint 2 (Completed):**
-  - Fixed the recurrence-continuation gap: `complete_booking()`'s next-occurrence creation now copies `club_player` from the anchor booking instead of leaving it `NULL`.
-  - Audited every `Booking.objects.create()` / `.update_or_create()` / `.bulk_create()` call site in the codebase. The dev/demo fixture seeder (`apps.accounts.management.commands.seed_demo_data`) was updated to also call `resolve_booking_club_player()` so seeded bookings carry a real identity link; all other direct-creation call sites are test fixtures (out of scope).
-  - Confirmed (with new regression tests) that `create_booking()` never resolves a soft-deleted `ClubPlayer` end-to-end through the booking service, not just at the `apps/players` service level (Sprint 1 already covered the latter).
-  - Confirmed the `Booking.club_id == Booking.club_player.club_id` invariant and the "frontend never sends `club_player_id`/`player_profile_id`" API contract were already correctly enforced from Phase A — no changes needed there.
-  - `Booking.customer_name` / `Booking.customer_phone` were **not** touched — still permanent snapshots.
-- **Booking Phase B (Future sprint):**
-  - Migrate `BookingViewSet` / `BookingAttemptViewSet` to Authorization Spine v2.
-  - See [`ADR-001`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-001-player-identity-and-booking-link.md) and [`ADR-002`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-002-booking-identity-and-authorization-migration.md).
+- **Booking Phase A (Completed):** nullable `club_player` FK; `create_booking()` auto-resolves identity; no direct `player_profile` FK.
+- **Sprint 1 / 2 (Completed):** append-only identity + recurrence `club_player` propagation. Soft delete from Sprint 1 is **superseded**.
+- **Sprint 3 — Player Identity & Booking Integration (Completed):**
+  - `ClubPlayer` is versioned: `previous_version`, `is_current_version`, `created_at`. No `deleted_at`. No `last_used_at`. No `updated_at`.
+  - Default booking resolution uses the **current** version. Optional write-only `club_player_id` selects a historical version.
+  - Last-used version is derived from the latest `Booking` for this `player_profile_id` at this club.
+  - Player-profile list/retrieve returns `club_player_versions` + `recommended_club_player_id` (last-used, else current).
+  - `customer_name` / `customer_phone` still present. `Booking.club_player` still nullable.
+- **Sprint 4 — Consumer Migration To ClubPlayer Identity (Completed):** operational booking/dashboard/transaction/settlement **reads** use ClubPlayer (exact booking-time version) with snapshot fallback. API keys unchanged. Audit event JSON, BookingAttempt payloads, and idempotency still use snapshots. Reports do not display customer identity.
+- **Booking Phase B (Future):** Authorization Spine v2 for bookings. Then snapshot column removal once remaining A/C write contracts are retired.
 
 ---
 
@@ -256,9 +255,9 @@ There is no update/partial_update payload — `ClubPlayer` has no PATCH endpoint
 
 [`apps/players/filters.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/filters.py)
 
-`ClubPlayerFilterSet`:
-- `search` — icontains on `display_name`, `player_profile__phone_number`, `player_profile__full_name`
-- `player_number` — exact match
+`ClubPlayerFilterSet`: `search`, `player_number`, `is_current_version`.
+
+`PlayerProfileFilterSet`: `search` across preferred name, phone, and this club's `ClubPlayer.display_name`.
 
 Filters must never perform permission checks or membership lookups.
 
@@ -270,20 +269,18 @@ Test suite: [`tests/players/`](file:///home/tarek/Desktop/sloty/sloty-backend/te
 
 | File | Coverage |
 |---|---|
-| `test_player_model.py` | Phone uniqueness, nullable user FK, user linking, cross-club independence, service functions, ClubPlayer active-uniqueness, soft delete, `save()`/`update()` immutability enforcement, `supersede_club_player()` |
-| `test_player_api.py` | list/create/retrieve, cross-club isolation, role matrix, same-phone-two-clubs, idempotent create, filters, 200/201 semantics, PATCH rejection (403, no update action bound) |
-| `test_player_authorization.py` | `authorization_config` contract, `scoped_queryset` club isolation without HTTP layer |
-| `tests/bookings/test_booking_player_identity.py` (`apps/bookings`) | Cross-domain: a `Booking.club_player_id` survives `supersede_club_player()` unchanged; a booking created *after* a supersede resolves the new active `ClubPlayer`; (Sprint 2) `create_booking()` never reuses a soft-deleted `ClubPlayer`; `complete_booking(continue_recurring=True)` propagates `club_player` to the next occurrence |
+| `test_player_model.py` | Phone uniqueness/no merging, current-version uniqueness, `create_club_player_version()`, last-used from latest booking, immutability |
+| `test_player_api.py` | list/create/retrieve, versioning POST, PATCH 403, profile versions + recommended id |
+| `test_player_authorization.py` | Spine v2 club isolation |
+| `tests/bookings/test_booking_player_identity.py` | Current-version booking default, historical `club_player_id` selection, history preservation, recurrence copy |
 
 ---
 
 ## Cross-App Dependencies & References
 
 - `apps/accounts` — `User` model (nullable FK on `PlayerProfile`)
-- `apps/clubs` — `Club` model (FK on `ClubPlayer`), `ClubMembership` (resolved by spine for access context)
-- `apps/common/authorization/` — Spine v2 (`SlotyScopedResourceMixin`, `scoped_queryset`, `load_authorization_config`)
-- `apps/bookings` — `Booking.club_player` FK consumer; calls `find_or_create_player_profile()` / `get_or_create_club_player()` from `create_booking()` (Booking Phase A, complete). A `Booking.club_player_id` is unaffected by a later `supersede_club_player()` call on that row — the FK is the historical snapshot (Sprint 1). Recurring-booking continuations copy `club_player` from their anchor rather than re-resolving it (Sprint 2).
-- Architecture reference: [`docs/architecture/security-architecture-v1.md §11`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md)
-- Architectural Decision Records:
-  - [`ADR-001 (Player Identity & Booking Link)`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-001-player-identity-and-booking-link.md)
-  - [`ADR-002 (Booking Identity & Authorization Migration)`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-002-booking-identity-and-authorization-migration.md)
+- `apps/clubs` — `Club` model (FK on `ClubPlayer`), `ClubMembership`
+- `apps/common/authorization/` — Spine v2
+- `apps/bookings` — `Booking.club_player` FK; default current version; optional historical id; recurrence copies the anchor version
+- Architecture: [`docs/architecture/security-architecture-v1.md §11`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md)
+- [`ADR-001`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-001-player-identity-and-booking-link.md), [`ADR-002`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-002-booking-identity-and-authorization-migration.md)

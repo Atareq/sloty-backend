@@ -28,7 +28,7 @@
 
 - [`apps/dashboard/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/dashboard/services.py):
   - `build_court_availability_payload()`: Computes schedule slots and blocking bookings.
-  - `build_calendar_payload()`: Aggregates day/week booking blocks for operational display.
+  - `build_calendar_payload()` / `get_calendar_items()`: Aggregates day/week booking blocks for operational display. Customer `title` / `customer_name` / `customer_phone` are read from `Booking.club_player` (exact version) via `apps.bookings.identity`, falling back to snapshot columns when `club_player` is null.
   - `build_dashboard_summary_payload()`: Enforces operational vs. financial access splitting.
   - `build_dashboard_overview_payload()`, `build_dashboard_revenue_payload()`, `build_court_utilization_payload()`.
 
@@ -53,7 +53,7 @@
 
 ## Cross-App Dependencies
 
-- Aggregates data across `apps.bookings`, `apps.courts`, `apps.transactions`, and `apps.settlements`.
+- Aggregates data across `apps.bookings`, `apps.courts`, `apps.transactions`, and `apps.settlements`. Calendar identity uses `apps.bookings.identity` (ClubPlayer).
 
 ## Testing
 

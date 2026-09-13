@@ -3,13 +3,34 @@ from decimal import Decimal
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from apps.bookings.identity import (
+    booking_customer_display_name,
+    booking_customer_display_phone,
+)
 from apps.bookings.models import Booking
 from apps.common.serializers import TimezoneAwareDateTimeField
 from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.services import create_booking_transaction
 
 
-class TransactionListSerializer(serializers.ModelSerializer):
+class BookingCustomerIdentityMixin(serializers.Serializer):
+    """Keep booking_customer_* keys; source ClubPlayer with snapshot fallback."""
+
+    booking_customer_name = serializers.SerializerMethodField()
+    booking_customer_phone = serializers.SerializerMethodField()
+
+    @extend_schema_field(serializers.CharField())
+    def get_booking_customer_name(self, obj) -> str:
+        return booking_customer_display_name(obj.booking)
+
+    @extend_schema_field(serializers.CharField())
+    def get_booking_customer_phone(self, obj) -> str:
+        return booking_customer_display_phone(obj.booking)
+
+
+class TransactionListSerializer(
+    BookingCustomerIdentityMixin, serializers.ModelSerializer
+):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     cancelled_by = serializers.PrimaryKeyRelatedField(read_only=True)
     booking_start_time = serializers.DateTimeField(
@@ -18,14 +39,6 @@ class TransactionListSerializer(serializers.ModelSerializer):
     )
     booking_end_time = serializers.DateTimeField(
         source="booking.end_time",
-        read_only=True,
-    )
-    booking_customer_name = serializers.CharField(
-        source="booking.customer_name",
-        read_only=True,
-    )
-    booking_customer_phone = serializers.CharField(
-        source="booking.customer_phone",
         read_only=True,
     )
     court_name = serializers.CharField(source="court.name", read_only=True)
@@ -64,7 +77,9 @@ class TransactionListSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class TransactionDetailSerializer(serializers.ModelSerializer):
+class TransactionDetailSerializer(
+    BookingCustomerIdentityMixin, serializers.ModelSerializer
+):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     cancelled_by = serializers.PrimaryKeyRelatedField(read_only=True)
     booking_start_time = serializers.DateTimeField(
@@ -73,14 +88,6 @@ class TransactionDetailSerializer(serializers.ModelSerializer):
     )
     booking_end_time = serializers.DateTimeField(
         source="booking.end_time",
-        read_only=True,
-    )
-    booking_customer_name = serializers.CharField(
-        source="booking.customer_name",
-        read_only=True,
-    )
-    booking_customer_phone = serializers.CharField(
-        source="booking.customer_phone",
         read_only=True,
     )
     court_name = serializers.CharField(source="court.name", read_only=True)
@@ -147,17 +154,10 @@ class TransactionAttemptStatusMixin(serializers.Serializer):
 
 
 class TransactionAttemptListSerializer(
+    BookingCustomerIdentityMixin,
     TransactionAttemptStatusMixin,
     serializers.ModelSerializer,
 ):
-    booking_customer_name = serializers.CharField(
-        source="booking.customer_name",
-        read_only=True,
-    )
-    booking_customer_phone = serializers.CharField(
-        source="booking.customer_phone",
-        read_only=True,
-    )
     court_name = serializers.CharField(source="court.name", read_only=True)
     attempted_by_username = serializers.CharField(
         source="attempted_by.username",

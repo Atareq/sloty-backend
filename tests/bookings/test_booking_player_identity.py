@@ -3,7 +3,9 @@ Booking Identity Finalization — Phase A + Sprint 2 (Identity Enforcement).
 
 Covers the Booking -> ClubPlayer -> PlayerProfile identity resolution flow
 owned by apps.bookings.services.create_booking(), plus Sprint 2 enforcement:
-never reusing a soft-deleted ClubPlayer, and propagating club_player to
+ClubPlayer is a permanent, versioned/append-only record (no soft delete, no
+"current version" flag — recording a new display_name creates a new row,
+never mutates or removes an existing one), and club_player propagates to
 recurring continuation bookings created by complete_booking(). See
 apps/bookings/AGENTS.md ("Customer Identity Architecture (Locked)") and
 docs/architecture/adr/ADR-002-booking-identity-and-authorization-migration.md.
@@ -29,7 +31,7 @@ from apps.clubs.models import Club
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.players.models import ClubPlayer, PlayerProfile
-from apps.players.services import supersede_club_player
+from apps.players.services import create_club_player_version
 from apps.transactions.models import Transaction
 
 
@@ -258,18 +260,17 @@ class BookingCreationCompatibilityTests(BookingPlayerIdentityTestCase):
         self.assertEqual(response.data["customer_phone"], "+201077777777")
 
 
-class ClubPlayerSupersedeBookingHistoryTests(BookingPlayerIdentityTestCase):
+class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
     """
-    ClubPlayer Sprint 1 — Booking.club_player is the historical snapshot.
-
-    Superseding a ClubPlayer (soft-delete + new active row, see
-    apps.players.services.supersede_club_player) must never affect any
-    Booking that already references the old row — that FK IS the identity
-    as of when the booking was made.
+    ClubPlayer is a permanent versioned record. New bookings use the current
+    version unless staff explicitly selects a historical ClubPlayer id.
+    Existing bookings keep the version they were created with.
     """
 
-    def test_existing_booking_keeps_referencing_superseded_club_player(self):
-        club = self.create_club("Supersede Club", "supersede-club")
+    def test_existing_booking_keeps_referencing_its_original_club_player_version(
+        self,
+    ):
+        club = self.create_club("Versioning Club", "versioning-club")
         court = self.create_court(club, "Court 1")
         admin = self.create_platform_admin()
 
@@ -282,23 +283,22 @@ class ClubPlayerSupersedeBookingHistoryTests(BookingPlayerIdentityTestCase):
             customer_phone="+201088888888",
         )
         original_club_player_id = booking.club_player_id
-        original_club_player = booking.club_player
+        original = booking.club_player
 
-        new_club_player = supersede_club_player(
-            original_club_player, display_name="Ahmed Salah", player_number=11
+        new_club_player = create_club_player_version(
+            original, display_name="Ahmed Salah", player_number=10
         )
 
         booking.refresh_from_db()
         self.assertEqual(booking.club_player_id, original_club_player_id)
         self.assertNotEqual(booking.club_player_id, new_club_player.id)
-        # The booking's historical view of the player is untouched.
         self.assertEqual(booking.club_player.display_name, "Ahmed Ali")
-        self.assertTrue(
-            ClubPlayer.objects.get(pk=original_club_player_id).deleted_at is not None
-        )
+        old_club_player = ClubPlayer.objects.get(pk=original_club_player_id)
+        self.assertEqual(old_club_player.display_name, "Ahmed Ali")
+        self.assertFalse(old_club_player.is_current_version)
 
-    def test_new_booking_after_supersede_resolves_the_new_active_club_player(self):
-        club = self.create_club("Supersede Club 2", "supersede-club-2")
+    def test_new_booking_uses_the_current_version(self):
+        club = self.create_club("Versioning Club 2", "versioning-club-2")
         court = self.create_court(club, "Court 1")
         admin = self.create_platform_admin()
 
@@ -310,8 +310,8 @@ class ClubPlayerSupersedeBookingHistoryTests(BookingPlayerIdentityTestCase):
             customer_name="Ahmed Ali",
             customer_phone="+201088889999",
         )
-        new_club_player = supersede_club_player(
-            old_booking.club_player, display_name="Ahmed Salah", player_number=11
+        v2 = create_club_player_version(
+            old_booking.club_player, display_name="Ahmed Salah", player_number=10
         )
 
         new_booking = create_booking(
@@ -319,62 +319,50 @@ class ClubPlayerSupersedeBookingHistoryTests(BookingPlayerIdentityTestCase):
             court=court,
             start_time=self.time_at(12),
             end_time=self.time_at(13),
-            customer_name="Ahmed Salah",
+            customer_name="Ahmed Ali",
             customer_phone="+201088889999",
         )
 
-        self.assertEqual(new_booking.club_player_id, new_club_player.id)
+        self.assertEqual(new_booking.club_player_id, v2.id)
         self.assertNotEqual(new_booking.club_player_id, old_booking.club_player_id)
         old_booking.refresh_from_db()
         self.assertEqual(old_booking.club_player.display_name, "Ahmed Ali")
+        self.assertEqual(
+            old_booking.club_player.player_profile_id,
+            new_booking.club_player.player_profile_id,
+        )
 
-
-class DeletedClubPlayerResolutionTests(BookingPlayerIdentityTestCase):
-    """
-    Sprint 2 — ClubPlayer resolution rules.
-
-    A soft-deleted ClubPlayer (deleted_at set, with no active replacement
-    yet created) must never be reused by create_booking(). The service must
-    resolve/create a fresh active ClubPlayer for the same (club, profile)
-    pair instead.
-    """
-
-    def test_booking_creation_never_reuses_a_soft_deleted_club_player(self):
-        club = self.create_club("Deleted Identity Club", "deleted-identity-club")
+    def test_explicit_historical_version_can_be_selected(self):
+        club = self.create_club("Versioning Club 3", "versioning-club-3")
         court = self.create_court(club, "Court 1")
         admin = self.create_platform_admin()
 
-        profile = PlayerProfile.objects.create(
-            phone_number="+201091112222", full_name="Ahmed Ali"
-        )
-        deleted_club_player = ClubPlayer.objects.create(
-            club=club, player_profile=profile, display_name="Ahmed Ali"
-        )
-        deleted_club_player.deleted_at = timezone.now()
-        deleted_club_player.save(update_fields=["deleted_at", "updated_at"])
-
-        booking = create_booking(
+        first_booking = create_booking(
             created_by=admin,
             court=court,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
             customer_name="Ahmed Ali",
-            customer_phone="+201091112222",
+            customer_phone="+201088887777",
+        )
+        v1_id = first_booking.club_player_id
+        create_club_player_version(
+            first_booking.club_player, display_name="Ahmed Salah", player_number=10
         )
 
-        self.assertIsNotNone(booking.club_player_id)
-        self.assertNotEqual(booking.club_player_id, deleted_club_player.id)
-        self.assertTrue(booking.club_player.is_active)
-        self.assertEqual(booking.club_player.player_profile_id, profile.id)
-        # The deleted row remains untouched — never resurrected.
-        deleted_club_player.refresh_from_db()
-        self.assertIsNotNone(deleted_club_player.deleted_at)
-        self.assertEqual(
-            ClubPlayer.objects.filter(
-                club=club, player_profile=profile, deleted_at__isnull=True
-            ).count(),
-            1,
+        historical_booking = create_booking(
+            created_by=admin,
+            court=court,
+            start_time=self.time_at(14),
+            end_time=self.time_at(15),
+            customer_name="Ahmed Ali",
+            customer_phone="+201088887777",
+            club_player_id=v1_id,
         )
+
+        self.assertEqual(historical_booking.club_player_id, v1_id)
+        self.assertFalse(historical_booking.club_player.is_current_version)
+        self.assertEqual(historical_booking.club_player.display_name, "Ahmed Ali")
 
 
 class RecurringBookingIdentityPropagationTests(BookingPlayerIdentityTestCase):
@@ -435,3 +423,73 @@ class RecurringBookingIdentityPropagationTests(BookingPlayerIdentityTestCase):
         self.assertIsNotNone(next_booking.club_player_id)
         self.assertEqual(next_booking.club_player_id, anchor.club_player_id)
         self.assertEqual(next_booking.club_player.club_id, club.id)
+
+
+class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
+    """
+    Operational consumers read ClubPlayer (exact booking-time version).
+    Snapshot columns stay on the row and in API keys.
+    """
+
+    def test_booking_api_keeps_v1_after_later_version_is_created(self):
+        club = self.create_club("Consumer Club", "consumer-club")
+        court = self.create_court(club, "Consumer Court")
+        admin = self.create_platform_admin("consumer-admin")
+        self.client.force_authenticate(user=admin)
+
+        booking = create_booking(
+            created_by=admin,
+            court=court,
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+            customer_name="Ahmed Ali",
+            customer_phone="+201088880001",
+        )
+        v1 = booking.club_player
+        create_club_player_version(v1, display_name="Ahmed Salah", player_number=10)
+
+        response = self.client.get(
+            reverse(
+                "club-booking-detail",
+                kwargs={"club_slug": club.slug, "pk": booking.pk},
+            )
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["customer_name"], "Ahmed Ali")
+        self.assertEqual(response.data["customer_phone"], "+201088880001")
+        self.assertNotIn("club_player", response.data)
+
+        search = self.client.get(
+            reverse("club-booking-list", kwargs={"club_slug": club.slug}),
+            {"search": "Ahmed Ali"},
+        )
+        self.assertEqual(search.status_code, status.HTTP_200_OK)
+        ids = [row["id"] for row in search.data["results"]]
+        self.assertIn(booking.id, ids)
+
+    def test_snapshot_fallback_when_club_player_is_null(self):
+        club = self.create_club("Fallback Club", "fallback-club")
+        court = self.create_court(club, "Fallback Court")
+        admin = self.create_platform_admin("fallback-admin")
+        self.client.force_authenticate(user=admin)
+        booking = Booking.objects.create(
+            club=club,
+            court=court,
+            customer_name="Snapshot Only",
+            customer_phone="+201088880002",
+            start_time=self.time_at(12),
+            end_time=self.time_at(13),
+            total_price=Decimal("300.00"),
+            status=Booking.Status.HOLD,
+            source=Booking.Source.MANUAL,
+            created_by=admin,
+        )
+        response = self.client.get(
+            reverse(
+                "club-booking-detail",
+                kwargs={"club_slug": club.slug, "pk": booking.pk},
+            )
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["customer_name"], "Snapshot Only")
+        self.assertEqual(response.data["customer_phone"], "+201088880002")
