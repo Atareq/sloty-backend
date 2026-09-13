@@ -9,11 +9,7 @@ from rest_framework.viewsets import GenericViewSet
 
 from apps.common.authorization.mixins import ClubScopedViewMixin
 from apps.common.authorization.permissions import SlotyBasePermission
-from apps.settlements.authorization import (
-    build_unsettled_summary,
-    can_access_settlement,
-    can_manage_settlements,
-)
+from apps.settlements.authorization import can_access_settlement, can_manage_settlements
 from apps.settlements.filters import SettlementFilter
 from apps.settlements.models import Settlement
 from apps.settlements.serializers import (
@@ -139,12 +135,9 @@ class SettlementViewSet(
             context=self.get_serializer_context(),
         )
         serializer.is_valid(raise_exception=True)
-        collector = serializer.validated_data.get("collected_by")
-        payload = build_unsettled_summary(
-            context=self.access_context,
-            collector=collector,
+        response_serializer = SettlementUnsettledSummaryResponseSerializer(
+            serializer.get_summary()
         )
-        response_serializer = SettlementUnsettledSummaryResponseSerializer(payload)
         return Response(response_serializer.data)
 
     @extend_schema(

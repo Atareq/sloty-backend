@@ -1,53 +1,27 @@
 """
 Settlements & Current Custody Domain Services.
 
-PRIMARY ARCHITECTURAL INVARIANT:
-Current Custody and Settlement are financially scoped by CLUB + optional COLLECTOR,
-never by COURT.
-PRIMARY ARCHITECTURAL INVARIANTS:
-1. Financial custody scope is Club + optional Collector.
+ARCHITECTURAL INVARIANTS:
+1. Financial custody scope is strictly Club + optional Collector.
    Court is NEVER part of Current Custody or Settlement financial scope.
-2. Financial layer has ZERO knowledge of authorization.
+   Why: A collector's cash custody comprises all money collected by that individual
+   within the club, regardless of which court's booking generated the payment.
+   Filtering by court fragments physical cash tracking and causes discrepancies.
+2. The financial layer has ZERO knowledge of authorization.
    Authorization is evaluated at the boundary before calling financial services.
-   These functions do not inspect roles, permissions, court assignments, or
-   RequestAccessContext.
-3. Operational Transaction authorization (which is Court-scoped for Staff)
-   must NOT be reused for financial custody.
-4. Preview and Settlement derive candidate transactions from the exact same
+   These pure financial functions do NOT inspect roles, permissions, court assignments,
+   or RequestAccessContext.
+3. Preview and Settlement derive candidate transactions from the exact same
    unsettled transaction query (get_unsettled_transactions_queryset).
+   This guarantees complete mathematical and transactional parity.
+4. Operational Transaction authorization (which is Court-scoped for Staff)
+   must NOT be reused for financial custody, and custody rules must NOT leak
+   into operational transaction viewing.
 
-Financial Custody Scope = Club + optional Collector + unsettled financial transactions.
-NOT: Club + Court + Collector.
-
-Responsibilities:
-1. Authorization / Scope Guard:
-   - validate_preview_authority(*, access, actor, collector)
-   - validate_settlement_authority(*, access, actor, collector, court=None)
-   Determines whether caller may access requested custody scope.
-   Staff are restricted to previewing themselves. Owner / Platform Admin can
-   preview any collector.
-   Managers are gated by manager_can_settle_transactions.
-   Does NOT query transactions or calculate custody.
-
-2. Authoritative Custody Resolution:
-   - get_unsettled_transactions_queryset(*, club, collector=None, lock=False)
-   - build_custody(*, club, collector=None, lock=False, period_end=None)
-   - preview_custody(*, access, actor, collector, court=None)
-   Authoritative, side-effect-free financial transaction set resolution.
-   Never filters by court and never reuses operational transaction scoping
-   (ClubAccessContext.scoped_transactions_queryset).
-   collector=None: all unsettled transactions in the club.
-   collector=user: all unsettled transactions in the club collected by that
-   user across all courts.
-
-3. Settlement Mutation:
-   - settle_custody(*, access, actor, collector, notes="", court=None)
-   Consumes the exact same authoritative custody query
-   (get_unsettled_transactions_queryset),
-   locking candidate transactions and mutating settlement records atomically.
-Structure:
+Authoritative Pure Financial Operations:
 - get_unsettled_transactions_queryset(*, club, collector=None, lock=False)
-- build_custody(*, club, collector=None, period_end=None)
+- build_custody(*, club, collector=None, period_end=None, lock=False)
+- build_current_custody_collector_rows(queryset, *, period_end=None)
 - settle_custody(*, club, collector, actor, notes="")
 - mark_settlement_settled(*, settlement, actor)
 """
@@ -780,12 +754,14 @@ process_settlement_request = create_approved_settlement
 create_settlement = create_approved_settlement
 
 
-def mark_settlement_settled(*, settlement, actor, access=None):
+def mark_settlement_settled(*, settlement, actor):
     """
     Transition a PENDING settlement to SETTLED atomically.
 
+    ARCHITECTURAL INVARIANT:
     Authorization is evaluated at the view/boundary layer before this
-    function is reached.
+    financial function is reached. This function does NOT perform authorization,
+    inspect roles, or evaluate permissions.
     """
     with transaction.atomic():
         locked_settlement = (
@@ -799,11 +775,6 @@ def mark_settlement_settled(*, settlement, actor, access=None):
             )
             .get(pk=settlement.pk)
         )
-        if access is not None:
-            if not access.can_access_settlement(locked_settlement):
-                raise PermissionDenied("You cannot access this settlement.")
-            if not access.can_manage_settlements():
-                raise PermissionDenied("You cannot manage settlements for this club.")
         if locked_settlement.status == Settlement.Status.SETTLED:
             raise SlotyAPIException(
                 status_code=status.HTTP_409_CONFLICT,

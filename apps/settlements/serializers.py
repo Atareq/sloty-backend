@@ -7,13 +7,18 @@ from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
 from apps.settlements.authorization import (
     can_approve_collector,
+    can_view_collector_in_summary,
+    get_active_collector_roles_by_id,
     validate_preview_authority,
     validate_settlement_authority,
+    validate_unsettled_summary_authority,
 )
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.settlements.services import (
     NO_UNSETTLED_TRANSACTIONS_MESSAGE,
+    build_current_custody_collector_rows,
     build_custody,
+    get_unsettled_transactions_queryset,
     get_user_display_name,
     serialize_preview_transactions,
     settle_custody,
@@ -396,7 +401,42 @@ class SettlementUnsettledSummaryRequestSerializer(serializers.Serializer):
                     ],
                 }
             )
+        validate_unsettled_summary_authority(
+            context=context,
+            collector=attrs.get("collected_by"),
+        )
         return attrs
+
+    def get_summary(self):
+        context = self.context.get("access_context") or self.context.get("club_access")
+        collector = self.validated_data.get("collected_by")
+        queryset = get_unsettled_transactions_queryset(
+            club=context.club,
+            collector=collector,
+        )
+        grouped_rows = build_current_custody_collector_rows(queryset)
+        collector_ids = [row["collected_by"] for row in grouped_rows]
+        roles_by_user_id = get_active_collector_roles_by_id(context.club, collector_ids)
+        results = []
+        for row in grouped_rows:
+            collector_id = row["collected_by"]
+            roles = roles_by_user_id.get(collector_id, set())
+            if not can_view_collector_in_summary(context, collector_id, roles):
+                continue
+            results.append(
+                row
+                | {
+                    "is_self": bool(context.user and collector_id == context.user.id),
+                    "can_approve": can_approve_collector(context, collector_id, roles),
+                }
+            )
+        results.sort(
+            key=lambda item: (
+                item["collected_by_name"].casefold(),
+                item["collected_by"],
+            )
+        )
+        return {"results": results}
 
 
 class SettlementUnsettledSummaryRowSerializer(serializers.Serializer):

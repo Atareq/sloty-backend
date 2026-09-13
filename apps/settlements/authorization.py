@@ -1,5 +1,6 @@
 """
 Settlement domain authorization and scope resolution.
+Settlement domain authorization and boundary scope guards.
 
 ARCHITECTURAL INVARIANTS:
 1. Authorization determines whether a caller (represented by RequestAccessContext)
@@ -7,8 +8,16 @@ ARCHITECTURAL INVARIANTS:
 2. Authorization happens BEFORE financial processing. Financial functions
    (get_unsettled_transactions_queryset, build_custody, settle_custody) receive
    already-authorized domain entities and do not inspect roles, permissions, or context.
+   is allowed to access or mutate a custody scope (Club + optional Collector).
+2. Authorization happens BEFORE pure financial processing. Financial functions
+   (get_unsettled_transactions_queryset, build_custody, settle_custody,
+   mark_settlement_settled) receive already-authorized domain entities and do
+   NOT inspect roles, permissions, court assignments, or RequestAccessContext.
 3. Financial custody is strictly scoped by Club + optional Collector.
    Court is NEVER part of financial custody.
+4. Calculations (transaction counts, gross amounts, refunds, net amounts, custody,
+   and collector totals) belong to the financial layer (services.py).
+   This module answers ONLY: "Is this actor allowed to request this scope?"
 """
 
 from typing import Collection, Dict, Optional, Set
@@ -23,10 +32,6 @@ from apps.common.authorization.context import RequestAccessContext
 from apps.common.authorization.roles import Role
 from apps.common.exceptions import SlotyAPIException
 from apps.settlements.models import Settlement
-from apps.settlements.services import (
-    build_current_custody_collector_rows,
-    get_unsettled_transactions_queryset,
-)
 
 SELF_APPROVAL_MESSAGE = _("You cannot approve your own settlement.")
 
@@ -108,6 +113,28 @@ def can_approve_collector(
             return False
         return True
     return False
+
+
+def can_view_collector_in_summary(
+    context: RequestAccessContext,
+    collector_id: int,
+    roles: Optional[Set[str]] = None,
+) -> bool:
+    """
+    Determine whether context actor is permitted to see this collector in summary.
+
+    Rules:
+    - Platform Admin and Owner can view all active collectors.
+    - Managers cannot view Owner collectors in the unsettled summary.
+    - Staff cannot view anyone other than themselves.
+    """
+    if context.is_platform_admin or context.role == Role.OWNER:
+        return True
+    if context.role == Role.MANAGER:
+        if roles is not None and Role.OWNER in roles:
+            return False
+        return True
+    return collector_id == context.user.id
 
 
 def validate_preview_authority(
@@ -241,35 +268,16 @@ def build_unsettled_summary(
     collector: Optional[User] = None,
 ) -> dict:
     """
-    Build read-only unsettled transaction summary for view action.
+    Legacy compatibility helper for unsettled summary assembly.
 
-    Derives candidates from get_unsettled_transactions_queryset(
-        club=context.club, collector=collector
-    ), aggregates collector rows, filters out owners for managers, and
-    decorates rows with is_self and can_approve.
+    Delegates to the application serializer layer. Calculation is owned by
+    the financial layer (services.py); authorization is owned by this module.
     """
-    validate_unsettled_summary_authority(context=context, collector=collector)
-    queryset = get_unsettled_transactions_queryset(
-        club=context.club,
-        collector=collector,
+    from apps.settlements.serializers import SettlementUnsettledSummaryRequestSerializer
+
+    serializer = SettlementUnsettledSummaryRequestSerializer(
+        data={"collected_by": collector.id if collector else None},
+        context={"access_context": context},
     )
-    grouped_rows = build_current_custody_collector_rows(queryset)
-    collector_ids = [row["collected_by"] for row in grouped_rows]
-    roles_by_user_id = get_active_collector_roles_by_id(context.club, collector_ids)
-    results = []
-    for row in grouped_rows:
-        collector_id = row["collected_by"]
-        roles = roles_by_user_id.get(collector_id, set())
-        if context.role == Role.MANAGER and Role.OWNER in roles:
-            continue
-        results.append(
-            row
-            | {
-                "is_self": bool(context.user and collector_id == context.user.id),
-                "can_approve": can_approve_collector(context, collector_id, roles),
-            }
-        )
-    results.sort(
-        key=lambda item: (item["collected_by_name"].casefold(), item["collected_by"])
-    )
-    return {"results": results}
+    serializer.is_valid(raise_exception=True)
+    return serializer.get_summary()
