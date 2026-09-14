@@ -68,9 +68,8 @@ class TransactionFilter(django_filters.FilterSet):
     search = django_filters.CharFilter(
         method="filter_search",
         help_text=(
-            "Search booking customer_name, booking customer_phone "
-            "(including Egyptian phone variants), ClubPlayer identity, "
-            "and payment_reference."
+            "Search ClubPlayer display name, PlayerProfile phone "
+            "(including Egyptian phone variants), and payment_reference."
         ),
     )
     ordering = django_filters.ChoiceFilter(

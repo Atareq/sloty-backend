@@ -15,7 +15,7 @@
 - **Snapshot Architecture**:
   - To prevent N+1 database queries when rendering audit logs, business services use snapshot helpers (`booking_audit_snapshot`, `transaction_audit_snapshot`, `settlement_audit_snapshot`) to store event-time entity facts in JSON (`metadata`, `before_data`, `after_data`).
   - Serializers must consume these stored snapshots rather than querying current live entities.
-  - Sprint 4: audit JSON still stores `Booking.customer_name` / `customer_phone` as event-time **row** facts (including PATCH of those columns). Do not rewrite historical audit payloads from live ClubPlayer. Phone search on audit list also matches `club_player.player_profile.phone_number` to find related bookings.
+  - New audit events store ClubPlayer display name/phone as event-time facts. Historical JSON is never rewritten from live ClubPlayer. Phone search on audit list matches `club_player.player_profile.phone_number` to find related bookings.
 
 ## Important Models & Fields
 
@@ -66,7 +66,7 @@ DjangoFilterBackend / search / pagination / serializers
 - **Out-of-club IDs:** omitted from the scoped queryset → HTTP 404. Other-club members hitting this club's URL remain HTTP 403.
 - Search (phone / entity / actor / court filters) may only narrow the already-authorized queryset.
 - Event creation (`record_audit_log()`) is unchanged. This migration does not rewrite historical rows, snapshots, payloads, timestamps, or actors.
-- Legacy `ClubAccessContext.scoped_audit_logs_queryset()` / `CanViewClubAuditLogs` remain in `apps/clubs/` for unmigrated callers. Audit ViewSets no longer use them (no implicit `last_sync_at` updates).
+- `CanViewClubAuditLogs` was deleted. Audit ViewSets use the Spine only (no implicit `last_sync_at` updates).
 
 ## Cross-App Dependencies
 

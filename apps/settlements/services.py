@@ -216,13 +216,12 @@ def get_unsettled_transactions_queryset(
     Filtering custody by court would fragment physical cash tracking and
     cause staff self-preview to diverge from owner/manager preview.
 
-    Why normal Transaction authorization (scoped_transactions_queryset)
-    must NOT be reused:
-    Operational Transaction authorization
-    (ClubAccessContext.scoped_transactions_queryset) intentionally applies
-    court-level scoping (e.g. staff only see their assigned court's bookings).
-    Reusing operational scoping here leaked court restrictions into financial
-    calculation, causing staff to miss their own cross-court collections.
+    Why normal Transaction authorization must NOT be reused:
+    Operational Transaction authorization (Authorization Spine court scope
+    plus Staff created_by narrowing) intentionally applies court-level
+    scoping. Reusing that operational queryset here leaked court restrictions
+    into financial calculation, causing staff to miss their own cross-court
+    collections.
 
     Why preview and settlement must share the same resolver:
     Preview and settlement must originate from the exact same transaction

@@ -292,8 +292,7 @@ club_player (Nullable FK -> players.ClubPlayer, on_delete=SET_NULL)
 ### What did not change
 
 - Decision 2 (Player Identity Resolution & Offline Safety) — unchanged. The resolution flow still runs `find_or_create_player_profile()` before `get_or_create_club_player()`; the frontend still never sends `player_profile_id` / `club_player_id`.
-- Decisions 3–8 (Booking/BookingAttempt security boundary, authorization migration pattern, separation of responsibilities, phasing) — unchanged. Phase B is now implemented; Phase C (legacy helper removal) remains blocked on parts of Clubs.
-- `customer_name` / `customer_phone` — remain permanent immutable snapshots exactly as decided in Decision 1, now with a documented usage audit (audit trail, dashboard calendar, transaction receipts, search) confirming the decision against actual call sites rather than assumption.
+- Phase C (legacy helper removal) remains blocked on Club memberships. Dead unused booking/audit/dashboard/report/settlement permission wrappers were deleted.
 
 ---
 
@@ -355,7 +354,7 @@ Addendum §6 (`deleted_at`, `supersede_club_player()`, unique-active-where-not-d
 - Snapshot columns remain for create/PATCH, idempotency, audit event JSON, and BookingAttempt payloads.
 - `Booking.club_player` stays nullable; helpers fall back to snapshots.
 - Reports do not display customer identity; no report identity change.
-- Snapshot **removal** is a later sprint.
+- Snapshot **removal** is complete (see Addendum 9). This addendum described the operational-read migration that preceded it.
 
 ### What this supersedes
 
@@ -375,5 +374,33 @@ Sprint 3 addendum's "consumers are not migrated" line. Runtime operational reads
 - BookingAttempt keeps Staff `attempted_by=request.user` narrowing in `filter_scoped_queryset()`. Dismiss remains attempter-only for every role via `check_object_permission`.
 - Matrix gained `cancellation_preview` and `partial_update` for Owner/Manager/Staff so existing PATCH and preview behavior is preserved.
 - Lifecycle actions load the booking through `self.get_object()` on the secured queryset. Out-of-scope bookings return HTTP 404 instead of HTTP 403 (existence-leak fix). Create/slots/reschedule **target court** denials remain HTTP 403.
-- `apps/bookings/authorization.py` was not created. Legacy `ClubAccessContext` remains for parts of Clubs.
-- Phase C (delete booking helpers from the legacy layer) is **not** done.
+- `apps/bookings/authorization.py` was not created. Legacy `ClubAccessContext` remains for Club memberships.
+- Phase C (delete leftover scoped-queryset helpers from the legacy Clubs layer) is **not** done. Unused migrated-domain permission wrappers were deleted.
+
+---
+
+## 9. Addendum — Booking Snapshot Column Removal (2026-09-14)
+
+**Status:** Applied. Supersedes Decision 1's "snapshots stay forever" once ClubPlayer became immutable versions.
+
+### Decision
+
+ClubPlayer versions are the historical identity. Booking no longer stores `customer_name` / `customer_phone`.
+
+```text
+Booking.club_player_id  NOT NULL  on_delete=PROTECT
+      ↓
+ClubPlayer (immutable version)
+      ↓
+PlayerProfile (phone identity key)
+```
+
+- Walk-in create still accepts `customer_name` / `customer_phone` as resolution inputs. Optional `club_player_id` selects a historical version.
+- Booking PATCH is notes-only. It does not mutate ClubPlayer identity.
+- Idempotency stays keyed by `client_request_id` per club. BookingAttempt keeps submitted name/phone as payload evidence. Booking-level replay matches court, time, source, notes, PlayerProfile phone, and an explicit `club_player_id` when sent.
+- New audit snapshots store ClubPlayer display at event time. Historical audit JSON is not rewritten.
+- BookingAttempt `customer_*` fields remain as request payload evidence.
+
+### What this supersedes
+
+Decision 1's permanent Booking snapshot columns, and Sprint 4's nullable `club_player` + snapshot fallback.

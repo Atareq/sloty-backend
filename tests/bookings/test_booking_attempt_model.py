@@ -8,12 +8,17 @@ from django.test import TestCase
 from django.utils import timezone
 
 from apps.accounts.models import User
+from apps.bookings.identity import (
+    booking_customer_display_name,
+    booking_customer_display_phone,
+)
 from apps.bookings.models import Booking, BookingAttempt
 from apps.bookings.services import blocking_booking_queryset
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
+from tests.booking_factories import persist_booking
 
 
 class BookingAttemptModelTests(TestCase):
@@ -53,19 +58,11 @@ class BookingAttemptModelTests(TestCase):
         )
 
     def create_booking(self, court: Court, **extra_fields) -> Booking:
-        data = {
-            "club": court.club,
-            "court": court,
-            "customer_name": "Accepted Customer",
-            "customer_phone": "+201000000001",
-            "start_time": self.time_at(20),
-            "end_time": self.time_at(21),
-            "total_price": Decimal("300.00"),
-            "status": Booking.Status.HOLD,
-            "source": Booking.Source.MANUAL,
-        }
-        data.update(extra_fields)
-        return Booking.objects.create(**data)
+        extra_fields.setdefault("start_time", self.time_at(20))
+        extra_fields.setdefault("end_time", self.time_at(21))
+        extra_fields.setdefault("customer_name", "Accepted Customer")
+        extra_fields.setdefault("customer_phone", "+201000000001")
+        return persist_booking(court, **extra_fields)
 
     def create_rejected_attempt(self, court: Court, attempted_by: User, **extra_fields):
         data = {
@@ -146,8 +143,8 @@ class BookingAttemptModelTests(TestCase):
             attempted_by=self.staff,
             booking=booking,
             client_request_id=uuid.uuid4(),
-            customer_name=booking.customer_name,
-            customer_phone=booking.customer_phone,
+            customer_name=booking_customer_display_name(booking),
+            customer_phone=booking_customer_display_phone(booking),
             requested_start=booking.start_time,
             requested_end=booking.end_time,
             requested_at=booking.created,
@@ -200,11 +197,10 @@ class BookingAttemptModelTests(TestCase):
             resolution=BookingAttempt.Resolution.RESOLVED,
         )
 
-        booking.customer_name = "Changed Customer"
         booking.start_time = booking.start_time + timedelta(hours=2)
         booking.end_time = booking.end_time + timedelta(hours=2)
         booking.notes = "Changed note"
-        booking.save(update_fields=["customer_name", "start_time", "end_time", "notes"])
+        booking.save(update_fields=["start_time", "end_time", "notes"])
 
         attempt.refresh_from_db()
         self.assertEqual(attempt.customer_name, "Original Customer")

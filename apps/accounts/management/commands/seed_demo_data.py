@@ -507,10 +507,8 @@ class Command(BaseCommand):
                 booking, _ = Booking.objects.update_or_create(
                     club=club,
                     court=court,
-                    customer_phone=phone,
                     start_time=start_time,
                     defaults={
-                        "customer_name": customer_name,
                         "club_player": club_player,
                         "end_time": start_time + timedelta(minutes=60),
                         "total_price": court.default_price,
@@ -543,10 +541,8 @@ class Command(BaseCommand):
                     booking, _ = Booking.objects.update_or_create(
                         club=club,
                         court=court,
-                        customer_phone=phone,
                         start_time=start_time,
                         defaults={
-                            "customer_name": customer_name,
                             "club_player": club_player,
                             "end_time": start_time + timedelta(minutes=60),
                             "total_price": court.default_price,

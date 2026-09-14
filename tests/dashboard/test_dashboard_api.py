@@ -26,6 +26,7 @@ from apps.dashboard.views import (
 )
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
+from tests.booking_factories import persist_booking
 
 
 class DashboardAPITestCase(APITestCase):
@@ -109,21 +110,11 @@ class DashboardAPITestCase(APITestCase):
                 )
 
     def create_booking(self, court: Court, **extra_fields) -> Booking:
-        start_time = extra_fields.pop("start_time", self.time_at(9))
-        end_time = extra_fields.pop("end_time", self.time_at(10))
-        data = {
-            "club": court.club,
-            "court": court,
-            "customer_name": "Dashboard Customer",
-            "customer_phone": "+201000000001",
-            "start_time": start_time,
-            "end_time": end_time,
-            "total_price": Decimal("300.00"),
-            "status": Booking.Status.HOLD,
-            "source": Booking.Source.MANUAL,
-        }
-        data.update(extra_fields)
-        return Booking.objects.create(**data)
+        extra_fields.setdefault("start_time", self.time_at(9))
+        extra_fields.setdefault("end_time", self.time_at(10))
+        extra_fields.setdefault("customer_name", "Dashboard Customer")
+        extra_fields.setdefault("customer_phone", "+201000000001")
+        return persist_booking(court, **extra_fields)
 
     def create_transaction(self, booking: Booking, **extra_fields) -> Transaction:
         created = extra_fields.pop("created", self.time_at(13))
@@ -559,18 +550,13 @@ class CalendarTests(DashboardDataMixin, DashboardAPITestCase):
         )
 
     def test_calendar_keeps_club_player_version_after_roster_change(self):
-        from apps.players.services import (
-            create_club_player_version,
-            find_or_create_player_profile,
-            get_or_create_club_player,
-        )
+        from apps.players.services import create_club_player_version
 
         self.client.force_authenticate(user=self.platform_admin)
-        profile, _ = find_or_create_player_profile(
-            "+201000000102", full_name="Ahmed Ali"
-        )
-        v1, _ = get_or_create_club_player(
-            self.club, profile, display_name="Ahmed Ali", player_number=7
+        v1 = create_club_player_version(
+            self.confirmed.club_player,
+            display_name="Ahmed Ali",
+            player_number=7,
         )
         self.confirmed.club_player = v1
         self.confirmed.save(update_fields=["club_player"])
@@ -585,7 +571,6 @@ class CalendarTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(item["customer_name"], "Ahmed Ali")
         self.assertEqual(item["customer_phone"], "+201000000102")
         self.assertNotEqual(item["customer_name"], "Ahmed Salah")
-        self.assertNotEqual(item["customer_name"], self.confirmed.customer_name)
 
 
 class DashboardOverviewTests(DashboardDataMixin, DashboardAPITestCase):

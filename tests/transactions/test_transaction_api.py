@@ -33,6 +33,7 @@ from apps.transactions.services import (
     get_booking_paid_amount,
 )
 from apps.transactions.views import TransactionViewSet
+from tests.booking_factories import persist_booking
 
 
 class TransactionAPITestCase(APITestCase):
@@ -94,21 +95,11 @@ class TransactionAPITestCase(APITestCase):
         )
 
     def create_booking(self, court: Court, **extra_fields) -> Booking:
-        start_time = extra_fields.pop("start_time", self.time_at(20))
-        end_time = extra_fields.pop("end_time", self.time_at(21))
-        data = {
-            "club": court.club,
-            "court": court,
-            "customer_name": "Existing Customer",
-            "customer_phone": "+201000000001",
-            "start_time": start_time,
-            "end_time": end_time,
-            "total_price": Decimal("300.00"),
-            "status": Booking.Status.HOLD,
-            "source": Booking.Source.MANUAL,
-        }
-        data.update(extra_fields)
-        return Booking.objects.create(**data)
+        extra_fields.setdefault("start_time", self.time_at(20))
+        extra_fields.setdefault("end_time", self.time_at(21))
+        extra_fields.setdefault("customer_name", "Existing Customer")
+        extra_fields.setdefault("customer_phone", "+201000000001")
+        return persist_booking(court, **extra_fields)
 
     def create_transaction(self, booking: Booking, **extra_fields) -> Transaction:
         data = {
@@ -432,8 +423,14 @@ class TransactionResponseContextTests(TransactionAPITestCase):
         self.assertEqual(payload["court"], self.court.id)
         self.assertEqual(payload["created_by"], self.platform_admin.id)
         self.assertEqual(payload["id"], transaction_obj.id)
-        self.assertEqual(payload["booking_customer_name"], self.booking.customer_name)
-        self.assertEqual(payload["booking_customer_phone"], self.booking.customer_phone)
+        self.assertEqual(
+            payload["booking_customer_name"],
+            self.booking.club_player.display_name,
+        )
+        self.assertEqual(
+            payload["booking_customer_phone"],
+            str(self.booking.club_player.player_profile.phone_number),
+        )
 
     def test_list_response_includes_booking_court_and_creator_context(self):
         response = self.client.get(self.transaction_list_url(self.club))

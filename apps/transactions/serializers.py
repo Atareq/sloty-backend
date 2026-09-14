@@ -14,7 +14,7 @@ from apps.transactions.services import create_booking_transaction
 
 
 class BookingCustomerIdentityMixin(serializers.Serializer):
-    """Keep booking_customer_* keys; source ClubPlayer with snapshot fallback."""
+    """Keep booking_customer_* keys; source ClubPlayer (exact booking-time version)."""
 
     booking_customer_name = serializers.SerializerMethodField()
     booking_customer_phone = serializers.SerializerMethodField()

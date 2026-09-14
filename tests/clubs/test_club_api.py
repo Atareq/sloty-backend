@@ -19,6 +19,7 @@ from apps.clubs.models import Club, ClubMembership
 from apps.clubs.services import create_club_member
 from apps.courts.models import Court
 from apps.transactions.models import Transaction
+from tests.booking_factories import persist_booking
 
 
 class ClubAPITestCase(APITestCase):
@@ -82,19 +83,13 @@ class ClubAPITestCase(APITestCase):
         )
 
     def create_booking(self, court: Court, **extra_fields) -> Booking:
-        data = {
-            "club": court.club,
-            "court": court,
-            "customer_name": "Club Customer",
-            "customer_phone": "+201000000001",
-            "start_time": self.time_at(20),
-            "end_time": self.time_at(21),
-            "total_price": Decimal("250.00"),
-            "status": Booking.Status.CONFIRMED,
-            "source": Booking.Source.MANUAL,
-        }
-        data.update(extra_fields)
-        return Booking.objects.create(**data)
+        extra_fields.setdefault("start_time", self.time_at(20))
+        extra_fields.setdefault("end_time", self.time_at(21))
+        extra_fields.setdefault("customer_name", "Club Customer")
+        extra_fields.setdefault("customer_phone", "+201000000001")
+        extra_fields.setdefault("total_price", Decimal("250.00"))
+        extra_fields.setdefault("status", Booking.Status.CONFIRMED)
+        return persist_booking(court, **extra_fields)
 
     def create_transaction(self, booking: Booking, **extra_fields) -> Transaction:
         data = {

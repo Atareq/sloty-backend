@@ -18,7 +18,7 @@
     - Financial values use historical `Booking.total_price` snapshots, **not** current court pricing periods.
     - Financial totals sum non-cancelled attached transactions.
     - Booking revenue is attributed entirely to the booking's local start date, even if occupancy spans past midnight.
-- **Customer identity**: Court Usage Report does **not** display `customer_name` / `customer_phone` or ClubPlayer. It is occupancy and financial aggregation only. Tests create bookings with snapshot fields; that is fixture data, not a report identity contract.
+- **Customer identity**: Court Usage Report does **not** display `customer_name` / `customer_phone` or ClubPlayer. It is occupancy and financial aggregation only. Tests create bookings through ClubPlayer resolution; that is fixture data, not a report identity contract.
 - **Demand Analysis Buckets**:
     - Demand is analyzed in 60-minute clock buckets (`DEMAND_BUCKET_MINUTES = 60`). Low-demand results must include zero-demand generated slots.
 
@@ -63,7 +63,7 @@ Aggregation / JSON response
 - Optional `staff=` is a `Booking.created_by` report filter. The named user must have active access in this club (`REPORT_STAFF_NOT_IN_CLUB`); it is **not** Settlement collector isolation.
 - Do not apply Transaction Staff `created_by` narrowing or Settlement collector narrowing to report totals. Report viewers are financial roles.
 - [`apps/reports/authorization.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/reports/authorization.py) exists only for: Spine source querysets, court-filter 403, and the staff-membership filter rule.
-- Legacy `ClubAccessContext.scoped_report_courts_queryset()` / `CanViewClubReports` remain in `apps/clubs/` for unmigrated callers. Report views no longer use them (no implicit `last_sync_at` updates).
+- Report views use Spine source querysets. They do not use `ClubAccessContext` or a Clubs permission class (no implicit `last_sync_at` updates).
 
 ## Cross-App Dependencies
 

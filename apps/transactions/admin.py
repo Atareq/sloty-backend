@@ -32,8 +32,6 @@ class TransactionAdmin(admin.ModelAdmin):
     search_fields = (
         "client_request_id",
         "payment_reference",
-        "booking__customer_name",
-        "booking__customer_phone",
         "booking__club_player__display_name",
         "booking__club_player__player_profile__phone_number",
         "court__name",
@@ -110,8 +108,6 @@ class TransactionAttemptAdmin(admin.ModelAdmin):
     search_fields = (
         "client_request_id",
         "payment_reference",
-        "booking__customer_name",
-        "booking__customer_phone",
         "booking__club_player__display_name",
         "booking__club_player__player_profile__phone_number",
         "court__name",

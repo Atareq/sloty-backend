@@ -82,7 +82,7 @@ Pure financial services (apps/settlements/services.py)
 - Collector visibility cannot be a Spine `ResourceScope`: it depends on role plus `manager_can_settle_transactions`. `apply_collector_scope()` therefore narrows the already club-scoped queryset.
 - Operational Transactions remain Club + Court. A collector may have custody of collections from courts they are not assigned to.
 - URLs remain club-scoped: `/api/v1/clubs/{club_slug}/settlements/` (do not inject court into settlement URLs).
-- Legacy `ClubAccessContext.scoped_settlements_queryset()` remains for unmigrated callers. Settlement ViewSets no longer use it.
+- Settlement ViewSets use the Spine plus `apps/settlements/authorization.py`. They do not call `ClubAccessContext` querysets. Internal service wrappers (`create_approved_settlement` and unused preview helpers) still duck-type ClubAccessContext-shaped `can_*` methods for concurrency tests.
 
 ### Authorization Boundary (`apps/settlements/authorization.py`)
 
@@ -116,7 +116,7 @@ Core financial functions have clean, unencumbered signatures with **zero knowled
 ## Cross-App Dependencies
 
 - Queries and locks [`Transaction`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/transactions/models.py) rows.
-- Preview and settlement-line customer fields are sourced from `Booking.club_player` (exact version) via `apps.bookings.identity`, with snapshot fallback. Response keys stay `booking_customer_name` / `booking_customer_phone`.
+- Preview and settlement-line customer fields are sourced from `Booking.club_player` (exact version) via `apps.bookings.identity`. Response keys stay `booking_customer_name` / `booking_customer_phone`.
 - Used by [`apps/clubs/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/services.py) to block staff deactivation/deletion when unsettled custody is non-zero.
 - Used by [`apps/dashboard/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/dashboard/services.py) for all-time custody metrics.
 

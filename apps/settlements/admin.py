@@ -56,7 +56,6 @@ class SettlementTransactionAdmin(admin.ModelAdmin):
         "settlement__club__slug",
         "settlement__club__name",
         "transaction__payment_reference",
-        "transaction__booking__customer_name",
         "transaction__booking__club_player__display_name",
     )
     readonly_fields = ("settlement", "transaction", "amount", "created")

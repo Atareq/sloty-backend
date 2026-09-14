@@ -28,7 +28,7 @@
 
 - [`apps/dashboard/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/dashboard/services.py):
   - `build_court_availability_payload()`: Computes schedule slots and blocking bookings.
-  - `build_calendar_payload()` / `get_calendar_items()`: Aggregates day/week booking blocks for operational display. Customer `title` / `customer_name` / `customer_phone` are read from `Booking.club_player` (exact version) via `apps.bookings.identity`, falling back to snapshot columns when `club_player` is null.
+  - `build_calendar_payload()` / `get_calendar_items()`: Aggregates day/week booking blocks for operational display. Customer `title` / `customer_name` / `customer_phone` are read from `Booking.club_player` (exact version) via `apps.bookings.identity`.
   - `build_dashboard_summary_payload()`: Enforces operational vs. financial access splitting.
   - `build_dashboard_overview_payload()`, `build_dashboard_revenue_payload()`, `build_court_utilization_payload()`.
 
@@ -57,7 +57,7 @@ Authorized source querysets are built **before** aggregation via source-domain `
 
 Do not apply Transaction Staff `created_by` narrowing to dashboard financial aggregations. Do not apply Settlement collector narrowing to dashboard settlement totals. Do not implicitly court-scope custody from Staff assignment.
 
-Legacy `ClubAccessContext.scoped_dashboard_*_queryset()` remains for unmigrated callers. Dashboard views no longer use `ClubScopedAccessMixin` (no implicit `last_sync_at` updates).
+Dashboard views use Spine source querysets. They do not use `ClubScopedAccessMixin` (no implicit `last_sync_at` updates).
 
 ## Cross-App Dependencies
 

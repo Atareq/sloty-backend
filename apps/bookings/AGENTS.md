@@ -51,7 +51,8 @@
 ## Important Models & Fields
 
 - [`Booking`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/bookings/models.py):
-  - `customer_name`, `customer_phone` (snapshot write/create fields — operational reads use `club_player`; see identity helper), `club_player` (exact ClubPlayer version FK — see below), `start_time`, `end_time`, `total_price`.
+  - `club_player` (required FK to the exact ClubPlayer version used at booking time), `start_time`, `end_time`, `total_price`.
+  - There is no `Booking.customer_name` / `Booking.customer_phone` column and no `Booking.player_profile` FK.
   - `source`: `MANUAL`, `ADMIN_CORRECTION`, `RECURRING`.
   - `recurrence_status`: `ACTIVE`, `RENEWED`, `ENDED` (null for non-recurring).
   - `previous_recurring_booking`: Pointer to prior recurrence occurrence.
@@ -81,34 +82,34 @@ Booking.club_player_id   ← exact version used at creation time
 
 - `PlayerProfile` — global person, keyed by phone. Different phone = different profile. No merging.
 - `ClubPlayer` — immutable club-local version. No soft delete. No `last_used_at`. No `updated_at`. `create_club_player_version()` marks the old row historical and inserts a new current row. See `apps/players/AGENTS.md`.
-- `Booking.club_player` — nullable FK. Default resolution uses the **current** version. Optional write-only `club_player_id` on create selects a historical version (same club + same phone's profile). Recurring continuation copies the anchor version.
+- `Booking.club_player` — required FK (`on_delete=PROTECT`). Default resolution uses the **current** version. Optional write-only `club_player_id` on create selects a historical version (same club + same phone's profile). Recurring continuation copies the anchor version.
 - **Last-used version** — `club_player` on the latest Booking for this `player_profile_id` at this club (`Booking.created` desc). Used for search recommendation. Never written back onto ClubPlayer.
 
-### Why `customer_name` / `customer_phone` Remain (Sprint 4)
+### Why Booking snapshot columns are gone
 
-They are **not** removed yet. They remain snapshot write/create fields and historical-event contracts. Operational **reads** now prefer `Booking.club_player`.
+`ClubPlayer` versions are the historical identity. `Booking.club_player_id` points at the exact version used at booking time, so denormalized `customer_name` / `customer_phone` columns on Booking were redundant operational copies.
 
-Shared helper: [`apps/bookings/identity.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/bookings/identity.py) (`booking_customer_display_name`, `booking_customer_display_phone`, `booking_identity_search_q`). Falls back to snapshots when `club_player` is null.
+Shared helper: [`apps/bookings/identity.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/bookings/identity.py) (`booking_customer_display_name`, `booking_customer_display_phone`, `booking_identity_search_q`). There is no snapshot fallback.
 
-**Consumer audit (Sprint 4):**
+**Final consumer map:**
 
-| Consumer | Category | Sprint 4 action |
+| Consumer | Category | Final state |
 |---|---|---|
-| Booking list/detail/slots/calendar | B operational display (C API keys) | Reads ClubPlayer; response keys stay `customer_name` / `customer_phone` |
-| `apps/dashboard/services.py` calendar | B | Migrated to ClubPlayer |
-| `apps/transactions/serializers.py` | B operational + A-at-booking-time (ClubPlayer version is historical) | Migrated to ClubPlayer; keys stay `booking_customer_*` |
-| `apps/settlements` preview + lines | B operational display of booking identity | Migrated to ClubPlayer; keys unchanged |
-| `apps/bookings/filters.py` / `apps/transactions/filters.py` | B search | Search snapshots **and** ClubPlayer |
-| `apps/audit/filters.py` | B find-related-booking | Phone search also matches profile phone |
-| Admin search | B | ClubPlayer fields added; snapshots kept |
-| `apps/audit/services.py` snapshots | A event-time row JSON | **Kept** snapshot columns — audit records the booking row at the event, including PATCH of snapshot fields |
-| BookingAttempt `customer_*` | A request payload | **Kept** — attempt identity is the submitted payload, not ClubPlayer |
-| Idempotency matching | A request replay | **Kept** — must match create payload snapshots |
-| Recurrence copy of snapshot columns | A stored columns | **Kept** on the new row; `club_player` is copied separately |
-| `BookingUpdateSerializer` PATCH | C write contract | **Kept** writing snapshot columns; GET then shows ClubPlayer |
-| Reports court-usage | neither — no customer identity in output | **Unchanged** |
+| Booking list/detail/slots/calendar | C API keys, operational display | Reads ClubPlayer; response keys stay `customer_name` / `customer_phone` |
+| Create API | B walk-in input | Still accepts `customer_name` / `customer_phone`; optional `club_player_id` |
+| PATCH | notes only | Does **not** rename ClubPlayer identity |
+| `apps/dashboard/services.py` calendar | operational display | ClubPlayer only |
+| `apps/transactions` / `apps/settlements` | operational display | ClubPlayer; keys stay `booking_customer_*` |
+| Search / admin | operational search | ClubPlayer display name + profile phone |
+| `apps/audit/services.py` snapshots | D historical event facts | New events store ClubPlayer display at event time; historical JSON is not rewritten |
+| BookingAttempt `customer_*` | E request payload evidence | **Kept** — submitted payload, not Booking identity |
+| Idempotency | F replay | Attempt payload (name/phone) plus Booking court/time/source/notes/phone/`club_player_id` |
+| Recurrence | copies `club_player` only | Same version as the anchor |
+| Reports court-usage | no customer identity in output | Unchanged |
 
-`customer_name`/`customer_phone` stay until a dedicated snapshot-removal sprint. Booking authorization (Phase B) uses the Authorization Spine.
+Walk-in create still does **not** require frontend `club_player_id` / `player_profile_id`.
+
+Booking authorization uses the Authorization Spine.
 
 ### Identity Invariant: `Booking.club_id == Booking.club_player.club_id`
 A booking from Club A must never reference a Club B `ClubPlayer`. Enforced at three levels:
@@ -134,12 +135,12 @@ else:
     get_or_create_club_player(...) ──► current ClubPlayer version
         │
         ▼
-Booking.objects.create(club_player=..., customer_name=..., customer_phone=...)
+Booking.objects.create(club_player=..., ...)
 ```
 
 Walk-in phones still create a first current version. A later booking with the same phone uses the current version even if `customer_name` differs; name changes are `create_club_player_version()` / `POST /players/`, not booking create.
 
-`complete_booking()` recurrence copies the anchor `club_player`. Seed data uses `resolve_booking_club_player()`. `customer_name`/`customer_phone` stay as snapshot columns.
+`complete_booking()` recurrence copies the anchor `club_player`. Seed data uses `resolve_booking_club_player()`. Create API still accepts walk-in `customer_name` / `customer_phone` as resolution inputs only.
 
 ## Authorization & Scoping (Authorization Spine v2)
 
@@ -155,7 +156,7 @@ Request → Authentication → resolve_club_scope → Spine scoped QuerySet (clu
 - **Create / slots / reschedule target court:** the court in the request body must be inside the same Spine court queryset; denial remains HTTP 403.
 - **BookingAttempt:** Club + Court, then Staff narrowed to `attempted_by=request.user`. Owner/Manager/Admin can list/retrieve club+court attempts but may dismiss only their own (`check_object_permission`).
 - Do **not** create `bookings/authorization.py` to re-express court assignment. `actor_requires_staff_cancel_reason()` remains a service business rule (Staff cancel requires a reason).
-- Legacy `ClubAccessContext` / `ClubScopedAccessMixin` / `CanManageClubBookings` remain in the repository because parts of Clubs are unmigrated. Booking ViewSets no longer use them.
+- Legacy `ClubAccessContext` / `ClubScopedAccessMixin` remain because Club memberships are unmigrated. Dead booking/audit/dashboard/report/settlement permission wrappers were removed. Booking ViewSets do not use the legacy layer.
 
 ## Service Layer
 
@@ -169,7 +170,7 @@ Request → Authentication → resolve_club_scope → Spine scoped QuerySet (clu
 
 ## API Boundaries & Key Invariants
 
-- `/api/v1/clubs/{club_slug}/bookings/`: List, create, retrieve, partial update (customer info/notes only on non-locked bookings).
+- `/api/v1/clubs/{club_slug}/bookings/`: List, create, retrieve, partial update (**notes** only on non-locked bookings). Identity changes are ClubPlayer versioning, not Booking PATCH.
 - Lifecycle action routes:
   - `POST .../bookings/{id}/cancel/`
   - `POST .../bookings/{id}/complete/`
@@ -198,4 +199,4 @@ Request → Authentication → resolve_club_scope → Spine scoped QuerySet (clu
   - `test_booking_authorization.py`: Spine v2 contract, club/court isolation, 404 queryset boundary, creator independence, BookingAttempt `attempted_by`.
   - `test_booking_attempt_model.py`: Idempotency, attempt persistence, and dismissal.
   - `test_egypt_timezone_boundaries.py`: Local Cairo timezone and midnight handling.
-  - `test_booking_player_identity.py`: identity chain, current-version default, historical `club_player_id`, history preservation, recurrence copy, Sprint 4 operational ClubPlayer reads + snapshot fallback.
+  - `test_booking_player_identity.py`: identity chain, required `club_player`, version history, recurrence copy, walk-in create, PATCH does not mutate ClubPlayer, idempotency.

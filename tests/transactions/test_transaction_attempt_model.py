@@ -13,6 +13,7 @@ from apps.courts.models import Court
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.services import get_booking_paid_amount
+from tests.booking_factories import persist_booking
 
 
 class TransactionAttemptModelTests(TestCase):
@@ -52,19 +53,11 @@ class TransactionAttemptModelTests(TestCase):
         )
 
     def create_booking(self, court: Court, **extra_fields) -> Booking:
-        data = {
-            "club": court.club,
-            "court": court,
-            "customer_name": "Attempt Payment Customer",
-            "customer_phone": "+201000000001",
-            "start_time": self.time_at(20),
-            "end_time": self.time_at(21),
-            "total_price": Decimal("300.00"),
-            "status": Booking.Status.HOLD,
-            "source": Booking.Source.MANUAL,
-        }
-        data.update(extra_fields)
-        return Booking.objects.create(**data)
+        extra_fields.setdefault("start_time", self.time_at(20))
+        extra_fields.setdefault("end_time", self.time_at(21))
+        extra_fields.setdefault("customer_name", "Attempt Payment Customer")
+        extra_fields.setdefault("customer_phone", "+201000000001")
+        return persist_booking(court, **extra_fields)
 
     def create_transaction(self, booking: Booking, **extra_fields) -> Transaction:
         data = {

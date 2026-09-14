@@ -295,7 +295,8 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["id"], self.staff_booking.id)
         self.assertEqual(
-            response.data["customer_name"], self.staff_booking.customer_name
+            response.data["customer_name"],
+            self.staff_booking.club_player.display_name,
         )
         self.assertIn("customer_phone", response.data)
 

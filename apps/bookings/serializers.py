@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import extend_schema_field
+from phonenumber_field.serializerfields import PhoneNumberField
 from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
@@ -108,8 +109,7 @@ class BookingRecurrenceReadMixin:
 class BookingIdentityReadMixin(serializers.Serializer):
     """
     Operational booking responses keep customer_name / customer_phone keys
-    but read them from ClubPlayer (exact version at booking time), falling
-    back to snapshot columns when club_player is null.
+    and read them from Booking.club_player → PlayerProfile.
     """
 
     customer_name = serializers.SerializerMethodField()
@@ -244,6 +244,8 @@ class BookingDetailSerializer(
 
 
 class BookingCreateSerializer(serializers.ModelSerializer):
+    customer_name = serializers.CharField(max_length=255, write_only=True)
+    customer_phone = PhoneNumberField(write_only=True)
     is_recurring = serializers.BooleanField(
         required=False,
         default=False,
@@ -660,11 +662,7 @@ class BookingSlotsResponseSerializer(serializers.Serializer):
 class BookingUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Booking
-        fields = (
-            "customer_name",
-            "customer_phone",
-            "notes",
-        )
+        fields = ("notes",)
 
     def validate(self, attrs):
         if self.instance.status in Booking.LOCKED_STATUSES:

@@ -495,8 +495,6 @@ class PlayerProfileViewSetTests(PlayerAPITestCase):
             club=self.club,
             court=court,
             club_player=v1,
-            customer_name="Ahmed Ali",
-            customer_phone="+201077770008",
             start_time=start,
             end_time=start + timedelta(hours=1),
             total_price=Decimal("300.00"),

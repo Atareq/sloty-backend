@@ -31,6 +31,7 @@ from apps.common.middleware import SQLQueryStats
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
+from tests.booking_factories import persist_booking
 
 
 class BookingAPITestCase(APITestCase):
@@ -91,21 +92,11 @@ class BookingAPITestCase(APITestCase):
         )
 
     def create_booking(self, court: Court, **extra_fields) -> Booking:
-        start_time = extra_fields.pop("start_time", self.time_at(20))
-        end_time = extra_fields.pop("end_time", self.time_at(21))
-        data = {
-            "club": court.club,
-            "court": court,
-            "customer_name": "Existing Customer",
-            "customer_phone": "+201000000001",
-            "start_time": start_time,
-            "end_time": end_time,
-            "total_price": Decimal("300.00"),
-            "status": Booking.Status.HOLD,
-            "source": Booking.Source.MANUAL,
-        }
-        data.update(extra_fields)
-        return Booking.objects.create(**data)
+        extra_fields.setdefault("start_time", self.time_at(20))
+        extra_fields.setdefault("end_time", self.time_at(21))
+        extra_fields.setdefault("customer_name", "Existing Customer")
+        extra_fields.setdefault("customer_phone", "+201000000001")
+        return persist_booking(court, **extra_fields)
 
     def create_transaction(self, booking: Booking, **extra_fields) -> Transaction:
         data = {
@@ -248,8 +239,12 @@ class BookingCreationTests(BookingAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         booking = Booking.objects.get(id=response.data["id"])
-        self.assertEqual(booking.customer_name, "Ahmed Hassan")
-        self.assertEqual(str(booking.customer_phone), "+201000000002")
+        self.assertIsNotNone(booking.club_player_id)
+        self.assertEqual(booking.club_player.display_name, "Ahmed Hassan")
+        self.assertEqual(
+            str(booking.club_player.player_profile.phone_number),
+            "+201000000002",
+        )
 
     def test_booking_create_accepts_optional_client_request_id(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -2406,6 +2401,9 @@ class BookingUpdateTests(BookingAPITestCase):
         self.client.force_authenticate(user=self.platform_admin)
 
     def test_allowed_user_can_patch_basic_details(self):
+        original_club_player_id = self.booking.club_player_id
+        original_display_name = self.booking.club_player.display_name
+        original_phone = str(self.booking.club_player.player_profile.phone_number)
         response = self.client.patch(
             self.booking_detail_url(self.club, self.booking),
             {
@@ -2418,9 +2416,14 @@ class BookingUpdateTests(BookingAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.booking.refresh_from_db()
-        self.assertEqual(self.booking.customer_name, "Updated Customer")
-        self.assertEqual(str(self.booking.customer_phone), "+201000000004")
+        self.assertEqual(self.booking.club_player_id, original_club_player_id)
+        self.assertEqual(self.booking.club_player.display_name, original_display_name)
+        self.assertEqual(
+            str(self.booking.club_player.player_profile.phone_number),
+            original_phone,
+        )
         self.assertEqual(self.booking.notes, "Updated note")
+        self.assertEqual(response.data["customer_name"], original_display_name)
 
     def test_cannot_patch_status_in_sprint_3(self):
         response = self.client.patch(
@@ -2475,7 +2478,7 @@ class BookingUpdateTests(BookingAPITestCase):
 
         response = self.client.patch(
             self.booking_detail_url(self.club, self.booking),
-            {"customer_name": "Should Not Change"},
+            {"notes": "Should Not Change"},
             format="json",
         )
 

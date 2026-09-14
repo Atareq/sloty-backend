@@ -61,10 +61,10 @@ This reference (direction) + scoped AGENTS.md (domain rules)
   - **Transactions** ✅ — Spine v2 (`authorization_config` + `SlotyScopedResourceMixin`) plus domain collector/cancel/dismiss rules (`apps/transactions/authorization.py`)
   - **Settlements** ✅ — Spine v2 (`authorization_config` club-only + `SlotyScopedResourceMixin`) plus collector/settle-authority rules (`apps/settlements/authorization.py`)
   - **Identity Foundation** ✅ — `PlayerProfile` + `ClubPlayer` (`apps/players/`); `ClubPlayer` on Spine v2
-  - **Booking Identity Linkage (Phase A)** ✅ — `Booking.club_player` FK (nullable) added; `create_booking()` auto-resolves identity. **Not** a direct `player_profile` FK — see §1 migration notes.
+  - **Booking Identity Linkage (Phase A)** ✅ — `Booking.club_player` FK added; `create_booking()` auto-resolves identity. **Not** a direct `player_profile` FK — see §1 migration notes.
   - **ClubPlayer Historical Identity Foundation (Sprint 1)** ✅ — later superseded by Sprint 3 versioning (no soft delete).
   - **Sprint 3 — Player Identity & Booking Integration** ✅ — `ClubPlayer` versions (`previous_version`, `is_current_version`); no `last_used_at` / no `updated_at`; last-used version is the latest booking's `club_player` for that `player_profile_id`; booking create uses current version; optional historical `club_player_id`; player search returns versions + recommended id.
-  - **Sprint 4 — Consumer Migration To ClubPlayer Identity** ✅ — operational reads (booking list/detail/slots, dashboard calendar, transaction/settlement customer display, search) use `Booking.club_player` with snapshot fallback. API keys unchanged. Snapshot columns not removed. Audit event JSON and BookingAttempt payloads still store snapshots.
+  - **Booking identity finalization** ✅ — `Booking.club_player` required (`PROTECT`); snapshot columns removed; operational reads have no snapshot fallback. Walk-in create still accepts `customer_name` / `customer_phone`. PATCH is notes-only. BookingAttempt payloads and historical audit JSON remain.
   - **Bookings authorization (Phase B)** ✅ — Spine v2 (`authorization_config` + `SlotyScopedResourceMixin` + `SlotyBasePermission`). Boundary is Club + Court, not creator. BookingAttempt keeps Staff `attempted_by` restriction.
   - **Dashboard** ✅ — Spine (`ClubScopedViewMixin` + `SlotyBasePermission` + source-domain `scoped_queryset`); public availability remains anonymous
   - **Audit** ✅ — Spine v2 (`authorization_config` club-only + `SlotyScopedResourceMixin` + `SlotyBasePermission`). Staff matrix-denied. Not court- or collector-scoped.
@@ -115,7 +115,7 @@ Authentication Identity
 - `User` exists and is identity-only (no club roles stored on the user row).
 - `ClubMembership` exists and is the operational actor.
 - `PlayerProfile` and `ClubPlayer` exist (`apps/players/`). `ClubPlayer` is an immutable versioned historical identity record (`previous_version`, `is_current_version`, `created_at`; no `deleted_at`, no `last_used_at`, no `updated_at`) — last-used version is derived from the latest `Booking` for that `player_profile_id` at the club — see `apps/players/AGENTS.md` "ClubPlayer Lifecycle (Versioned, Append-Only)".
-- Bookings store denormalized `customer_name` / `customer_phone` (permanent snapshots — kept intentionally, not migration debt) **and** a resolved `club_player` FK (`Booking.club_player`, nullable, populated by `create_booking()`). `Booking` does **not** have a direct `player_profile` FK — see Migration Notes below. Because `ClubPlayer` is itself historical, `Booking.club_player_id` is unaffected by any later supersede of that row.
+- Bookings store a required `club_player` FK (`Booking.club_player`, `on_delete=PROTECT`) as the exact ClubPlayer version used at booking time. There is no `Booking.player_profile` FK and no denormalized `customer_name` / `customer_phone` on Booking. Walk-in create still accepts those fields as resolution inputs. Because `ClubPlayer` is itself historical, `Booking.club_player_id` is unaffected by any later version of that player.
 - `RequestAccessContext.profile` / `profile_type` are forward-compat aliases of membership/role — not separate profile tables.
 
 ### Migration Notes
@@ -124,7 +124,7 @@ Authentication Identity
 | :--- | :--- |
 | **Why** | Separate login identity from club ops and from customers who may never create an account. |
 | **Replaces** | Free-text booking customer fields as the long-term person model; avoids stuffing club roles onto `User`. |
-| **Must remain unchanged** | Existing login, membership onboarding, and booking customer snapshot fields (`customer_name`/`customer_phone` stay forever). |
+| **Must remain unchanged** | Existing login and membership onboarding. Walk-in booking create still sends `customer_name` / `customer_phone` as resolution inputs (not stored on Booking). |
 
 > [!NOTE]
 > **Booking identity refinement (locked):** [`ADR-002`](adr/ADR-002-booking-identity-and-authorization-migration.md) Decision 1 originally proposed *two* nullable FKs on `Booking` (`player_profile` and `club_player`). The implemented Phase A design uses **only `club_player`** — `Booking` belongs to a `ClubPlayer`; `PlayerProfile` is reachable transitively via `club_player.player_profile`. `ClubPlayer.player_profile` is immutable after creation, so a second direct FK on `Booking` would add redundancy without protecting a distinct invariant. See the ADR-002 addendum.
@@ -368,9 +368,9 @@ Tenant IDs in request bodies/query params are not authoritative; URL + resolved 
 
 ### Current State
 
-- Spine-migrated ViewSets follow this pattern (Courts, Bookings, Transactions, and Settlements via mixin). Settlements are club-scoped; collector narrowing happens after the Spine queryset.
-- Dashboard authenticated endpoints are GenericAPIViews on `ClubScopedViewMixin` + `SlotyBasePermission`; they aggregate already-scoped source querysets.
-- Legacy domains still centralize scoping inside `ClubAccessContext` helpers.
+- Spine-migrated ViewSets follow this pattern (Courts, Bookings, Transactions, Settlements, Audit, Players ClubPlayer via mixin). Settlements and Audit are club-scoped; collector narrowing happens after the Spine queryset for Settlements only.
+- Dashboard and Reports authenticated endpoints are GenericAPIViews on `ClubScopedViewMixin` + `SlotyBasePermission`; they aggregate already-scoped source querysets.
+- Clubs memberships still centralize scoping inside `ClubAccessContext` helpers. Migrated-domain leftover `scoped_*` methods on that object were removed.
 
 ### Migration Notes
 
@@ -564,11 +564,12 @@ Finding hardcoded role/status/permission strings is a **refactoring trigger**:
 - **Staff:** Assigned courts only.
 - **Not creator-restricted:** Bookings are operational court reservations, not user-owned. Any staff member assigned to a court can manage all bookings on that court regardless of who created them (`created_by`).
 - **BookingAttempt Scope:** **Club + Court + attempted_by (for Staff)**. Tracks operational sync intents and rejected offline attempts; staff can view and dismiss only their own rejected attempts.
-- **Identity Linkage Strategy:** `Booking.customer_name` and `Booking.customer_phone` remain **permanent immutable snapshots** for legal, financial, and audit integrity (audit trail, dashboard calendar, transaction receipts, search — reviewed against actual usage, not kept out of migration caution). `Booking.club_player` (nullable FK to `players.ClubPlayer`) links the booking to customer identity; there is no direct `player_profile` FK.
+- **Identity Linkage Strategy:** `Booking.club_player` is the required historical identity (`PROTECT`). There is no Booking snapshot column and no `Booking.player_profile` FK. Walk-in create still accepts `customer_name` / `customer_phone` as resolution inputs. List/detail response keys stay `customer_name` / `customer_phone` (derived from ClubPlayer). Historical audit JSON and BookingAttempt payloads may still contain event-time / request-payload customer fields.
 - **Phased Migration:**
-  - **Phase A (Complete):** Identity linkage (`club_player` FK, backend auto-resolution in `create_booking()`, snapshot preservation, zero API breaks, zero authorization changes).
+  - **Phase A (Complete):** Identity linkage (`club_player` FK, backend auto-resolution in `create_booking()`).
   - **Phase B (Complete):** Authorization Spine migration (`SlotyScopedResourceMixin`, `SlotyBasePermission`, `authorization_config`, fail-closed HTTP 404 for out-of-scope bookings).
-  - **Phase C (Future):** Legacy cleanup (deprecate `ClubScopedAccessMixin` booking helpers once Club memberships no longer need them).
+  - **Identity finalization (Complete):** required `club_player`; snapshot columns removed.
+  - **Phase C (Intentional transition):** Clubs memberships still use `ClubScopedAccessMixin` / `ClubAccessContext`. Dead unused permission wrappers for migrated domains were removed.
 - See [`ADR-002`](adr/ADR-002-booking-identity-and-authorization-migration.md) and [`booking-migration-audit-v1.md`](booking-migration-audit-v1.md).
 
 #### Transactions
@@ -661,10 +662,11 @@ Booking.club_player_id   ← exact version at booking time
 - Booking migration path:
 
 ```text
-Booking Phase A:    customer_name / customer_phone snapshots + club_player FK
+Booking Phase A:    club_player FK + walk-in name/phone resolution
 Sprint 3:           ClubPlayer versioning + current-version booking resolution
-Sprint 4:           consumers read ClubPlayer; snapshots remain as write/historical contracts
-Booking Phase B:    authorization spine; then snapshot column removal
+Sprint 4:           consumers read ClubPlayer
+Identity finalization: required club_player; Booking snapshot columns removed
+Booking Phase B:    authorization spine (complete)
 ```
 
 ### Current State
@@ -673,9 +675,9 @@ Booking Phase B:    authorization spine; then snapshot column removal
 - `ClubPlayer` is on Authorization Spine v2 (`authorization_config`, `SlotyScopedResourceMixin`, `default_scope="club"`).
 - `PlayerProfile` is a global model — no `authorization_config`. Club membership gates API access; list is restricted to club-linked profiles.
 - Player Identity Foundation complete: models, services, API, tests, and AGENTS.md are in place.
-- Booking Identity Linkage (Phase A) complete: `Booking.club_player` (nullable FK, no direct `player_profile` FK) is populated by `create_booking()`.
+- Booking Identity Linkage (Phase A) complete: `Booking.club_player` (required FK, no direct `player_profile` FK) is populated by `create_booking()`.
 - **Sprint 3 complete:** `ClubPlayer` has `previous_version`, `is_current_version`, `created_at`; unique current version per `(club, player_profile)`; `create_club_player_version()`; booking default uses current version; optional historical `club_player_id`; last-used version is derived from the latest booking; player-profile search returns versions + `recommended_club_player_id`. No PATCH. No soft delete. No `last_used_at`. No `updated_at` on ClubPlayer.
-- **Sprint 4 complete:** operational consumers read ClubPlayer via `apps.bookings.identity` (exact booking-time version, snapshot fallback). `customer_name` / `customer_phone` remain on Booking for create/PATCH/idempotency/audit JSON/BookingAttempt. `Booking.club_player` still nullable.
+- **Identity finalization complete:** operational consumers read ClubPlayer via `apps.bookings.identity` with no snapshot fallback. Booking snapshot columns are removed. `Booking.club_player` is required. Create still accepts walk-in `customer_name` / `customer_phone`. PATCH is notes-only. BookingAttempt payload fields and historical audit JSON remain.
 
 ### Migration Notes
 
@@ -718,6 +720,7 @@ Remove leftover Clubs legacy                    ← ClubAccessContext / ClubScop
 | Settlements | ✅ | Spine v2 club-only queryset; collector narrowing + settle-authority in domain module; never court; Transaction API stays club+court |
 | Identity Foundation | ✅ | `PlayerProfile` + `ClubPlayer` in `apps/players/`; `ClubPlayer` on Spine v2 |
 | Booking Identity Linkage (Phase A) | ✅ | `Booking.club_player` FK + `create_booking()` auto-resolution |
+| Booking identity finalization | ✅ | Required `club_player`; snapshot columns removed |
 | Bookings authorization (Phase B) | ✅ | Spine v2 club+court queryset; BookingAttempt Staff `attempted_by`; legacy layer kept for unmigrated domains |
 | Dashboard | ✅ | Read-model Spine (`ClubScopedViewMixin` + `DashboardViewSet` matrix); aggregations from source-domain querysets; public availability anonymous |
 | Audit | ✅ | Spine v2 club-only queryset; Staff matrix-denied; court/collector scopes from other domains are not applied; historical rows unchanged |
@@ -806,7 +809,7 @@ Do **not** force court into every URL.
 - Players customer identity: [`apps/players/AGENTS.md`](../../apps/players/AGENTS.md)
 - Clubs membership + legacy access: [`apps/clubs/AGENTS.md`](../../apps/clubs/AGENTS.md)
 - Courts (v2 migrated): [`apps/courts/AGENTS.md`](../../apps/courts/AGENTS.md)
-- Bookings (Spine v2 migrated; identity snapshots retained): [`apps/bookings/AGENTS.md`](../../apps/bookings/AGENTS.md)
+- Bookings (Spine v2 migrated; ClubPlayer is the Booking identity): [`apps/bookings/AGENTS.md`](../../apps/bookings/AGENTS.md)
 - Transactions (Spine v2 migrated; collector/cancel rules in domain module): [`apps/transactions/AGENTS.md`](../../apps/transactions/AGENTS.md)
 - Settlements (Spine v2 migrated; collector/settle rules in domain module; never court): [`apps/settlements/AGENTS.md`](../../apps/settlements/AGENTS.md)
 - Dashboard (Spine read-model migrated; public availability anonymous): [`apps/dashboard/AGENTS.md`](../../apps/dashboard/AGENTS.md)

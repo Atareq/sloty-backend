@@ -17,7 +17,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from apps.accounts.filters import UserFilter
 from apps.accounts.models import User
-from apps.accounts.permissions import CanAccessUsers, IsPlatformSuperAdmin
+from apps.accounts.permissions import CanAccessUsers
 from apps.accounts.serializers import (
     SlotyTokenObtainPairSerializer,
     SyncHeartbeatResponseSerializer,
@@ -103,7 +103,6 @@ class UserViewSet(
     GenericViewSet,
 ):
     queryset = User.objects.select_related("created_by").order_by("id")
-    permission_classes = (IsPlatformSuperAdmin,)
     permission_classes = (CanAccessUsers,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = UserFilter

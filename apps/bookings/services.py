@@ -298,17 +298,30 @@ def booking_matches_client_request(
     end_time,
     booking_data,
 ):
+    """Match a stored booking against a replayed create payload.
+
+    Idempotency is keyed by ``client_request_id`` per club. Name is compared
+    on BookingAttempt (the submitted payload). This fallback matches court,
+    time, source, notes, PlayerProfile phone, and an explicit ``club_player_id``
+    when the client sent one. Typed display name is not compared here because
+    an existing ClubPlayer version keeps its historical ``display_name``.
+    """
     expected_source = booking_data.get("source", Booking.Source.MANUAL)
     expected_notes = booking_data.get("notes", "") or ""
     expected_phone = booking_data.get("customer_phone")
+    requested_club_player_id = booking_data.get("club_player_id")
+    if (
+        requested_club_player_id is not None
+        and booking.club_player_id != requested_club_player_id
+    ):
+        return False
 
     return (
         booking.court_id == court.id
         and booking.start_time == start_time
         and booking.end_time == end_time
         and booking.source == expected_source
-        and booking.customer_name == booking_data.get("customer_name")
-        and str(booking.customer_phone) == str(expected_phone)
+        and str(booking_customer_display_phone(booking)) == str(expected_phone)
         and (booking.notes or "") == expected_notes
     )
 
@@ -331,7 +344,7 @@ def resolve_idempotent_booking_request(
             club=club,
             client_request_id=client_request_id,
         )
-        .select_related("club", "court")
+        .select_related("club", "court", "club_player__player_profile")
         .first()
     )
     if existing_booking is None:
@@ -1169,6 +1182,11 @@ def create_booking(
                 customer_phone=booking_data.get("customer_phone"),
                 club_player_id=club_player_id,
             )
+            persisted_fields = {
+                key: value
+                for key, value in booking_data.items()
+                if key not in {"customer_name", "customer_phone"}
+            }
 
             created_booking = Booking.objects.create(
                 club=locked_court.club,
@@ -1183,7 +1201,7 @@ def create_booking(
                 last_status_changed_by_type=(
                     Booking.LastStatusActorType.INTERNAL_USER if created_by else None
                 ),
-                **booking_data,
+                **persisted_fields,
             )
             created_booking._sloty_idempotency_reused = False
             create_success_booking_attempt(
@@ -1841,17 +1859,14 @@ def complete_booking(
             # no "current identity at this moment" to re-resolve — the anchor's
             # club_player (whichever version was active when the series was
             # created) is the correct reference for every occurrence in it.
-            if locked_booking.club_player_id is not None:
-                validate_booking_club_player(
-                    club=locked_booking.club,
-                    club_player=locked_booking.club_player,
-                )
+            validate_booking_club_player(
+                club=locked_booking.club,
+                club_player=locked_booking.club_player,
+            )
             next_booking = Booking.objects.create(
                 club=locked_booking.club,
                 court=locked_court,
                 club_player=locked_booking.club_player,
-                customer_name=locked_booking.customer_name,
-                customer_phone=locked_booking.customer_phone,
                 start_time=next_start,
                 end_time=next_end,
                 total_price=next_price,

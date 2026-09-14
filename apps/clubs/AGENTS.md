@@ -57,23 +57,31 @@ Per root [`AGENTS.md` §5.1](file:///home/tarek/Desktop/sloty/sloty-backend/AGEN
   - `DELETE`: Soft delete membership with audit trail (`MEMBERSHIP_DELETED`).
 - `/api/v1/clubs/{club_slug}/users/`: Read-only club users list. Platform admins and owners see all non-deleted memberships. Managers see active managers and staff. Staff cannot list club users.
 
+## Remaining Spine migration (intentional)
+
+Do **not** force Clubs onto the Authorization Spine in this sprint. Remaining work is architecturally ambiguous:
+
+- `ClubViewSet` is global (`/api/v1/clubs/`), not club-slug scoped. It lists clubs the user can see via `scoped_clubs_for_user()` + `CanManageClubs`. That is a different boundary from club-scoped resources.
+- `ClubMembershipViewSet` / `ClubUserListViewSet` are club-slug scoped on `ClubScopedAccessMixin`, including the leftover `last_sync_at` side effect and owner-cannot-edit-owner object rules.
+- Matrix rows exist for Club ViewSets as a forward-compat target, but those ViewSets do not currently evaluate `SlotyBasePermission`.
+
 ## Current-State Authorization Engine
 
 > [!WARNING]
 > **Legacy / Current-State Notice**: The access layer below is the existing implementation for domains not yet migrated. Target architecture is the Authorization Spine in root [`AGENTS.md` §5](file:///home/tarek/Desktop/sloty/sloty-backend/AGENTS.md) and `apps/common/authorization/`. Do **not** extend this legacy layer to new domains.
 
 Current components in this app:
-- [`ClubAccessContext`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/access.py): Central access engine instantiated per request (`from_request(request, club_slug)`).
+- [`ClubAccessContext`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/access.py): Legacy access engine for **Clubs memberships and club users only**. Instantiated per request (`from_request(request, club_slug)`).
   - Validates active membership; raises `CLUB_ACCESS_REVOKED` (403) if access was lost.
-  - Computes permissions (`is_owner`, `is_manager`, `is_staff`, `manager_can_settle_transactions`, `can_manage_working_hours`, etc.).
-  - Supplies scoped querysets: `scoped_courts_queryset()`, `scoped_bookings_queryset()`, `scoped_transactions_queryset()`, `scoped_settlements_queryset()`, `scoped_audit_logs_queryset()`, `scoped_memberships_queryset()`. Migrated domains no longer call these from their ViewSets; they remain for unmigrated callers (Club memberships).
-- [`ClubScopedAccessMixin`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/mixins.py): Base mixin for club-scoped ViewSets. Attaches access context, injects `club_access` into serializer context, and updates `ClubMembership.last_sync_at` (throttled).
-- [`apps/clubs/permissions.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/permissions.py): Thin DRF permission wrappers delegating checks to `ClubAccessContext`.
+  - Computes membership facts (`is_owner`, `is_manager`, `is_staff`, manager flags) and membership querysets (`scoped_memberships_queryset()`, `scoped_club_users_queryset()`).
+  - Also retains duck-typed settlement/transaction helpers used by internal service wrappers and concurrency tests (`can_access_court`, `can_create_transaction_for_booking`, `can_preview_settlement_for_user`, etc.). Migrated-domain scoped querysets (`scoped_bookings_queryset`, `scoped_transactions_queryset`, …) were removed; those domains use the Authorization Spine.
+- [`ClubScopedAccessMixin`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/mixins.py): Base mixin for club-scoped ViewSets. Attaches access context, injects `club_access` into serializer context, and updates `ClubMembership.last_sync_at` (throttled). Still used by Club membership / club-user list ViewSets.
+- [`apps/clubs/permissions.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/permissions.py): Thin DRF permission wrappers for Clubs (`CanManageClubs`, `CanManageClubMemberships`, `CanListClubUsers`). Unused migrated-domain wrappers were removed.
 
 ## Cross-App Dependencies
 
 - Imports [`apps.common.egypt_locations`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/egypt_locations.py) for location choice validation.
-- Referenced by virtually all domain apps for scoping and permissions.
+- Other domains depend on `Club` / `ClubMembership` as tenant and operational-actor models. Ordinary resource authorization for migrated domains is the Authorization Spine, not this access layer.
 
 ## Testing
 

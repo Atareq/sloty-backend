@@ -59,26 +59,13 @@ class Booking(models.Model):
         on_delete=models.CASCADE,
         related_name="bookings",
     )
-    # Permanent immutable historical snapshot fields — see the "Customer
-    # Identity Architecture (Locked)" section of apps/bookings/AGENTS.md.
-    # These are used by receipts, audit snapshots, dashboard calendar
-    # display, and transaction denormalization and must never be replaced
-    # by the identity FKs below, which may change/resolve independently.
-    customer_name = models.CharField(max_length=255)
-    customer_phone = PhoneNumberField()
-    # Resolved club-local player identity. Populated automatically by
-    # create_booking() via find_or_create_player_profile() +
-    # get_or_create_club_player() — the frontend never supplies this.
-    # Booking belongs to a ClubPlayer, not directly to a PlayerProfile;
-    # apps.players.models.ClubPlayer.player_profile is the transitive path
-    # to global customer identity. Nullable because bookings created
-    # directly through the ORM/admin/fixtures (outside create_booking())
-    # are not required to resolve identity.
+    # Authoritative customer identity: the exact ClubPlayer version used
+    # at booking time. ClubPlayer is an immutable historical version, so
+    # this FK is the snapshot. There is no Booking → PlayerProfile FK and
+    # no denormalized customer_name/customer_phone on Booking.
     club_player = models.ForeignKey(
         ClubPlayer,
-        blank=True,
-        null=True,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         related_name="bookings",
     )
     start_time = models.DateTimeField()
@@ -218,11 +205,9 @@ class Booking(models.Model):
             errors["end_time"] = "end_time must be after start_time."
         if self.court_id and self.club_id and self.court.club_id != self.club_id:
             errors["club"] = "Booking club must match the court club."
-        if (
-            self.club_player_id
-            and self.club_id
-            and self.club_player.club_id != self.club_id
-        ):
+        if not self.club_player_id:
+            errors["club_player"] = "Booking must have a club_player."
+        elif self.club_id and self.club_player.club_id != self.club_id:
             errors["club_player"] = (
                 "Booking club_player must belong to the same club as the booking."
             )

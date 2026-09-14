@@ -232,22 +232,15 @@ List/retrieve include `is_current_version`, `previous_version`, and `created_at`
 
 ---
 
-## Booking Migration Path
+## Booking Identity
 
-> [!IMPORTANT]
-> `Booking.customer_name` / `Booking.customer_phone` were **not** removed. They remain snapshot write fields. Operational consumers now read through `Booking.club_player` (see `apps/bookings/identity.py`).
+`Booking.club_player` is required. There is no `Booking.customer_name` / `Booking.customer_phone` column and no `Booking → PlayerProfile` FK.
+
+Walk-in create still sends `customer_name` / `customer_phone`; the backend resolves `PlayerProfile` (by phone) and the current `ClubPlayer` version unless `club_player_id` selects a historical version.
 
 - **Identity Foundation (Completed):** `PlayerProfile` and `ClubPlayer` exist.
-- **Booking Phase A (Completed):** nullable `club_player` FK; `create_booking()` auto-resolves identity; no direct `player_profile` FK.
-- **Sprint 1 / 2 (Completed):** append-only identity + recurrence `club_player` propagation. Soft delete from Sprint 1 is **superseded**.
-- **Sprint 3 — Player Identity & Booking Integration (Completed):**
-  - `ClubPlayer` is versioned: `previous_version`, `is_current_version`, `created_at`. No `deleted_at`. No `last_used_at`. No `updated_at`.
-  - Default booking resolution uses the **current** version. Optional write-only `club_player_id` selects a historical version.
-  - Last-used version is derived from the latest `Booking` for this `player_profile_id` at this club.
-  - Player-profile list/retrieve returns `club_player_versions` + `recommended_club_player_id` (last-used, else current).
-  - `customer_name` / `customer_phone` still present. `Booking.club_player` still nullable.
-- **Sprint 4 — Consumer Migration To ClubPlayer Identity (Completed):** operational booking/dashboard/transaction/settlement **reads** use ClubPlayer (exact booking-time version) with snapshot fallback. API keys unchanged. Audit event JSON, BookingAttempt payloads, and idempotency still use snapshots. Reports do not display customer identity.
-- **Booking Phase B (Future):** Authorization Spine v2 for bookings. Then snapshot column removal once remaining A/C write contracts are retired.
+- **ClubPlayer versioning (Completed):** immutable versions; last-used derived from latest booking; no `last_used_at`.
+- **Booking identity finalization (Completed):** `club_player` NOT NULL, `on_delete=PROTECT`; snapshot columns removed; operational reads and new audit JSON use ClubPlayer; BookingAttempt payload fields remain; PATCH is notes-only.
 
 ---
 

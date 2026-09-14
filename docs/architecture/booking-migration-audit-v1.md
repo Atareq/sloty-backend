@@ -1,6 +1,6 @@
 # Booking Domain Architecture Audit (v1)
 
-**Status:** Historical audit (2026-09-13). Phase A identity linkage and Phase B Authorization Spine migration have since been implemented. Do not treat the "currently unmigrated" statements below as current runtime state — see `apps/bookings/AGENTS.md` and ADR-002 addendum §8.
+**Status:** Historical audit (2026-09-13). Identity finalization later removed Booking snapshot columns and made `club_player` required. Phase B Authorization Spine migration is implemented. Do not treat the "currently unmigrated" / "snapshots remain" statements below as current runtime state — see `apps/bookings/AGENTS.md` and ADR-002 addendum §9.
 **Date:** 2026-09-13
 **Auditor:** Senior Backend Architect & Domain Architect
 **Domain:** `apps/bookings/`

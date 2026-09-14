@@ -27,6 +27,7 @@ from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
+from tests.booking_factories import persist_booking
 
 
 class AuditAPITestCase(APITestCase):
@@ -113,21 +114,12 @@ class AuditAPITestCase(APITestCase):
         return day_start + timedelta(hours=hour)
 
     def create_booking(self, court: Court, **extra_fields) -> Booking:
-        start_time = extra_fields.pop("start_time", self.time_at(20))
-        end_time = extra_fields.pop("end_time", self.time_at(21))
-        data = {
-            "club": court.club,
-            "court": court,
-            "customer_name": "Audit Customer",
-            "customer_phone": "+201000000001",
-            "start_time": start_time,
-            "end_time": end_time,
-            "total_price": Decimal("300.00"),
-            "status": Booking.Status.CONFIRMED,
-            "source": Booking.Source.MANUAL,
-        }
-        data.update(extra_fields)
-        return Booking.objects.create(**data)
+        extra_fields.setdefault("start_time", self.time_at(20))
+        extra_fields.setdefault("end_time", self.time_at(21))
+        extra_fields.setdefault("customer_name", "Audit Customer")
+        extra_fields.setdefault("customer_phone", "+201000000001")
+        extra_fields.setdefault("status", Booking.Status.CONFIRMED)
+        return persist_booking(court, **extra_fields)
 
     def create_transaction(self, booking: Booking, **extra_fields) -> Transaction:
         data = {
@@ -440,8 +432,6 @@ class AuditAccessAPITests(AuditAPITestCase):
         self.owner.save(update_fields=["first_name", "last_name"])
         self.court.name = "Renamed Court"
         self.court.save(update_fields=["name"])
-        booking.customer_name = "Renamed Customer"
-        booking.save(update_fields=["customer_name"])
         self.client.force_authenticate(user=self.platform_admin)
 
         list_response = self.client.get(self.audit_list_url(self.club))
@@ -770,7 +760,7 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
 
         response = self.client.patch(
             self.booking_detail_url(self.club, booking),
-            {"customer_name": "Updated Customer"},
+            {"notes": "Updated note"},
             format="json",
         )
 
@@ -781,7 +771,7 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             entity_id=booking.id,
         )
         self.assertEqual(audit_log.before_data["customer_name"], "Audit Customer")
-        self.assertEqual(audit_log.after_data["customer_name"], "Updated Customer")
+        self.assertEqual(audit_log.after_data["customer_name"], "Audit Customer")
 
     def test_booking_lifecycle_actions_create_audit_logs(self):
         cases = (

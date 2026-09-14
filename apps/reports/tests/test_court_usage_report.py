@@ -14,6 +14,7 @@ from apps.bookings.models import Booking
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.transactions.models import Transaction
+from tests.booking_factories import persist_booking
 
 
 @override_settings(ROOT_URLCONF="config.urls")
@@ -179,19 +180,12 @@ class CourtUsageReportAPITestCase(APITestCase):
         )
 
     def create_booking(self, court, **extra_fields):
-        data = {
-            "club": court.club,
-            "court": court,
-            "customer_name": "Report Customer",
-            "customer_phone": "+201000000501",
-            "start_time": self.time_at(8),
-            "end_time": self.time_at(9),
-            "total_price": Decimal("300.00"),
-            "status": Booking.Status.CONFIRMED,
-            "source": Booking.Source.MANUAL,
-        }
-        data.update(extra_fields)
-        return Booking.objects.create(**data)
+        extra_fields.setdefault("start_time", self.time_at(8))
+        extra_fields.setdefault("end_time", self.time_at(9))
+        extra_fields.setdefault("customer_name", "Report Customer")
+        extra_fields.setdefault("customer_phone", "+201000000501")
+        extra_fields.setdefault("status", Booking.Status.CONFIRMED)
+        return persist_booking(court, **extra_fields)
 
     def create_transaction(self, booking, **extra_fields):
         created = extra_fields.pop("created", self.time_at(13))

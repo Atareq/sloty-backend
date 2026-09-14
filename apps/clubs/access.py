@@ -188,57 +188,12 @@ class ClubAccessContext:
             ClubMembership.Role.STAFF,
         }
 
-    def can_manage_club(self):
-        return self.is_platform_admin or self.is_owner
-
-    def can_create_court(self):
-        return self.is_platform_admin or self.is_owner
-
-    def can_update_court(self, court, attrs):
-        if not self.can_access_court(court):
-            return False
-        if self.is_platform_admin or self.is_owner:
-            return True
-        return False
-
-    def can_manage_working_hours(self, court):
-        return self.can_access_court(court) and (
-            self.is_platform_admin or self.is_owner or self.manager_can_change_pricing
-        )
-
     def can_access_court(self, court):
         if court is None or court.club_id != self.club.id:
             return False
         if self.is_platform_admin or self.is_owner or self.is_manager:
             return True
         return court.id in self.staff_court_ids
-
-    def can_create_booking_for_court(self, court):
-        return self.can_access_court(court)
-
-    def can_change_booking_status(self, booking):
-        return (
-            booking is not None
-            and booking.club_id == self.club.id
-            and self.can_access_court(booking.court)
-        )
-
-    def can_access_booking_attempt(self, attempt):
-        if not (
-            attempt is not None
-            and attempt.club_id == self.club.id
-            and self.can_access_court(attempt.court)
-        ):
-            return False
-        if self.is_staff_only:
-            return attempt.attempted_by_id == self.user.id
-        return True
-
-    def can_dismiss_booking_attempt(self, attempt):
-        return (
-            self.can_access_booking_attempt(attempt)
-            and attempt.attempted_by_id == self.user.id
-        )
 
     def can_create_transaction_for_booking(self, booking):
         return (
@@ -325,135 +280,6 @@ class ClubAccessContext:
             self.can_view_own_settlements()
             and settlement.collected_by_id == self.user.id
         )
-
-    def can_view_audit_logs(self):
-        return self.is_platform_admin or self.is_owner or self.is_manager
-
-    def can_access_audit_log(self, audit_log):
-        return (
-            audit_log is not None
-            and audit_log.club_id == self.club.id
-            and self.can_view_audit_logs()
-        )
-
-    def can_view_court_availability(self, court):
-        return self.can_access_court(court)
-
-    def can_view_calendar(self):
-        return self.has_any_club_access()
-
-    def can_view_dashboard(self):
-        return self.is_platform_admin or self.is_owner or self.is_manager
-
-    def can_view_reports(self):
-        return self.is_platform_admin or self.is_owner or self.is_manager
-
-    def can_filter_reports_by_staff(self, user):
-        return self.can_view_reports() and self.user_has_active_membership(user)
-
-    def can_view_dashboard_summary(self):
-        return self.has_any_club_access()
-
-    def can_view_financial_summary(self):
-        return self.is_platform_admin or self.is_owner or self.is_manager
-
-    def scoped_courts_queryset(self):
-        from apps.courts.models import Court
-
-        queryset = Court.objects.filter(club=self.club)
-        if self.is_platform_admin or self.is_owner or self.is_manager:
-            return queryset
-        if self.is_staff:
-            return queryset.filter(id__in=self.staff_court_ids)
-        return queryset.none()
-
-    def scoped_working_hours_queryset(self):
-        from apps.courts.models import CourtWorkingHour
-
-        return CourtWorkingHour.objects.filter(court__in=self.scoped_courts_queryset())
-
-    def scoped_bookings_queryset(self):
-        from apps.bookings.models import Booking
-
-        return Booking.objects.filter(court__in=self.scoped_courts_queryset())
-
-    def scoped_booking_attempts_queryset(self):
-        from apps.bookings.models import BookingAttempt
-
-        queryset = BookingAttempt.objects.filter(
-            club=self.club,
-            court__in=self.scoped_courts_queryset(),
-        )
-        if self.is_staff_only:
-            queryset = queryset.filter(attempted_by=self.user)
-        return queryset
-
-    def scoped_calendar_bookings_queryset(self):
-        return self.scoped_bookings_queryset()
-
-    def scoped_dashboard_courts_queryset(self):
-        from apps.courts.models import Court
-
-        queryset = Court.objects.filter(club=self.club)
-        if self.can_view_dashboard():
-            return queryset
-        return queryset.none()
-
-    def scoped_report_courts_queryset(self):
-        from apps.courts.models import Court
-
-        queryset = Court.objects.filter(club=self.club)
-        if self.can_view_reports():
-            return queryset
-        return queryset.none()
-
-    def scoped_dashboard_summary_courts_queryset(self):
-        from apps.courts.models import Court
-
-        queryset = Court.objects.filter(club=self.club)
-        if self.can_view_dashboard_summary():
-            if self.can_view_financial_summary():
-                return queryset
-            if self.is_staff:
-                return queryset.filter(id__in=self.staff_court_ids)
-        return queryset.none()
-
-    def scoped_transactions_queryset(self):
-        from apps.transactions.models import Transaction
-
-        queryset = Transaction.objects.filter(court__in=self.scoped_courts_queryset())
-        if self.is_staff_only:
-            queryset = queryset.filter(created_by=self.user)
-        return queryset
-
-    def scoped_transaction_attempts_queryset(self):
-        from apps.transactions.models import TransactionAttempt
-
-        queryset = TransactionAttempt.objects.filter(
-            club=self.club,
-            court__in=self.scoped_courts_queryset(),
-        )
-        if self.is_staff_only:
-            queryset = queryset.filter(attempted_by=self.user)
-        return queryset
-
-    def scoped_settlements_queryset(self):
-        from apps.settlements.models import Settlement
-
-        queryset = Settlement.objects.filter(club=self.club)
-        if self.can_manage_settlements():
-            return queryset
-        if self.can_view_own_settlements():
-            return queryset.filter(collected_by=self.user)
-        return queryset.none()
-
-    def scoped_audit_logs_queryset(self):
-        from apps.audit.models import AuditLog
-
-        queryset = AuditLog.objects.filter(club=self.club)
-        if self.can_view_audit_logs():
-            return queryset
-        return queryset.none()
 
     def scoped_memberships_queryset(self):
         queryset = ClubMembership.objects.current().filter(club=self.club)

@@ -82,7 +82,7 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 
 | Concern | Target direction |
 | :--- | :--- |
-| Identity | `User` (auth) · `ClubMembership` (ops) · `PlayerProfile` → `ClubPlayer` (customers, future) |
+| Identity | `User` (auth) · `ClubMembership` (ops) · `PlayerProfile` → `ClubPlayer` → `Booking.club_player` (customers) |
 | Authentication | Answers “who?” only (JWT, future password change). Never club/court/resource access. |
 | Authorization | Spine owns WHERE/WHO · domain `authorization.py` owns special business rules only |
 | Resource config | Implemented `authorization_config` contract only — no second metadata format |
@@ -92,8 +92,8 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 ### Transitional runtime notes
 
 - Spine code: [`apps/common/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/)
-- Legacy access (`ClubAccessContext` / `ClubScopedAccessMixin`) still serves unmigrated domains.
-- `ClubMembership.last_sync_at` is updated **only** by `POST /api/v1/me/sync-heartbeat/` — never by spine mixins.
+- Legacy access (`ClubAccessContext` / `ClubScopedAccessMixin`) still serves **Clubs** memberships and club-user list endpoints. Migrated domains use the Spine.
+- `ClubMembership.last_sync_at` is updated by `POST /api/v1/me/sync-heartbeat/` and, as leftover Clubs mixin behavior, by successful `ClubScopedAccessMixin` responses. Spine mixins never update it.
 
 ---
 

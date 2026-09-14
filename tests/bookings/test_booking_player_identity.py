@@ -116,9 +116,6 @@ class SamePhoneSameClubTests(BookingPlayerIdentityTestCase):
             str(booking_one.club_player.player_profile.phone_number),
             "+201012345678",
         )
-        # Snapshot fields remain independently stored on each booking.
-        self.assertEqual(booking_one.customer_name, "Ahmed Ali")
-        self.assertEqual(booking_two.customer_name, "Ahmed Ali")
 
 
 class SamePhoneDifferentClubsTests(BookingPlayerIdentityTestCase):
@@ -176,8 +173,6 @@ class ClubIsolationTests(BookingPlayerIdentityTestCase):
             club=club_a,
             court=court_a,
             club_player=other_club_player,
-            customer_name="Cross Club Attempt",
-            customer_phone="+201055555555",
             start_time=self.time_at(10),
             end_time=self.time_at(11),
             total_price=Decimal("300.00"),
@@ -428,7 +423,7 @@ class RecurringBookingIdentityPropagationTests(BookingPlayerIdentityTestCase):
 class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
     """
     Operational consumers read ClubPlayer (exact booking-time version).
-    Snapshot columns stay on the row and in API keys.
+    Create still accepts customer_name / customer_phone as walk-in inputs.
     """
 
     def test_booking_api_keeps_v1_after_later_version_is_created(self):
@@ -467,29 +462,119 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
         ids = [row["id"] for row in search.data["results"]]
         self.assertIn(booking.id, ids)
 
-    def test_snapshot_fallback_when_club_player_is_null(self):
-        club = self.create_club("Fallback Club", "fallback-club")
-        court = self.create_court(club, "Fallback Court")
-        admin = self.create_platform_admin("fallback-admin")
-        self.client.force_authenticate(user=admin)
-        booking = Booking.objects.create(
+    def test_booking_cannot_be_saved_without_club_player(self):
+        club = self.create_club("Required ClubPlayer Club", "required-club-player")
+        court = self.create_court(club, "Required Court")
+        booking = Booking(
             club=club,
             court=court,
-            customer_name="Snapshot Only",
-            customer_phone="+201088880002",
             start_time=self.time_at(12),
             end_time=self.time_at(13),
             total_price=Decimal("300.00"),
             status=Booking.Status.HOLD,
             source=Booking.Source.MANUAL,
-            created_by=admin,
         )
-        response = self.client.get(
+        with self.assertRaises(DjangoValidationError) as ctx:
+            booking.full_clean()
+        self.assertIn("club_player", ctx.exception.message_dict)
+
+    def test_new_phone_creates_a_new_player_profile(self):
+        club = self.create_club("Phone Split Club", "phone-split-club")
+        court = self.create_court(club, "Phone Split Court")
+        admin = self.create_platform_admin("phone-split-admin")
+        first = create_booking(
+            created_by=admin,
+            court=court,
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+            customer_name="Same Person Name",
+            customer_phone="+201088880010",
+        )
+        second = create_booking(
+            created_by=admin,
+            court=court,
+            start_time=self.time_at(12),
+            end_time=self.time_at(13),
+            customer_name="Same Person Name",
+            customer_phone="+201088880011",
+        )
+        self.assertNotEqual(
+            first.club_player.player_profile_id,
+            second.club_player.player_profile_id,
+        )
+        self.assertEqual(PlayerProfile.objects.count(), 2)
+
+    def test_patch_notes_does_not_mutate_club_player_identity(self):
+        club = self.create_club("Patch Identity Club", "patch-identity-club")
+        court = self.create_court(club, "Patch Court")
+        admin = self.create_platform_admin("patch-identity-admin")
+        self.client.force_authenticate(user=admin)
+        booking = create_booking(
+            created_by=admin,
+            court=court,
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+            customer_name="Locked Identity",
+            customer_phone="+201088880012",
+        )
+        original_id = booking.club_player_id
+        response = self.client.patch(
             reverse(
                 "club-booking-detail",
                 kwargs={"club_slug": club.slug, "pk": booking.pk},
-            )
+            ),
+            {
+                "customer_name": "Should Not Apply",
+                "customer_phone": "+201088880099",
+                "notes": "Only notes change",
+            },
+            format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["customer_name"], "Snapshot Only")
-        self.assertEqual(response.data["customer_phone"], "+201088880002")
+        booking.refresh_from_db()
+        self.assertEqual(booking.club_player_id, original_id)
+        self.assertEqual(booking.club_player.display_name, "Locked Identity")
+        self.assertEqual(
+            str(booking.club_player.player_profile.phone_number),
+            "+201088880012",
+        )
+        self.assertEqual(booking.notes, "Only notes change")
+        self.assertEqual(response.data["customer_name"], "Locked Identity")
+
+    def test_idempotent_replay_does_not_collapse_different_players(self):
+        club = self.create_club("Idempotency Club", "idempotency-identity-club")
+        court = self.create_court(club, "Idempotency Court")
+        admin = self.create_platform_admin("idempotency-identity-admin")
+        first = create_booking(
+            created_by=admin,
+            court=court,
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+            customer_name="First Player",
+            customer_phone="+201088880013",
+            client_request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        )
+        second = create_booking(
+            created_by=admin,
+            court=court,
+            start_time=self.time_at(12),
+            end_time=self.time_at(13),
+            customer_name="Second Player",
+            customer_phone="+201088880014",
+            client_request_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        )
+        self.assertNotEqual(first.id, second.id)
+        self.assertNotEqual(
+            first.club_player.player_profile_id,
+            second.club_player.player_profile_id,
+        )
+        replay = create_booking(
+            created_by=admin,
+            court=court,
+            start_time=self.time_at(10),
+            end_time=self.time_at(11),
+            customer_name="First Player",
+            customer_phone="+201088880013",
+            client_request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        )
+        self.assertEqual(replay.id, first.id)

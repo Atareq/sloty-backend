@@ -73,8 +73,6 @@ def make_booking(club, court, club_player, *, created=None):
         club=club,
         court=court,
         club_player=club_player,
-        customer_name=club_player.display_name or "Player",
-        customer_phone=str(club_player.player_profile.phone_number),
         start_time=start,
         end_time=start + timedelta(hours=1),
         total_price=Decimal("300.00"),

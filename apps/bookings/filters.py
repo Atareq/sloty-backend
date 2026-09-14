@@ -104,8 +104,8 @@ class BookingFilter(django_filters.FilterSet):
     search = django_filters.CharFilter(
         method="filter_search",
         help_text=(
-            "Search customer_name, customer_phone (including Egyptian phone "
-            "variants), ClubPlayer display name / profile phone, and notes."
+            "Search ClubPlayer display name, PlayerProfile phone "
+            "(including Egyptian phone variants), and notes."
         ),
     )
     upcoming = django_filters.BooleanFilter(

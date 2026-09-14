@@ -9,8 +9,7 @@ class BookingAdmin(admin.ModelAdmin):
         "id",
         "court",
         "club",
-        "customer_name",
-        "customer_phone",
+        "club_player",
         "start_time",
         "end_time",
         "total_price",
@@ -20,8 +19,6 @@ class BookingAdmin(admin.ModelAdmin):
     )
     list_filter = ("status", "source", "club", "court")
     search_fields = (
-        "customer_name",
-        "customer_phone",
         "club_player__display_name",
         "club_player__player_profile__phone_number",
         "court__name",

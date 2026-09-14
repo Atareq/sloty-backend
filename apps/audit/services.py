@@ -1,4 +1,8 @@
 from apps.audit.models import AuditLog
+from apps.bookings.identity import (
+    booking_customer_display_name,
+    booking_customer_display_phone,
+)
 
 
 def user_display_name(user):
@@ -11,8 +15,8 @@ def user_display_name(user):
 def booking_audit_snapshot(booking):
     return {
         "booking_id": booking.id,
-        "customer_name": booking.customer_name,
-        "customer_phone": str(booking.customer_phone),
+        "customer_name": booking_customer_display_name(booking),
+        "customer_phone": booking_customer_display_phone(booking),
         "status": booking.status,
         "source": booking.source,
         "recurrence_status": booking.recurrence_status,
@@ -33,7 +37,7 @@ def transaction_audit_snapshot(transaction_obj):
         "transaction_id": transaction_obj.id,
         "transaction_type": transaction_obj.transaction_type,
         "booking_id": transaction_obj.booking_id,
-        "customer_name": booking.customer_name,
+        "customer_name": booking_customer_display_name(booking),
         "amount": str(transaction_obj.amount),
         "client_request_id": (
             str(transaction_obj.client_request_id)
