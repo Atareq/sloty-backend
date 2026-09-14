@@ -116,6 +116,9 @@ authorization_config = {
     "prefetch_related": (),
 }
 # Collector filtering remains domain business narrowing — never a Court scope.
+# Settlements (`Settlement`) now ship this club-only contract.
+# Audit (`AuditLog`) also ships this club-only contract. Court/collector
+# scopes from Bookings/Transactions/Settlements are not applied to audit rows.
 ```
 
 Rules:
@@ -134,11 +137,12 @@ Rules:
 - ViewSets may add relations with `authorization_select_related`, `authorization_prefetch_related`, or their getter hooks. They must not remove mandatory model relations.
 - Domain filtering belongs in `filter_scoped_queryset(queryset)` or standard DRF filter backends. Both receive the already-authorized queryset and may only narrow it.
 - A participating ViewSet must not override `get_queryset()` to start from a model manager, use a second access context, or accept client-provided tenant IDs.
-- Domain migrations remain separate, deliberate tasks. The legacy `ClubAccessContext` and `ClubScopedAccessMixin` stay in place until each domain's behavior and tests are migrated. **Courts** (`Court`, `CourtWorkingHour`) is migrated onto this v2 foundation — see `apps/courts/AGENTS.md` for its concrete `authorization_config` and the one remaining domain-specific helper (`manager_can_change_pricing`) the matrix cannot express. **Transactions** and **Settlements** use spine v1 + domain `authorization.py` for business rules; Settlement v2 queryset target is `default_scope="club"` (never court). All other domains remain on the legacy layer until explicitly migrated.
+- Domain migrations remain separate, deliberate tasks. The legacy `ClubAccessContext` and `ClubScopedAccessMixin` stay in place until each domain's behavior and tests are migrated. **Courts**, **Bookings**, **Transactions**, **Settlements**, **Dashboard**, **Audit**, and **Reports** are migrated onto this foundation. Dashboard and Reports are read models: `ClubScopedViewMixin` + `SlotyBasePermission` with source-domain `scoped_queryset` aggregations — not `SlotyScopedResourceMixin`. Audit is a club-only resource (`AuditLog.authorization_config` `default_scope="club"`); Staff are matrix-denied; court/collector scopes from Bookings/Transactions/Settlements are not applied to audit rows. Parts of Clubs remain on the legacy layer until explicitly migrated.
 - **Not a presence/activity tracker**: The Spine (`RequestAccessContext`, `ClubScopedViewMixin`, `SlotyScopedResourceMixin`) intentionally has no request-level side effects beyond authorization/scoping. `ClubMembership.last_sync_at` (offline/PWA sync bookkeeping) is updated only by the dedicated `POST /api/v1/me/sync-heartbeat/` endpoint (`apps/accounts/`), never implicitly by any Spine mixin. Do not add such side effects when migrating further domains.
 
 ## Testing
 
+- Run with the project-standard command: `pytest -n 4 --reuse-db tests/common/ tests/authorization/`. Retry a failed node sequentially only if the parallel run reports a failure (see root `AGENTS.md` §8).
 - Test suite: [`tests/common/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/common/).
 - Test suites:
   - Infrastructure: [`tests/common/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/common/).

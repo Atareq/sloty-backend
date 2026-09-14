@@ -1,17 +1,15 @@
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.generics import GenericAPIView
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
-from apps.clubs.mixins import ClubScopedAccessMixin
 from apps.clubs.models import Club
-from apps.clubs.permissions import (
-    CanViewClubDashboard,
-    CanViewDashboardSummary,
-    HasClubAccess,
-)
+from apps.common.authorization.mixins import ClubScopedViewMixin
+from apps.common.authorization.permissions import SlotyBasePermission
 from apps.courts.models import Court
+from apps.dashboard.authorization import can_access_court
 from apps.dashboard.serializers import (
     AvailabilityQuerySerializer,
     AvailabilityResponseSerializer,
@@ -38,7 +36,32 @@ from apps.dashboard.services import (
 )
 
 
-class DashboardAPIView(ClubScopedAccessMixin, GenericAPIView):
+class DashboardAPIView(ClubScopedViewMixin, GenericAPIView):
+    """
+    Read-model dashboard endpoints. There is no Dashboard model, so this
+    composes ClubScopedViewMixin + SlotyBasePermission rather than
+    SlotyScopedResourceMixin. permission_view_name maps onto the existing
+    ROLE_PERMISSIONS["DashboardViewSet"] entries.
+    """
+
+    permission_classes = (SlotyBasePermission,)
+    permission_view_name = "DashboardViewSet"
+
+    def get_access_context(self):
+        context = self.access_context
+        if context is None:
+            self.resolve_access_context(self.request)
+            context = self.access_context
+        return context
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if not getattr(self, "swagger_fake_view", False):
+            access = self.get_access_context()
+            context["access_context"] = access
+            context["club_access"] = access
+        return context
+
     def validate_query(self):
         serializer = self.query_serializer_class(
             data=self.request.query_params,
@@ -53,7 +76,7 @@ class DashboardAPIView(ClubScopedAccessMixin, GenericAPIView):
 
 
 class CourtAvailabilityAPIView(DashboardAPIView):
-    permission_classes = (HasClubAccess,)
+    action = "availability"
     query_serializer_class = AvailabilityQuerySerializer
     response_serializer_class = AvailabilityResponseSerializer
 
@@ -69,6 +92,8 @@ class CourtAvailabilityAPIView(DashboardAPIView):
             pk=kwargs["court_id"],
             club=access.club,
         )
+        if not can_access_court(access, court):
+            raise PermissionDenied("You cannot access availability for this court.")
         query = self.validate_query()
         return self.respond(
             get_court_availability(
@@ -112,7 +137,7 @@ class PublicCourtAvailabilityAPIView(GenericAPIView):
 
 
 class ClubCalendarAPIView(DashboardAPIView):
-    permission_classes = (HasClubAccess,)
+    action = "calendar"
     query_serializer_class = CalendarQuerySerializer
     response_serializer_class = CalendarResponseSerializer
 
@@ -135,7 +160,7 @@ class ClubCalendarAPIView(DashboardAPIView):
 
 
 class DashboardOverviewAPIView(DashboardAPIView):
-    permission_classes = (CanViewClubDashboard,)
+    action = "overview"
     query_serializer_class = DashboardOverviewQuerySerializer
     response_serializer_class = DashboardOverviewSerializer
 
@@ -162,7 +187,7 @@ class DashboardOverviewAPIView(DashboardAPIView):
 
 
 class DashboardSummaryAPIView(DashboardAPIView):
-    permission_classes = (CanViewDashboardSummary,)
+    action = "summary"
     query_serializer_class = DashboardSummaryQuerySerializer
     response_serializer_class = DashboardSummaryResponseSerializer
 
@@ -193,7 +218,7 @@ class DashboardSummaryAPIView(DashboardAPIView):
 
 
 class DashboardRevenueAPIView(DashboardAPIView):
-    permission_classes = (CanViewClubDashboard,)
+    action = "revenue"
     query_serializer_class = RevenueQuerySerializer
     response_serializer_class = RevenueSummarySerializer
 
@@ -217,7 +242,7 @@ class DashboardRevenueAPIView(DashboardAPIView):
 
 
 class CourtUtilizationAPIView(DashboardAPIView):
-    permission_classes = (CanViewClubDashboard,)
+    action = "court_utilization"
     query_serializer_class = CourtUtilizationQuerySerializer
     response_serializer_class = CourtUtilizationSerializer
 

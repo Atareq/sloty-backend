@@ -146,6 +146,28 @@ class Booking(models.Model):
     created = models.DateTimeField(auto_now_add=True, db_index=True)
     modified = models.DateTimeField(auto_now=True)
 
+    # Authorization Spine v2 resource-query contract
+    # (apps/common/authorization/contracts.py). Booking is an operational
+    # club+court reservation, not creator-owned: Staff assigned to a court
+    # can access every booking on that court regardless of created_by.
+    authorization_config = {
+        "scopes": {
+            "club": {"path": "club"},
+            "court": {"path": "court"},
+        },
+        "default_scope": "court",
+        "select_related": (
+            "club",
+            "court",
+            "created_by",
+            "last_status_changed_by",
+            "previous_recurring_booking",
+            "next_recurring_booking",
+            "club_player__player_profile",
+        ),
+        "prefetch_related": (),
+    }
+
     class Meta:
         constraints = [
             models.CheckConstraint(
@@ -308,6 +330,19 @@ class BookingAttempt(models.Model):
     )
     created = models.DateTimeField(auto_now_add=True, db_index=True)
     modified = models.DateTimeField(auto_now=True)
+
+    # Authorization Spine v2 resource-query contract. Boundary is club+court.
+    # Staff attempted_by restriction is applied in BookingAttemptViewSet
+    # filter_scoped_queryset() — it is not a Spine scope.
+    authorization_config = {
+        "scopes": {
+            "club": {"path": "club"},
+            "court": {"path": "court"},
+        },
+        "default_scope": "court",
+        "select_related": ("club", "court", "attempted_by", "booking"),
+        "prefetch_related": (),
+    }
 
     class Meta:
         constraints = [

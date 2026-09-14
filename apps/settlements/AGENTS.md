@@ -52,46 +52,44 @@
 
 ## Architecture & Authorization Spine Integration
 
-Settlement is on Authorization Spine **v1** (`ClubScopedViewMixin` + `RequestAccessContext` + `SlotyBasePermission`) with domain business rules in `apps/settlements/authorization.py`.
+Settlement is on Authorization Spine **v2** (`SlotyScopedResourceMixin` + `SlotyBasePermission` + `authorization_config`) with collector/settle-authority rules in `apps/settlements/authorization.py`.
 
 ```text
-RequestAccessContext (Role, Club, Admin; court not used for custody)
-         ↓
-SlotyBasePermission (Role + SettlementViewSet + DRF Action)
-         ↓
-ViewSet & Object Permission (can_access_settlement)
-         ↓
-Serializer / Domain Authorization Layer (apps/settlements/authorization.py)
-         ↓
-Pure Financial Custody Services (apps/settlements/services.py)
+Request
+    ↓
+Authentication
+    ↓
+RequestAccessContext (club from URL; court is not a custody fact)
+    ↓
+SlotyBasePermission (ROLE_PERMISSIONS["SettlementViewSet"])
+    ↓
+SlotyScopedResourceMixin.get_queryset()
+    Settlement.authorization_config default_scope="club"
+    ↓
+filter_scoped_queryset()  # collector narrowing when not can_manage_settlements
+    ↓
+DjangoFilterBackend / pagination / serializers
+    ↓
+Domain authority (preview / create / summary / mark-settled)
+    ↓
+Pure financial services (apps/settlements/services.py)
 ```
 
-### Locked Scope Direction (v2 queryset target)
+### Security boundary
 
-Per root [`AGENTS.md` §5](file:///home/tarek/Desktop/sloty/sloty-backend/AGENTS.md):
-
-- Financial custody scope is **Club + Collector**, **never Court**.
-- When Settlement querysets move to Spine v2, use:
-
-```python
-authorization_config = {
-    "scopes": {
-        "club": {"path": "club"},
-    },
-    "default_scope": "club",
-    "select_related": (),
-    "prefetch_related": (),
-}
-```
-
-- Collector filtering stays as **domain business narrowing** in `authorization.py` / view filters — not a Court scope and not a second security engine.
+- Financial custody and persisted Settlements: **Club + optional Collector**, **never Court**.
+- `Settlement.authorization_config` declares only `club` (`default_scope="club"`). `Settlement.court` is an optional display/filter field, not a Spine scope.
+- Collector visibility cannot be a Spine `ResourceScope`: it depends on role plus `manager_can_settle_transactions`. `apply_collector_scope()` therefore narrows the already club-scoped queryset.
+- Operational Transactions remain Club + Court. A collector may have custody of collections from courts they are not assigned to.
 - URLs remain club-scoped: `/api/v1/clubs/{club_slug}/settlements/` (do not inject court into settlement URLs).
+- Legacy `ClubAccessContext.scoped_settlements_queryset()` remains for unmigrated callers. Settlement ViewSets no longer use it.
 
 ### Authorization Boundary (`apps/settlements/authorization.py`)
 
 Allowed here: true business invariants (self-approval bans, manager settle flags, collector gates). Forbidden: re-implementing club isolation the spine already owns.
 
 User authority is evaluated at the API/domain boundary *before* calling pure financial services:
+- `apply_collector_scope(context, queryset)`
 - `validate_preview_authority(*, context, collector)`
 - `validate_settlement_authority(*, context, collector)`
 - `validate_unsettled_summary_authority(*, context, collector=None)`
@@ -124,5 +122,8 @@ Core financial functions have clean, unencumbered signatures with **zero knowled
 
 ## Testing
 
+- Run with the project-standard command: `pytest -n 4 --reuse-db tests/settlements/`. Retry a failed node sequentially only if the parallel run reports a failure (see root `AGENTS.md` §8).
 - Test suite: [`tests/settlements/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/settlements/).
-- Key test file: `test_settlement_api.py` (preview, summary, approval, self-approval prevention, locking, current custody scope).
+- Key test files:
+  - `test_settlement_api.py`: preview, summary, approval, self-approval prevention, locking, current custody scope.
+  - `test_settlement_authorization.py`: Spine v2 club-only contract, collector isolation, court independence, filter leak, custody vs Transaction API.

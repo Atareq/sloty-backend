@@ -66,7 +66,7 @@ Current components in this app:
 - [`ClubAccessContext`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/access.py): Central access engine instantiated per request (`from_request(request, club_slug)`).
   - Validates active membership; raises `CLUB_ACCESS_REVOKED` (403) if access was lost.
   - Computes permissions (`is_owner`, `is_manager`, `is_staff`, `manager_can_settle_transactions`, `can_manage_working_hours`, etc.).
-  - Supplies scoped querysets: `scoped_courts_queryset()`, `scoped_bookings_queryset()`, `scoped_transactions_queryset()`, `scoped_settlements_queryset()`, `scoped_audit_logs_queryset()`, `scoped_memberships_queryset()`.
+  - Supplies scoped querysets: `scoped_courts_queryset()`, `scoped_bookings_queryset()`, `scoped_transactions_queryset()`, `scoped_settlements_queryset()`, `scoped_audit_logs_queryset()`, `scoped_memberships_queryset()`. Migrated domains no longer call these from their ViewSets; they remain for unmigrated callers (Club memberships).
 - [`ClubScopedAccessMixin`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/mixins.py): Base mixin for club-scoped ViewSets. Attaches access context, injects `club_access` into serializer context, and updates `ClubMembership.last_sync_at` (throttled).
 - [`apps/clubs/permissions.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/permissions.py): Thin DRF permission wrappers delegating checks to `ClubAccessContext`.
 

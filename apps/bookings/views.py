@@ -1,8 +1,8 @@
-from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.exceptions import MethodNotAllowed
 from rest_framework.mixins import (
     CreateModelMixin,
     ListModelMixin,
@@ -18,7 +18,6 @@ from apps.bookings.filters import (
     annotate_booking_hold_expires_at,
 )
 from apps.bookings.models import Booking, BookingAttempt
-from apps.bookings.permissions import CanManageBookingAttempts
 from apps.bookings.serializers import (
     BookingAttemptDetailSerializer,
     BookingAttemptDismissSerializer,
@@ -50,8 +49,10 @@ from apps.bookings.services import (
     preview_recurrence_next,
     reschedule_booking,
 )
-from apps.clubs.mixins import ClubScopedAccessMixin
-from apps.clubs.permissions import CanManageClubBookings
+from apps.common.authorization.mixins import SlotyScopedResourceMixin
+from apps.common.authorization.permissions import SlotyBasePermission
+from apps.common.authorization.roles import Role
+from apps.common.authorization.scopes import ResourceScope
 from apps.transactions.services import annotate_booking_paid_amount
 
 
@@ -76,37 +77,35 @@ from apps.transactions.services import annotate_booking_paid_amount
     ),
 )
 class BookingViewSet(
-    ClubScopedAccessMixin,
+    SlotyScopedResourceMixin,
     ListModelMixin,
     CreateModelMixin,
     RetrieveModelMixin,
     UpdateModelMixin,
     GenericViewSet,
 ):
-    permission_classes = (CanManageClubBookings,)
+    """
+    Authorization: club boundary + Booking.authorization_config (court scope)
+    resolve the authorized queryset (Staff limited to assigned court(s);
+    Owner/Manager/Admin see all club courts). Bookings are not creator-scoped.
+    SlotyBasePermission + ROLE_PERMISSIONS["BookingViewSet"] gate actions.
+    """
+
+    authorization_model = Booking
+    authorization_scope = ResourceScope.COURT
+    permission_classes = (SlotyBasePermission,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = BookingFilter
     http_method_names = ("get", "post", "patch", "head", "options")
 
-    def get_queryset(self):
-        if getattr(self, "swagger_fake_view", False):
-            from apps.bookings.models import Booking
+    def initial(self, request, *args, **kwargs):
+        if request.method.lower() not in self.http_method_names:
+            raise MethodNotAllowed(request.method)
+        super().initial(request, *args, **kwargs)
 
-            return Booking.objects.none()
+    def filter_scoped_queryset(self, queryset):
         return annotate_booking_hold_expires_at(
-            annotate_booking_paid_amount(
-                self.get_access_context()
-                .scoped_bookings_queryset()
-                .select_related(
-                    "club",
-                    "court",
-                    "created_by",
-                    "last_status_changed_by",
-                    "previous_recurring_booking",
-                    "next_recurring_booking",
-                    "club_player__player_profile",
-                )
-            )
+            annotate_booking_paid_amount(queryset)
         ).order_by("start_time", "id")
 
     def get_serializer_class(self):
@@ -136,20 +135,12 @@ class BookingViewSet(
             return BookingRecurrenceNextSerializer
         return BookingDetailSerializer
 
-    def get_lifecycle_booking(self, access):
-        return get_object_or_404(
-            Booking.objects.select_related(
-                "club",
-                "court",
-                "created_by",
-                "last_status_changed_by",
-                "previous_recurring_booking",
-                "next_recurring_booking",
-                "club_player__player_profile",
-            ),
-            pk=self.kwargs[self.lookup_url_kwarg or self.lookup_field],
-            club=access.club,
-        )
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if not getattr(self, "swagger_fake_view", False):
+            context["access_context"] = self.access_context
+            context["club_access"] = self.access_context
+        return context
 
     def lifecycle_response(self, booking):
         serializer = BookingDetailSerializer(
@@ -175,8 +166,7 @@ class BookingViewSet(
         return Response(serializer.data, status=response_status, headers=headers)
 
     def get_lifecycle_context(self):
-        access = self.get_access_context()
-        return access, self.get_lifecycle_booking(access)
+        return self.get_access_context(), self.get_object()
 
     @extend_schema(
         tags=["Bookings"],
@@ -347,25 +337,39 @@ class BookingViewSet(
     ),
 )
 class BookingAttemptViewSet(
-    ClubScopedAccessMixin,
+    SlotyScopedResourceMixin,
     ListModelMixin,
     RetrieveModelMixin,
     GenericViewSet,
 ):
-    permission_classes = (CanManageBookingAttempts,)
+    """
+    Authorization: club+court via BookingAttempt.authorization_config.
+    Staff are additionally restricted to attempted_by=request.user in
+    filter_scoped_queryset(). Dismiss remains attempter-only for every role.
+    """
+
+    authorization_model = BookingAttempt
+    authorization_scope = ResourceScope.COURT
+    permission_classes = (SlotyBasePermission,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = BookingAttemptFilter
     http_method_names = ("get", "post", "head", "options")
 
-    def get_queryset(self):
-        if getattr(self, "swagger_fake_view", False):
-            return BookingAttempt.objects.none()
-        return (
-            self.get_access_context()
-            .scoped_booking_attempts_queryset()
-            .select_related("club", "court", "attempted_by", "booking")
-            .order_by("-created", "-id")
-        )
+    def initial(self, request, *args, **kwargs):
+        if request.method.lower() not in self.http_method_names:
+            raise MethodNotAllowed(request.method)
+        super().initial(request, *args, **kwargs)
+
+    def filter_scoped_queryset(self, queryset):
+        context = self.get_access_context()
+        if context.role == Role.STAFF and not context.is_platform_admin:
+            queryset = queryset.filter(attempted_by=context.user)
+        return queryset.order_by("-created", "-id")
+
+    def check_object_permission(self, request, obj) -> bool:
+        if self.action == "dismiss":
+            return obj.attempted_by_id == request.user.id
+        return True
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -373,6 +377,13 @@ class BookingAttemptViewSet(
         if self.action == "dismiss":
             return BookingAttemptDismissSerializer
         return BookingAttemptDetailSerializer
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if not getattr(self, "swagger_fake_view", False):
+            context["access_context"] = self.access_context
+            context["club_access"] = self.access_context
+        return context
 
     @extend_schema(
         tags=["Booking Attempts"],

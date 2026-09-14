@@ -52,26 +52,17 @@
 - `POST .../transactions/{id}/cancel/`: Transaction correction endpoint requiring `cancellation_reason`.
 - `/api/v1/clubs/{club_slug}/transaction-attempts/`: Traceability list/detail and dismissal for rejected attempts.
 
-## Authorization & Scoping
+## Authorization & Scoping (Authorization Spine v2)
 
-> [!NOTE]
-> Spine v1 + domain business rules. Club/court “WHERE” belongs to the Authorization Spine (root AGENTS.md §5). `apps/transactions/authorization.py` may keep **business conditions** only (Staff `created_by` visibility/cancel rules, object gates). Do not use it to re-implement club/court scoping once/if Transaction models adopt v2 `authorization_config` (`default_scope="court"`).
+> Club/court **WHERE** belongs to the Authorization Spine. `apps/transactions/authorization.py` keeps **business conditions** the matrix cannot express: Staff `created_by` / `attempted_by` narrowing, cancel-own (except Platform Admin), dismiss-own, and create-on-authorized-booking.
 
-- **Centralized Spine**: `TransactionViewSet` and `TransactionAttemptViewSet` use `ClubScopedViewMixin`, `RequestAccessContext`, and `SlotyBasePermission`.
-- **Domain Authorization Module**: Business-rule authorization lives in [`apps/transactions/authorization.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/transactions/authorization.py) (do not add `apps/transactions/permissions.py`).
-- **Staff Operational Scope**:
-  - Constrained by assigned Court scope.
-  - Staff can view and list only transactions they personally collected (`created_by == request.user`) on their assigned court(s).
-  - Staff can create transactions only for bookings on their assigned court(s).
-- **Management Operational Scope**:
-  - Owners, managers, and platform admins have club-wide transaction and transaction attempt visibility.
-- **Cancellation Authority**:
-  - Platform admins can cancel any eligible transaction across the club.
-  - Owners, managers, and staff may cancel only their own collected transactions (`created_by == request.user`) within their authorized court scope.
-- **Custody vs. Transaction Scope Separation Invariant**:
-  - Operational Transaction API authorization = `Club + Court (+ created_by for Staff)`.
-  - Current Custody / Settlement = `Club + optional Collector, NEVER Court`.
-  - Staff operational court constraints never leak into financial settlements or custody calculation.
+- **ViewSets:** `SlotyScopedResourceMixin` + `SlotyBasePermission`. Models declare `authorization_config` (`default_scope="court"`). The secured queryset is built before filters, pagination, and serializers.
+- **Operational boundary:** Club + Court. Settlement / Current Custody is separately Spine v2 club-scoped with collector narrowing — Club + optional Collector, **never** Court.
+- **Staff list/retrieve:** assigned court(s) **and** `created_by=request.user` (collector self-scope). This is not applied to Bookings.
+- **Staff create:** any booking on an assigned court (not creator-scoped).
+- **Cancel:** Platform Admin may cancel any in-scope transaction. Owner, Manager, and Staff may cancel only their own collections. Out-of-scope rows are HTTP 404; in-scope rows the actor may not cancel are HTTP 403.
+- **TransactionAttempt:** Club + Court, then Staff `attempted_by=request.user`. Dismiss is attempter-only for every role.
+- Legacy `ClubAccessContext.scoped_transactions_queryset()` remains for unmigrated callers. Transaction ViewSets no longer use it.
 
 ## Cross-App Dependencies
 
@@ -80,8 +71,10 @@
 
 ## Testing
 
+- Run with the project-standard command: `pytest -n 4 --reuse-db tests/transactions/`. Retry a failed node sequentially only if the parallel run reports a failure (see root `AGENTS.md` §8).
 - Test suite: [`tests/transactions/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/transactions/).
 - Key test files:
   - `test_transaction_api.py`: Creation, validation, deposit rules, idempotency.
+  - `test_transaction_authorization.py`: Spine v2 contract, club/court isolation, Staff collector scope, cancel/dismiss, custody separation.
   - `test_transaction_cancel_api.py`: Cancellation, booking status reversion, settlement guards.
   - `test_transaction_attempt_model.py`: Attempt persistence and dismissal.

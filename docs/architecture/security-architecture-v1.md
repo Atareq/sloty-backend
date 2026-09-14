@@ -58,20 +58,21 @@ This reference (direction) + scoped AGENTS.md (domain rules)
 - Explicit sync heartbeat (`POST /api/v1/me/sync-heartbeat/`) — not part of authorization
 - Domain migrations:
   - **Courts** ✅ — Spine v2 (`authorization_config` + `SlotyScopedResourceMixin`)
-  - **Transactions** ✅ — Spine v1 + domain business rules (`apps/transactions/authorization.py`)
-  - **Settlements** ✅ — Spine v1 + domain business rules (`apps/settlements/authorization.py`)
+  - **Transactions** ✅ — Spine v2 (`authorization_config` + `SlotyScopedResourceMixin`) plus domain collector/cancel/dismiss rules (`apps/transactions/authorization.py`)
+  - **Settlements** ✅ — Spine v2 (`authorization_config` club-only + `SlotyScopedResourceMixin`) plus collector/settle-authority rules (`apps/settlements/authorization.py`)
   - **Identity Foundation** ✅ — `PlayerProfile` + `ClubPlayer` (`apps/players/`); `ClubPlayer` on Spine v2
   - **Booking Identity Linkage (Phase A)** ✅ — `Booking.club_player` FK (nullable) added; `create_booking()` auto-resolves identity. **Not** a direct `player_profile` FK — see §1 migration notes.
   - **ClubPlayer Historical Identity Foundation (Sprint 1)** ✅ — later superseded by Sprint 3 versioning (no soft delete).
   - **Sprint 3 — Player Identity & Booking Integration** ✅ — `ClubPlayer` versions (`previous_version`, `is_current_version`); no `last_used_at` / no `updated_at`; last-used version is the latest booking's `club_player` for that `player_profile_id`; booking create uses current version; optional historical `club_player_id`; player search returns versions + recommended id.
   - **Sprint 4 — Consumer Migration To ClubPlayer Identity** ✅ — operational reads (booking list/detail/slots, dashboard calendar, transaction/settlement customer display, search) use `Booking.club_player` with snapshot fallback. API keys unchanged. Snapshot columns not removed. Audit event JSON and BookingAttempt payloads still store snapshots.
+  - **Bookings authorization (Phase B)** ✅ — Spine v2 (`authorization_config` + `SlotyScopedResourceMixin` + `SlotyBasePermission`). Boundary is Club + Court, not creator. BookingAttempt keeps Staff `attempted_by` restriction.
+  - **Dashboard** ✅ — Spine (`ClubScopedViewMixin` + `SlotyBasePermission` + source-domain `scoped_queryset`); public availability remains anonymous
+  - **Audit** ✅ — Spine v2 (`authorization_config` club-only + `SlotyScopedResourceMixin` + `SlotyBasePermission`). Staff matrix-denied. Not court- or collector-scoped.
+  - **Reports** ✅ — Spine read-model (`ClubScopedViewMixin` + `SlotyBasePermission` + source-domain `scoped_queryset`). Court Usage is Club + Court; Staff matrix-denied.
 
 ### Not yet migrated / not yet created
 
-- Bookings still on legacy access layer for authorization/scoping (Phase B: `authorization_config` + `SlotyScopedResourceMixin` — identity linkage is already done, see above)
-- Dashboard still on legacy access layer
-- Reports still on legacy access layer
-- Audit still on legacy access layer
+- Parts of Clubs still on legacy access layer
 - Full `authorization_config` adoption across all secured models
 - Removal of legacy `ClubAccessContext` / `ClubScopedAccessMixin`
 - Password change endpoint (planned)
@@ -235,8 +236,13 @@ Services should **not** normally contain `if user.role == ...` or re-check club/
 
 - Spine v1 + v2 foundation live under `apps/common/authorization/`.
 - Courts use v2 resource query mixin.
-- Transactions and Settlements use v1 spine + domain `authorization.py` for business rules.
-- Bookings / Dashboard / Reports / Audit / parts of Clubs still use legacy `ClubAccessContext`.
+- Bookings use v2 resource query mixin (club + court; not creator-scoped).
+- Transactions use v2 resource query mixin (club + court) plus Staff collector `created_by` narrowing.
+- Settlements use v2 resource query mixin (club only, never court) plus collector narrowing in the domain module.
+- Dashboard uses Spine context + matrix (`DashboardViewSet` actions) and source-domain `scoped_queryset` aggregations.
+- Audit uses v2 resource query mixin (club only, never court). Staff are matrix-denied.
+- Reports uses Spine context + matrix (`CourtUsageReportViewSet` list) and source-domain `scoped_queryset` aggregations.
+- Parts of Clubs still use legacy `ClubAccessContext`.
 
 ### Migration Notes
 
@@ -244,7 +250,7 @@ Services should **not** normally contain `if user.role == ...` or re-check club/
 | :--- | :--- |
 | **Why** | One security spine prevents each domain inventing its own access engine. |
 | **Replaces** | Legacy `ClubAccessContext` permission helpers + per-domain scoped queryset methods, domain by domain. |
-| **Must remain unchanged** | Migrated domain behavior (Courts / Transactions / Settlements) and unmigrated legacy behavior until each domain’s migration task. |
+| **Must remain unchanged** | Migrated domain behavior (Courts / Transactions / Settlements / Bookings) and unmigrated legacy behavior until each domain’s migration task. |
 
 ---
 
@@ -295,8 +301,10 @@ authorization_config = {
 
 - Contract implemented and tested.
 - Courts (`Court`, `CourtWorkingHour`) declare `authorization_config`.
-- Transactions / Settlements do not yet use v2 `authorization_config` for querysets (business rules remain in domain modules).
-- Settlement **target** when moved to v2 querysets:
+- Bookings (`Booking`, `BookingAttempt`) declare `authorization_config`.
+- Transactions (`Transaction`, `TransactionAttempt`) declare `authorization_config`.
+- Settlements (`Settlement`) declare `authorization_config` with club-only scope (`default_scope="club"`). Collector narrowing remains domain business logic.
+- Audit (`AuditLog`) declares `authorization_config` with club-only scope (`default_scope="club"`). Court is an optional event attribute, not a security boundary. Staff are matrix-denied.
 
 ```python
 authorization_config = {
@@ -304,7 +312,13 @@ authorization_config = {
         "club": {"path": "club"},
     },
     "default_scope": "club",
-    "select_related": (),
+    "select_related": (
+        "club",
+        "court",
+        "collected_by",
+        "created_by",
+        "settled_by",
+    ),
     "prefetch_related": (),
 }
 # Collector filtering = domain business narrowing — never Court.
@@ -354,7 +368,8 @@ Tenant IDs in request bodies/query params are not authoritative; URL + resolved 
 
 ### Current State
 
-- Spine-migrated ViewSets follow this pattern (Courts via mixin; Transactions/Settlements via v1 mixin + domain scoped query helpers).
+- Spine-migrated ViewSets follow this pattern (Courts, Bookings, Transactions, and Settlements via mixin). Settlements are club-scoped; collector narrowing happens after the Spine queryset.
+- Dashboard authenticated endpoints are GenericAPIViews on `ClubScopedViewMixin` + `SlotyBasePermission`; they aggregate already-scoped source querysets.
 - Legacy domains still centralize scoping inside `ClubAccessContext` helpers.
 
 ### Migration Notes
@@ -401,9 +416,11 @@ class ExampleViewSet(
 ### Current State
 
 - `SlotyScopedResourceMixin` and `ClubScopedViewMixin` exist.
-- Courts compose the v2 mixin.
-- Transactions / Settlements compose the v1 club mixin.
-- Legacy domains compose `ClubScopedAccessMixin`.
+- Courts, Bookings, Transactions, Settlements, and Audit compose the v2 mixin.
+- Settlements and Audit use `authorization_scope = ResourceScope.CLUB` (never court).
+- Dashboard uses `ClubScopedViewMixin` + `SlotyBasePermission` (read model, no resource table).
+- Reports uses `ClubScopedViewMixin` + `SlotyBasePermission` (read model, no resource table).
+- Legacy domains (Club memberships) compose `ClubScopedAccessMixin`.
 
 ### Migration Notes
 
@@ -431,15 +448,20 @@ Examples:
 | :--- | :--- | :--- | :--- |
 | `Court` | `self` club via `"club": {"path": "club"}` | `"court": {"path": "self"}` | `court` |
 | `CourtWorkingHour` | `court__club` | `court` | `court` |
-| `Booking` (target) | `club` | `court` | `court` |
-| `Transaction` (target v2) | `club` | `court` | `court` |
-| `Settlement` (target v2) | `club` | — (none) | `club` |
+| `Booking` | `club` | `court` | `court` |
+| `BookingAttempt` | `club` | `court` | `court` |
+| `Transaction` | `club` | `court` | `court` |
+| `TransactionAttempt` | `club` | `court` | `court` |
+| `Settlement` | `club` | — (none) | `club` |
 | `ClubPlayer` (target) | `club` | — | `club` |
 
 ### Current State
 
 - Courts already declare the contract.
-- Bookings / Transactions / Settlements have not all adopted `authorization_config` yet.
+- Bookings (`Booking`, `BookingAttempt`) declare the contract.
+- ClubPlayer already declares the club-only contract.
+- Transactions (`Transaction`, `TransactionAttempt`) declare the contract.
+- Settlements (`Settlement`) declare the club-only contract. Collector visibility is applied in `filter_scoped_queryset()`, not as a court scope.
 
 ### Migration Notes
 
@@ -545,8 +567,8 @@ Finding hardcoded role/status/permission strings is a **refactoring trigger**:
 - **Identity Linkage Strategy:** `Booking.customer_name` and `Booking.customer_phone` remain **permanent immutable snapshots** for legal, financial, and audit integrity (audit trail, dashboard calendar, transaction receipts, search — reviewed against actual usage, not kept out of migration caution). `Booking.club_player` (nullable FK to `players.ClubPlayer`) links the booking to customer identity; there is no direct `player_profile` FK.
 - **Phased Migration:**
   - **Phase A (Complete):** Identity linkage (`club_player` FK, backend auto-resolution in `create_booking()`, snapshot preservation, zero API breaks, zero authorization changes).
-  - **Phase B (Future):** Authorization Spine migration (`SlotyScopedResourceMixin`, `SlotyBasePermission`, `authorization_config`, fail-closed HTTP 404).
-  - **Phase C (Future):** Legacy cleanup (deprecate `ClubScopedAccessMixin` booking helpers).
+  - **Phase B (Complete):** Authorization Spine migration (`SlotyScopedResourceMixin`, `SlotyBasePermission`, `authorization_config`, fail-closed HTTP 404 for out-of-scope bookings).
+  - **Phase C (Future):** Legacy cleanup (deprecate `ClubScopedAccessMixin` booking helpers once Club memberships no longer need them).
 - See [`ADR-002`](adr/ADR-002-booking-identity-and-authorization-migration.md) and [`booking-migration-audit-v1.md`](booking-migration-audit-v1.md).
 
 #### Transactions
@@ -561,9 +583,18 @@ Finding hardcoded role/status/permission strings is a **refactoring trigger**:
 
 #### Reports
 
-- Every report must explicitly declare its aggregation scope
-  - Example: revenue → Club
-  - Example: court utilization → Club + Court
+- Every report must explicitly declare its aggregation scope from source domains.
+- **Court Usage (current):** Club + Court via Booking/Court `authorization_config`. Admin/Owner/Manager see all club courts. Staff denied. Paid amounts are annotations on authorized bookings — not Transaction collector scope, not Settlement/custody.
+- Optional `court` / `staff` query filters may only narrow. No export path; JSON uses the same authorized querysets.
+
+#### Audit
+
+- **Scope:** **Club only**
+- **WHO:** Platform Admin / Owner / Manager (`list`, `retrieve`). Staff are denied.
+- **Never Court** as a security boundary — `AuditLog.court` is nullable event metadata (membership deletes, some settlements).
+- **Never Collector** — Settlement collector rules must not be applied to audit rows.
+- **Not actor-scoped** — club-authorized readers see every actor in the club.
+- Cross-domain event categories (Booking, Transaction, Settlement, ClubMembership) share this club read boundary. They do not inherit the originating domain's court/collector scope.
 
 #### ClubPlayer (future)
 
@@ -573,9 +604,12 @@ Finding hardcoded role/status/permission strings is a **refactoring trigger**:
 ### Current State
 
 - Courts: Club → Court (v2) ✅
-- Transactions: Club → Court + Staff creator rules (v1 + domain module) ✅
-- Settlements: Club + Collector business rules (v1 + domain module) ✅; v2 `default_scope="club"` still future for querysets
-- Bookings: identity linkage (`club_player`) ✅; authorization/scoping still legacy — Dashboard / Reports / Audit: legacy scoping
+- Bookings: Club → Court (v2) ✅; not creator-scoped; BookingAttempt Staff `attempted_by` narrowing in the ViewSet
+- Transactions: Club → Court (v2) ✅ plus Staff collector `created_by` / cancel-own (except Platform Admin)
+- Settlements: Club + Collector (v2 club queryset) ✅ plus collector narrowing / settle-authority in the domain module; never court
+- Dashboard: Spine read-model (ClubScopedViewMixin + matrix); aggregations follow source-domain boundaries ✅
+- Audit: Club only (v2 club queryset) ✅; Staff matrix-denied; not court- or collector-scoped
+- Reports: Spine read-model (ClubScopedViewMixin + matrix); Court Usage Club + Court; Staff matrix-denied ✅
 
 ### Migration Notes
 
@@ -664,15 +698,15 @@ Player identity foundation                  ← PlayerProfile + ClubPlayer
         ↓
 Authentication improvements                 ← password change; JWT authority docs
         ↓
-Bookings migration                          ← spine + optional ClubPlayer link
+Bookings migration ✅                       ← spine + ClubPlayer link
         ↓
-Dashboard
+Dashboard ✅                                ← read-model Spine + source querysets
         ↓
-Reports
+Audit ✅                                        ← club-only Spine v2 read resource
         ↓
-Audit
+Reports ✅                                      ← read-model Spine + source querysets
         ↓
-Remove legacy authorization                 ← ClubAccessContext / ClubScopedAccessMixin
+Remove leftover Clubs legacy                    ← ClubAccessContext / ClubScopedAccessMixin
 ```
 
 ### Already completed (mark and preserve)
@@ -680,10 +714,14 @@ Remove legacy authorization                 ← ClubAccessContext / ClubScopedAc
 | Domain | Status | Notes |
 | :--- | :--- | :--- |
 | Courts | ✅ | Spine v2 resource query |
-| Transactions | ✅ | Spine v1 + domain business rules |
-| Settlements | ✅ | Spine v1 + domain business rules; v2 club queryset config still future |
+| Transactions | ✅ | Spine v2 club+court queryset; Staff collector `created_by`; cancel-own except Platform Admin; Settlement custody stays club+collector |
+| Settlements | ✅ | Spine v2 club-only queryset; collector narrowing + settle-authority in domain module; never court; Transaction API stays club+court |
 | Identity Foundation | ✅ | `PlayerProfile` + `ClubPlayer` in `apps/players/`; `ClubPlayer` on Spine v2 |
-| Booking Identity Linkage (Phase A) | ✅ | `Booking.club_player` FK + `create_booking()` auto-resolution; authorization/scoping (Phase B) still legacy |
+| Booking Identity Linkage (Phase A) | ✅ | `Booking.club_player` FK + `create_booking()` auto-resolution |
+| Bookings authorization (Phase B) | ✅ | Spine v2 club+court queryset; BookingAttempt Staff `attempted_by`; legacy layer kept for unmigrated domains |
+| Dashboard | ✅ | Read-model Spine (`ClubScopedViewMixin` + `DashboardViewSet` matrix); aggregations from source-domain querysets; public availability anonymous |
+| Audit | ✅ | Spine v2 club-only queryset; Staff matrix-denied; court/collector scopes from other domains are not applied; historical rows unchanged |
+| Reports | ✅ | Read-model Spine (`ClubScopedViewMixin` + `CourtUsageReportViewSet` matrix); Court Usage Club+Court source querysets; Staff matrix-denied; no export path |
 
 ### Hard migration rules
 
@@ -768,9 +806,10 @@ Do **not** force court into every URL.
 - Players customer identity: [`apps/players/AGENTS.md`](../../apps/players/AGENTS.md)
 - Clubs membership + legacy access: [`apps/clubs/AGENTS.md`](../../apps/clubs/AGENTS.md)
 - Courts (v2 migrated): [`apps/courts/AGENTS.md`](../../apps/courts/AGENTS.md)
-- Bookings (migration preparation): [`apps/bookings/AGENTS.md`](../../apps/bookings/AGENTS.md)
-- Transactions (v1 migrated): [`apps/transactions/AGENTS.md`](../../apps/transactions/AGENTS.md)
-- Settlements (v1 migrated): [`apps/settlements/AGENTS.md`](../../apps/settlements/AGENTS.md)
+- Bookings (Spine v2 migrated; identity snapshots retained): [`apps/bookings/AGENTS.md`](../../apps/bookings/AGENTS.md)
+- Transactions (Spine v2 migrated; collector/cancel rules in domain module): [`apps/transactions/AGENTS.md`](../../apps/transactions/AGENTS.md)
+- Settlements (Spine v2 migrated; collector/settle rules in domain module; never court): [`apps/settlements/AGENTS.md`](../../apps/settlements/AGENTS.md)
+- Dashboard (Spine read-model migrated; public availability anonymous): [`apps/dashboard/AGENTS.md`](../../apps/dashboard/AGENTS.md)
 - ADR-001 (Player Identity & Booking Link): [`ADR-001`](adr/ADR-001-player-identity-and-booking-link.md)
 - ADR-002 (Booking Identity & Authorization Migration): [`ADR-002`](adr/ADR-002-booking-identity-and-authorization-migration.md)
 - Booking Migration Audit: [`booking-migration-audit-v1.md`](booking-migration-audit-v1.md)

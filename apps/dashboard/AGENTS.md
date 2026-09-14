@@ -8,8 +8,8 @@
 
 - **Operational vs. Financial Access Separation**:
   - Operational metrics (court availability, calendar, summary operational cards) are accessible to Staff for their assigned court.
-  - Financial endpoints (`overview`, `revenue`, `court-utilization`) are restricted to Platform Admins, Owners, and Managers; Staff receive 403.
-  - The `/dashboard/summary/` endpoint supports both: Staff receive operational counts, while all financial fields are set to `null` (`can_view_financial_summary() == False`).
+  - Financial endpoints (`overview`, `revenue`, `court-utilization`) are restricted to Platform Admins, Owners, and Managers; Staff receive 403 from `ROLE_PERMISSIONS["DashboardViewSet"]`.
+  - The `/dashboard/summary/` endpoint supports both: Staff receive operational counts, while all financial fields are set to `null` (`can_view_financial_summary() == False`). This is a read-model presentation rule, not a second security engine.
 - **Unsettled Transactions Authority**:
   - Dashboard settlement metrics are computed from live unsettled transactions (`is_cancelled=False` and `settlement_line IS NULL`), **never** from `Settlement.status=PENDING`.
   - Field naming: Counts must never be named `amount`. `staff_with_unsettled_transactions_count` represents distinct collectors with unsettled candidates.
@@ -42,14 +42,22 @@
 - `/api/v1/clubs/{club_slug}/dashboard/revenue/`: Financial revenue breakdowns.
 - `/api/v1/clubs/{club_slug}/dashboard/court-utilization/`: Utilization percentages and hours.
 
-## Authorization & Scoping (Current-State)
+## Authorization & Scoping (Authorization Spine)
 
-> [!NOTE]
-> Current-state/legacy authorization rules. Do not treat as target architecture.
+Dashboard is a **read model**. There is no Dashboard table, so authenticated endpoints compose `ClubScopedViewMixin` + `SlotyBasePermission` (`permission_view_name="DashboardViewSet"`). They do **not** use `SlotyScopedResourceMixin`. Public availability stays `AllowAny`.
 
-- Scoped via `ClubAccessContext`.
-- Staff access is strictly court-scoped to their assigned court and operational-only.
-- Financial metrics require `can_view_financial_summary()` (Platform Admin, Owner, Manager).
+Authorized source querysets are built **before** aggregation via source-domain `authorization_config`:
+
+| Endpoint | WHO (matrix) | Source boundary |
+| :--- | :--- | :--- |
+| `availability` | All club roles | Court in URL; Staff unassigned court → 403 |
+| `calendar` | All club roles | Booking Club + Court |
+| `summary` | All club roles | Bookings/courts Club + Court; financial fields null for Staff; custody Club + optional Collector (explicit `court`/`collected_by` query filters only) |
+| `overview` / `revenue` / `court_utilization` | Admin / Owner / Manager | Bookings & period transactions Club + Court (all club courts for these roles); custody Club + optional Collector; settled settlement totals Club (never collector narrowing) |
+
+Do not apply Transaction Staff `created_by` narrowing to dashboard financial aggregations. Do not apply Settlement collector narrowing to dashboard settlement totals. Do not implicitly court-scope custody from Staff assignment.
+
+Legacy `ClubAccessContext.scoped_dashboard_*_queryset()` remains for unmigrated callers. Dashboard views no longer use `ClubScopedAccessMixin` (no implicit `last_sync_at` updates).
 
 ## Cross-App Dependencies
 
@@ -57,5 +65,8 @@
 
 ## Testing
 
+- Run with the project-standard command: `pytest -n 4 --reuse-db tests/dashboard/`. Retry a failed node sequentially only if the parallel run reports a failure (see root `AGENTS.md` §8).
 - Test suite: [`tests/dashboard/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/dashboard/).
-- Key test file: `test_dashboard_api.py` (availability, summary role filtering, revenue, calendar).
+- Key test files:
+  - `test_dashboard_api.py`: availability, summary role filtering, revenue, calendar.
+  - `test_dashboard_authorization.py`: Spine composition, club isolation of totals, Staff court vs Owner custody.

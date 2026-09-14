@@ -18,6 +18,16 @@ from apps.bookings.identity import (
 from apps.bookings.models import Booking
 from apps.courts.models import CourtWorkingHour
 from apps.courts.pricing import datetime_for_local_date, working_hour_bounds
+from apps.dashboard.authorization import (
+    can_access_court,
+    can_view_financial_summary,
+    dashboard_summary_role,
+    is_staff_collector,
+    scoped_dashboard_bookings,
+    scoped_dashboard_courts,
+    scoped_dashboard_settlements,
+    scoped_dashboard_transactions,
+)
 from apps.settlements.models import Settlement
 from apps.settlements.services import (
     aggregate_current_custody,
@@ -126,7 +136,7 @@ def build_court_availability_payload(*, club, court, date):
 
 
 def get_court_availability(*, access, court, date):
-    if not access.can_view_court_availability(court):
+    if not can_access_court(access, court):
         raise PermissionDenied("You cannot access availability for this court.")
     if not access.club.is_active:
         raise serializers.ValidationError({"club": "Club is inactive."})
@@ -161,25 +171,14 @@ def get_public_court_availability(*, club, court, date):
     return availability
 
 
-def validate_dashboard_access(access):
-    if not access.can_view_dashboard():
-        raise PermissionDenied("You cannot access dashboard summaries.")
-
-
-def validate_calendar_access(access):
-    if not access.can_view_calendar():
-        raise PermissionDenied("You cannot access this calendar.")
-
-
 def get_calendar_items(*, access, date_from, date_to, court=None, status=None):
-    validate_calendar_access(access)
     queryset = annotate_booking_paid_amount(
-        access.scoped_calendar_bookings_queryset()
+        scoped_dashboard_bookings(access)
         .select_related("court", "club_player__player_profile")
         .filter(start_time__lt=date_to, end_time__gt=date_from)
     ).order_by("start_time", "id")
     if court is not None:
-        if not access.can_access_court(court):
+        if not can_access_court(access, court):
             raise PermissionDenied("You cannot access this court.")
         queryset = queryset.filter(court=court)
     if status:
@@ -217,8 +216,7 @@ def get_calendar_items(*, access, date_from, date_to, court=None, status=None):
 
 
 def dashboard_bookings_queryset(*, access, date_from, date_to, court=None):
-    queryset = Booking.objects.filter(
-        court__in=access.scoped_dashboard_courts_queryset(),
+    queryset = scoped_dashboard_bookings(access).filter(
         start_time__gte=date_from,
         start_time__lt=date_to,
     )
@@ -228,8 +226,7 @@ def dashboard_bookings_queryset(*, access, date_from, date_to, court=None):
 
 
 def dashboard_transactions_queryset(*, access, date_from, date_to, court=None):
-    queryset = Transaction.objects.filter(
-        court__in=access.scoped_dashboard_courts_queryset(),
+    queryset = scoped_dashboard_transactions(access).filter(
         created__gte=date_from,
         created__lt=date_to,
         is_cancelled=False,
@@ -276,23 +273,6 @@ COURT_FINANCIAL_FIELDS = (
     "settled_transaction_count",
     "settled_transaction_amount",
 )
-
-
-def validate_dashboard_summary_access(access):
-    if not access.can_view_dashboard_summary():
-        raise PermissionDenied("You cannot access dashboard summaries.")
-
-
-def dashboard_summary_role(access):
-    if access.is_platform_admin:
-        return "PLATFORM_ADMIN"
-    if access.is_owner:
-        return "OWNER"
-    if access.is_manager:
-        return "MANAGER"
-    if access.is_staff:
-        return "STAFF"
-    return "NONE"
 
 
 def base_booking_counts():
@@ -462,7 +442,7 @@ def settled_settlements_queryset(
     court=None,
     courts=None,
 ):
-    settlements = Settlement.objects.filter(club=access.club)
+    settlements = scoped_dashboard_settlements(access)
     if court is not None:
         settlements = settlements.filter(court=court)
     elif courts is not None:
@@ -484,12 +464,10 @@ def get_dashboard_summary(
     payment_method=None,
     settlement_status=None,
 ):
-    validate_dashboard_summary_access(access)
-
-    financial_visible = access.can_view_financial_summary()
-    courts_queryset = access.scoped_dashboard_summary_courts_queryset().order_by("id")
+    financial_visible = can_view_financial_summary(access)
+    courts_queryset = scoped_dashboard_courts(access).order_by("id")
     if court is not None:
-        if not access.can_access_court(court):
+        if not can_access_court(access, court):
             raise PermissionDenied("You cannot access this court.")
         courts_queryset = courts_queryset.filter(id=court.id)
     courts = list(courts_queryset)
@@ -645,7 +623,7 @@ def get_dashboard_summary(
     effective_context_court = (
         court
         if court is not None
-        else courts[0] if access.is_staff and len(courts) == 1 else None
+        else courts[0] if is_staff_collector(access) and len(courts) == 1 else None
     )
 
     return {
@@ -699,8 +677,7 @@ def get_dashboard_summary(
 
 
 def get_dashboard_overview(*, access, date_from, date_to, court=None):
-    validate_dashboard_access(access)
-    if court is not None and not access.can_access_court(court):
+    if court is not None and not can_access_court(access, court):
         raise PermissionDenied("You cannot access this court.")
 
     bookings = dashboard_bookings_queryset(
@@ -744,7 +721,7 @@ def get_dashboard_overview(*, access, date_from, date_to, court=None):
         count=Count("id"),
     )
 
-    courts = access.scoped_dashboard_courts_queryset()
+    courts = scoped_dashboard_courts(access)
     if court is not None:
         courts = courts.filter(id=court.id)
 
@@ -794,8 +771,7 @@ def get_revenue_summary(
     court=None,
     payment_method=None,
 ):
-    validate_dashboard_access(access)
-    if court is not None and not access.can_access_court(court):
+    if court is not None and not can_access_court(access, court):
         raise PermissionDenied("You cannot access this court.")
 
     transactions = dashboard_transactions_queryset(
@@ -885,9 +861,8 @@ def booked_minutes_for_booking(booking, date_from, date_to):
 
 
 def get_court_utilization(*, access, date_from, date_to):
-    validate_dashboard_access(access)
     courts = list(
-        access.scoped_dashboard_courts_queryset()
+        scoped_dashboard_courts(access)
         .prefetch_related("working_hours__pricing_periods")
         .order_by("id")
     )

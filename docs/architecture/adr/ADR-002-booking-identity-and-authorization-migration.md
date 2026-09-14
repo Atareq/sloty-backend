@@ -216,7 +216,7 @@ To eliminate operational risk, Booking migration is strictly decoupled into thre
                                │
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ Phase B — Authorization Spine Migration                     │
+│ Phase B — Authorization Spine Migration (Complete)          │
 ├─────────────────────────────────────────────────────────────┤
 │ • Declare authorization_config on Booking & BookingAttempt. │
 │ • Reconcile matrix.py (add cancellation_preview, reconcile  │
@@ -292,7 +292,7 @@ club_player (Nullable FK -> players.ClubPlayer, on_delete=SET_NULL)
 ### What did not change
 
 - Decision 2 (Player Identity Resolution & Offline Safety) — unchanged. The resolution flow still runs `find_or_create_player_profile()` before `get_or_create_club_player()`; the frontend still never sends `player_profile_id` / `club_player_id`.
-- Decisions 3–8 (Booking/BookingAttempt security boundary, authorization migration pattern, separation of responsibilities, phasing) — unchanged and still apply to the future Phase B/C work.
+- Decisions 3–8 (Booking/BookingAttempt security boundary, authorization migration pattern, separation of responsibilities, phasing) — unchanged. Phase B is now implemented; Phase C (legacy helper removal) remains blocked on parts of Clubs.
 - `customer_name` / `customer_phone` — remain permanent immutable snapshots exactly as decided in Decision 1, now with a documented usage audit (audit trail, dashboard calendar, transaction receipts, search) confirming the decision against actual call sites rather than assumption.
 
 ---
@@ -360,3 +360,20 @@ Addendum §6 (`deleted_at`, `supersede_club_player()`, unique-active-where-not-d
 ### What this supersedes
 
 Sprint 3 addendum's "consumers are not migrated" line. Runtime operational reads now go through ClubPlayer.
+
+---
+
+## 8. Addendum — Phase B Authorization Spine Migration (2026-09-14)
+
+**Status:** Applied during Booking Authorization Spine Migration. Scope: Booking/BookingAttempt authorization only. Identity, snapshots, and URLs are unchanged.
+
+### Decision
+
+- `Booking` and `BookingAttempt` declare Spine v2 `authorization_config` with `default_scope="court"`.
+- `BookingViewSet` and `BookingAttemptViewSet` compose `SlotyScopedResourceMixin` + `SlotyBasePermission`.
+- Booking security boundary is Club + Court and is **not** creator-scoped.
+- BookingAttempt keeps Staff `attempted_by=request.user` narrowing in `filter_scoped_queryset()`. Dismiss remains attempter-only for every role via `check_object_permission`.
+- Matrix gained `cancellation_preview` and `partial_update` for Owner/Manager/Staff so existing PATCH and preview behavior is preserved.
+- Lifecycle actions load the booking through `self.get_object()` on the secured queryset. Out-of-scope bookings return HTTP 404 instead of HTTP 403 (existence-leak fix). Create/slots/reschedule **target court** denials remain HTTP 403.
+- `apps/bookings/authorization.py` was not created. Legacy `ClubAccessContext` remains for parts of Clubs.
+- Phase C (delete booking helpers from the legacy layer) is **not** done.

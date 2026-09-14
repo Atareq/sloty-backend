@@ -8,6 +8,7 @@ from rest_framework.exceptions import PermissionDenied
 from apps.accounts.models import User
 from apps.bookings.models import Booking
 from apps.courts.models import Court
+from apps.dashboard.authorization import can_access_court
 from apps.transactions.models import Transaction
 
 
@@ -66,10 +67,10 @@ def month_start():
 
 class AccessScopedCourtMixin:
     def validate_court_access(self, court):
-        access = self.context["club_access"]
+        access = self.context.get("access_context") or self.context.get("club_access")
         if court is None:
             return None
-        if not access.can_access_court(court):
+        if not can_access_court(access, court):
             raise PermissionDenied("You cannot access this court.")
         return court
 

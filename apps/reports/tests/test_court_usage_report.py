@@ -17,7 +17,7 @@ from apps.transactions.models import Transaction
 
 
 @override_settings(ROOT_URLCONF="config.urls")
-class CourtUsageReportTests(APITestCase):
+class CourtUsageReportAPITestCase(APITestCase):
     password = "test-pass-123"
 
     def setUp(self):
@@ -217,6 +217,8 @@ class CourtUsageReportTests(APITestCase):
     def field_error_code(self, response, field):
         return response.data["field_errors"][field][0]["code"]
 
+
+class CourtUsageReportTests(CourtUsageReportAPITestCase):
     def test_permission_roles(self):
         response = self.client.get(self.url(), self.params())
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)

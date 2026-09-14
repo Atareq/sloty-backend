@@ -1,23 +1,22 @@
 """
-Settlement domain authorization and scope resolution.
-Settlement domain authorization and boundary scope guards.
+Settlement domain authorization the Spine cannot express.
 
 ARCHITECTURAL INVARIANTS:
-1. Authorization determines whether a caller (represented by RequestAccessContext)
-   is allowed to access or mutate a custody scope (Club + Collector).
-2. Authorization happens BEFORE financial processing. Financial functions
-   (get_unsettled_transactions_queryset, build_custody, settle_custody) receive
-   already-authorized domain entities and do not inspect roles, permissions, or context.
-   is allowed to access or mutate a custody scope (Club + optional Collector).
-2. Authorization happens BEFORE pure financial processing. Financial functions
-   (get_unsettled_transactions_queryset, build_custody, settle_custody,
-   mark_settlement_settled) receive already-authorized domain entities and do
-   NOT inspect roles, permissions, court assignments, or RequestAccessContext.
-3. Financial custody is strictly scoped by Club + optional Collector.
-   Court is NEVER part of financial custody.
-4. Calculations (transaction counts, gross amounts, refunds, net amounts, custody,
-   and collector totals) belong to the financial layer (services.py).
-   This module answers ONLY: "Is this actor allowed to request this scope?"
+1. Ordinary Club WHERE belongs to Authorization Spine v2
+   (Settlement.authorization_config, default_scope="club").
+2. Collector visibility is role- and flag-dependent, so it is not a Spine
+   ResourceScope. apply_collector_scope() narrows an already club-scoped
+   queryset: actors without can_manage_settlements() see only
+   collected_by=request.user.
+3. Financial custody is Club + optional Collector. Court is NEVER part of
+   financial custody and must not be applied as a Spine court scope.
+4. Self-approval bans, manager_can_settle_transactions, and manager-cannot-
+   settle-Owner remain domain business rules evaluated before pure financial
+   services.
+5. Financial functions (get_unsettled_transactions_queryset, build_custody,
+   settle_custody, mark_settlement_settled) receive already-authorized
+   entities and do not inspect roles, permissions, court assignments, or
+   RequestAccessContext.
 """
 
 from typing import Collection, Dict, Optional, Set
@@ -83,6 +82,19 @@ def can_manage_settlements(context: RequestAccessContext) -> bool:
             getattr(context.membership, "manager_can_settle_transactions", False)
         )
     return False
+
+
+def apply_collector_scope(context: RequestAccessContext, queryset):
+    """
+    Narrow an already club-scoped Settlement queryset to the actor's custody.
+
+    Platform Admin, Owner, and Managers with manager_can_settle_transactions
+    see every collector in the club. Staff and Managers without the flag see
+    only rows they collected. This is not court assignment.
+    """
+    if not can_manage_settlements(context):
+        return queryset.filter(collected_by=context.user)
+    return queryset
 
 
 def can_access_settlement(

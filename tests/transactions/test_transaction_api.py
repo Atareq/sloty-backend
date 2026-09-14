@@ -2082,8 +2082,9 @@ class TransactionCentralizedAccessTests(TransactionAPITestCase):
 
         self.assertFalse(permissions_path.exists())
 
-    def test_transaction_code_uses_centralized_access_and_no_removed_assignment(self):
+    def test_transaction_code_uses_spine_v2_and_no_removed_assignment(self):
         repo_root = Path(__file__).resolve().parents[2]
+        view_source = (repo_root / "apps" / "transactions" / "views.py").read_text()
         transaction_files = [
             repo_root / "apps" / "transactions" / "filters.py",
             repo_root / "apps" / "transactions" / "services.py",
@@ -2092,12 +2093,14 @@ class TransactionCentralizedAccessTests(TransactionAPITestCase):
         ]
         combined = "\n".join(path.read_text() for path in transaction_files)
 
+        self.assertIn("SlotyScopedResourceMixin", view_source)
+        self.assertIn("SlotyBasePermission", view_source)
         self.assertIn("can_create_transaction_for_booking", combined)
-        self.assertIn("scoped_transactions_queryset", combined)
+        self.assertNotIn("scoped_transactions_queryset", combined)
+        self.assertNotIn("ClubScopedViewMixin", view_source)
         self.assertNotIn("ClubMembership", combined)
         self.assertNotIn("ClubAccessContext", combined)
         self.assertNotIn("CourtStaffAssignment", combined)
-        self.assertNotIn(".role", combined)
 
     def test_transaction_viewset_does_not_manually_parse_filter_query_params(self):
         repo_root = Path(__file__).resolve().parents[2]

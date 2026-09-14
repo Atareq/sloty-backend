@@ -7,9 +7,14 @@ from rest_framework.mixins import CreateModelMixin, ListModelMixin, RetrieveMode
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
-from apps.common.authorization.mixins import ClubScopedViewMixin
+from apps.common.authorization.mixins import SlotyScopedResourceMixin
 from apps.common.authorization.permissions import SlotyBasePermission
-from apps.settlements.authorization import can_access_settlement, can_manage_settlements
+from apps.common.authorization.scopes import ResourceScope
+from apps.settlements.authorization import (
+    apply_collector_scope,
+    can_access_settlement,
+    can_manage_settlements,
+)
 from apps.settlements.filters import SettlementFilter
 from apps.settlements.models import Settlement
 from apps.settlements.serializers import (
@@ -34,12 +39,21 @@ from apps.settlements.services import mark_settlement_settled
     retrieve=extend_schema(tags=["Settlements"], responses=SettlementDetailSerializer),
 )
 class SettlementViewSet(
-    ClubScopedViewMixin,
+    SlotyScopedResourceMixin,
     ListModelMixin,
     CreateModelMixin,
     RetrieveModelMixin,
     GenericViewSet,
 ):
+    """
+    Authorization: club via Settlement.authorization_config (never court).
+    Collector narrowing: actors without can_manage_settlements see only
+    collected_by=request.user. Preview/create/summary keep domain authority
+    checks in serializers. mark_settled additionally requires management.
+    """
+
+    authorization_model = Settlement
+    authorization_scope = ResourceScope.CLUB
     permission_classes = (SlotyBasePermission,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = SettlementFilter
@@ -50,30 +64,27 @@ class SettlementViewSet(
             raise MethodNotAllowed(request.method)
         super().initial(request, *args, **kwargs)
 
-    def check_object_permission(self, request, obj) -> bool:
-        return can_access_settlement(self.access_context, obj)
-
-    def get_queryset(self):
-        if getattr(self, "swagger_fake_view", False):
-            return Settlement.objects.none()
-        context = self.access_context
-        queryset = Settlement.objects.filter(club=context.club)
-        if not can_manage_settlements(context):
-            queryset = queryset.filter(collected_by=context.user)
-        queryset = queryset.select_related(
-            "club", "court", "collected_by", "created_by", "settled_by"
-        ).order_by("-created", "-id")
+    def get_authorization_prefetch_related(self):
         if self.action == "retrieve":
-            queryset = queryset.prefetch_related(
+            return (
                 "lines__transaction__booking",
                 "lines__transaction__booking__club_player__player_profile",
                 "lines__transaction__court",
             )
-        return queryset
+        return ()
+
+    def filter_scoped_queryset(self, queryset):
+        queryset = apply_collector_scope(self.get_access_context(), queryset)
+        return queryset.order_by("-created", "-id")
+
+    def check_object_permission(self, request, obj) -> bool:
+        return can_access_settlement(self.access_context, obj)
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
-        context["access_context"] = self.access_context
+        if not getattr(self, "swagger_fake_view", False):
+            context["access_context"] = self.access_context
+            context["club_access"] = self.access_context
         return context
 
     def get_serializer_class(self):

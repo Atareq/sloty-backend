@@ -1463,14 +1463,16 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
             (repo_root / "apps" / "courts" / "models.py").read_text(),
         )
         self.assertFalse((repo_root / "apps" / "dashboard" / "permissions.py").exists())
+        view_source = (repo_root / "apps" / "dashboard" / "views.py").read_text()
         self.assertNotIn(
             "ClubMembership",
-            (repo_root / "apps" / "dashboard" / "views.py").read_text(),
+            view_source,
         )
-        self.assertIn(
-            "get_access_context",
-            (repo_root / "apps" / "dashboard" / "views.py").read_text(),
-        )
+        self.assertIn("get_access_context", view_source)
+        self.assertIn("SlotyBasePermission", view_source)
+        self.assertIn("ClubScopedViewMixin", view_source)
+        self.assertNotIn("ClubScopedAccessMixin", view_source)
+        self.assertNotIn("CanViewClubDashboard", view_source)
         self.assertFalse(hasattr(DashboardOverviewAPIView, "post"))
         self.assertFalse(hasattr(DashboardSummaryAPIView, "post"))
         self.assertFalse(hasattr(DashboardRevenueAPIView, "post"))

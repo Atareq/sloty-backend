@@ -75,6 +75,27 @@ class Transaction(models.Model):
     created = models.DateTimeField(auto_now_add=True, db_index=True)
     modified = models.DateTimeField(auto_now=True)
 
+    # Authorization Spine v2 resource-query contract
+    # (apps/common/authorization/contracts.py). Operational boundary is
+    # club+court. Staff created_by visibility is applied in
+    # TransactionViewSet.filter_scoped_queryset() — it is not a Spine scope.
+    authorization_config = {
+        "scopes": {
+            "club": {"path": "club"},
+            "court": {"path": "court"},
+        },
+        "default_scope": "court",
+        "select_related": (
+            "club",
+            "court",
+            "booking",
+            "booking__club_player__player_profile",
+            "created_by",
+            "cancelled_by",
+        ),
+        "prefetch_related": (),
+    }
+
     class Meta:
         constraints = [
             models.CheckConstraint(
@@ -198,6 +219,26 @@ class TransactionAttempt(models.Model):
     )
     created = models.DateTimeField(auto_now_add=True, db_index=True)
     modified = models.DateTimeField(auto_now=True)
+
+    # Authorization Spine v2 resource-query contract. Boundary is club+court.
+    # Staff attempted_by restriction is applied in
+    # TransactionAttemptViewSet.filter_scoped_queryset() — it is not a Spine scope.
+    authorization_config = {
+        "scopes": {
+            "club": {"path": "club"},
+            "court": {"path": "court"},
+        },
+        "default_scope": "court",
+        "select_related": (
+            "club",
+            "court",
+            "booking",
+            "booking__club_player__player_profile",
+            "attempted_by",
+            "transaction",
+        ),
+        "prefetch_related": (),
+    }
 
     class Meta:
         constraints = [

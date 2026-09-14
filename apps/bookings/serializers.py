@@ -22,6 +22,8 @@ from apps.bookings.services import (
     create_booking,
     validate_booking_duration,
 )
+from apps.common.authorization.querysets import scoped_queryset
+from apps.common.authorization.scopes import ResourceScope
 from apps.common.exceptions import SlotyAPIException
 from apps.common.serializers import TimezoneAwareDateTimeField
 from apps.courts.models import Court
@@ -31,6 +33,20 @@ from apps.transactions.services import get_booking_paid_amount
 
 def format_money(value):
     return f"{Decimal(value or Decimal('0.00')):.2f}"
+
+
+def _serializer_access(serializer):
+    return serializer.context.get("access_context") or serializer.context["club_access"]
+
+
+def _court_is_in_authorized_scope(access, court):
+    if access is None or court is None:
+        return False
+    return (
+        scoped_queryset(access, Court, scope=ResourceScope.COURT)
+        .filter(pk=court.pk)
+        .exists()
+    )
 
 
 def get_paid_amount_for_booking(booking):
@@ -270,7 +286,7 @@ class BookingCreateSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         request = self.context.get("request")
         user = getattr(request, "user", None)
-        access = self.context["club_access"]
+        access = _serializer_access(self)
         court = attrs["court"]
         source = attrs.get("source", Booking.Source.MANUAL)
         is_recurring = attrs.get("is_recurring", False)
@@ -287,7 +303,7 @@ class BookingCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"court": "Cannot create a booking for an inactive club."}
             )
-        if not access.can_create_booking_for_court(court):
+        if not _court_is_in_authorized_scope(access, court):
             raise PermissionDenied("You cannot create bookings for this court.")
         if source == Booking.Source.ADMIN_CORRECTION and not (
             user and user.is_platform_super_admin()
@@ -472,6 +488,17 @@ class BookingRescheduleSerializer(serializers.Serializer):
         trim_whitespace=True,
     )
 
+    def validate(self, attrs):
+        access = _serializer_access(self)
+        court = attrs["court"]
+        if court.club_id != access.club.id:
+            raise serializers.ValidationError(
+                {"court": "Court must belong to the selected club."}
+            )
+        if not _court_is_in_authorized_scope(access, court):
+            raise PermissionDenied("You cannot reschedule bookings to this court.")
+        return attrs
+
 
 class BookingCompleteSerializer(serializers.Serializer):
     confirm_collect_remaining_cash = serializers.BooleanField(
@@ -528,7 +555,7 @@ class BookingSlotQuerySerializer(serializers.Serializer):
     date_to = serializers.DateField(required=False)
 
     def validate(self, attrs):
-        access = self.context["club_access"]
+        access = _serializer_access(self)
         court = attrs["court"]
         date = attrs.get("date")
         date_from = attrs.get("date_from")
@@ -559,7 +586,7 @@ class BookingSlotQuerySerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"court": _("Court must belong to the selected club.")}
             )
-        if not access.can_view_court_availability(court):
+        if not _court_is_in_authorized_scope(access, court):
             raise PermissionDenied("You cannot view availability for this court.")
 
         attrs["date_from"] = date_from

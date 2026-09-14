@@ -108,7 +108,7 @@ Shared helper: [`apps/bookings/identity.py`](file:///home/tarek/Desktop/sloty/sl
 | `BookingUpdateSerializer` PATCH | C write contract | **Kept** writing snapshot columns; GET then shows ClubPlayer |
 | Reports court-usage | neither — no customer identity in output | **Unchanged** |
 
-`customer_name`/`customer_phone` stay until a dedicated snapshot-removal sprint. Booking authorization remains Phase B.
+`customer_name`/`customer_phone` stay until a dedicated snapshot-removal sprint. Booking authorization (Phase B) uses the Authorization Spine.
 
 ### Identity Invariant: `Booking.club_id == Booking.club_player.club_id`
 A booking from Club A must never reference a Club B `ClubPlayer`. Enforced at three levels:
@@ -139,11 +139,23 @@ Booking.objects.create(club_player=..., customer_name=..., customer_phone=...)
 
 Walk-in phones still create a first current version. A later booking with the same phone uses the current version even if `customer_name` differs; name changes are `create_club_player_version()` / `POST /players/`, not booking create.
 
-`complete_booking()` recurrence copies the anchor `club_player`. Seed data uses `resolve_booking_club_player()`. `customer_name`/`customer_phone` stay as snapshot columns. Booking authorization remains Phase B.
+`complete_booking()` recurrence copies the anchor `club_player`. Seed data uses `resolve_booking_club_player()`. `customer_name`/`customer_phone` stay as snapshot columns.
 
-- **Resource Scopes (target, not yet migrated):**
-  - `Booking`: **Club + Court** (Staff: assigned courts; **not** creator-restricted).
-  - `BookingAttempt`: **Club + Court + attempted_by (for Staff)**.
+## Authorization & Scoping (Authorization Spine v2)
+
+Booking and BookingAttempt ViewSets compose `SlotyScopedResourceMixin` + `SlotyBasePermission`. Models declare `authorization_config` (`default_scope="court"`). The secured queryset is built before filters, pagination, and serializers.
+
+```text
+Request → Authentication → resolve_club_scope → Spine scoped QuerySet (club + court)
+  → django-filter → ViewSet / Service (state machine, pricing, overlap)
+```
+
+- **Booking boundary:** Club + Court. Not `created_by`. Staff on Court A see all bookings on Court A.
+- **Out-of-scope rows:** omitted from the queryset → HTTP 404 on retrieve and lifecycle actions (no existence leak via 403).
+- **Create / slots / reschedule target court:** the court in the request body must be inside the same Spine court queryset; denial remains HTTP 403.
+- **BookingAttempt:** Club + Court, then Staff narrowed to `attempted_by=request.user`. Owner/Manager/Admin can list/retrieve club+court attempts but may dismiss only their own (`check_object_permission`).
+- Do **not** create `bookings/authorization.py` to re-express court assignment. `actor_requires_staff_cancel_reason()` remains a service business rule (Staff cancel requires a reason).
+- Legacy `ClubAccessContext` / `ClubScopedAccessMixin` / `CanManageClubBookings` remain in the repository because parts of Clubs are unmigrated. Booking ViewSets no longer use them.
 
 ## Service Layer
 
@@ -165,18 +177,10 @@ Walk-in phones still create a first current version. A later booking with the sa
   - `POST .../bookings/{id}/reschedule/`
   - `POST .../bookings/{id}/expire/`
   - `POST .../bookings/{id}/end-recurrence/`
+  - `POST .../bookings/{id}/cancellation-preview/`
   - `GET .../bookings/{id}/recurrence-next/`
 - `/api/v1/clubs/{club_slug}/bookings/slots/`: Schedule slot availability generator.
 - `/api/v1/clubs/{club_slug}/booking-attempts/`: Traceability list/detail and dismissal for rejected attempts.
-
-## Authorization & Scoping (Current-State)
-
-> [!NOTE]
-> Current-state/legacy authorization. Target: Authorization Spine v2 with `authorization_config` `default_scope="court"` (root AGENTS.md §5). Do **not** create `bookings/authorization.py` solely to re-express court assignment — the spine owns that. Domain `authorization.py` is allowed only for true business invariants the matrix cannot express.
-
-- Scoped via `ClubAccessContext`.
-- Staff users can list, create, and manage bookings and attempts only for their assigned court.
-- Staff can dismiss only their own unresolved rejected booking attempts.
 
 ## Cross-App Dependencies
 
@@ -187,9 +191,11 @@ Walk-in phones still create a first current version. A later booking with the sa
 
 ## Testing
 
+- Run with the project-standard command: `pytest -n 4 --reuse-db tests/bookings/`. Retry a failed node sequentially only if the parallel run reports a failure (see root `AGENTS.md` §8).
 - Test suite: [`tests/bookings/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/bookings/).
 - Key test files:
   - `test_booking_api.py`: Creation, validation, lifecycle endpoints, recurrence.
+  - `test_booking_authorization.py`: Spine v2 contract, club/court isolation, 404 queryset boundary, creator independence, BookingAttempt `attempted_by`.
   - `test_booking_attempt_model.py`: Idempotency, attempt persistence, and dismissal.
   - `test_egypt_timezone_boundaries.py`: Local Cairo timezone and midnight handling.
   - `test_booking_player_identity.py`: identity chain, current-version default, historical `club_player_id`, history preservation, recurrence copy, Sprint 4 operational ClubPlayer reads + snapshot fallback.

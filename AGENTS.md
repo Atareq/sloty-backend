@@ -87,7 +87,7 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 | Authorization | Spine owns WHERE/WHO · domain `authorization.py` owns special business rules only |
 | Resource config | Implemented `authorization_config` contract only — no second metadata format |
 | ViewSets | Compose optional `SlotyScopedResourceMixin` with DRF; do not replace `ModelViewSet` |
-| Migration | Courts ✅ · Transactions ✅ · Settlements ✅ · Identity Foundation ✅ → Bookings → Dashboard → Reports → Audit → remove legacy |
+| Migration | Courts ✅ · Transactions (auth Spine v2) ✅ · Settlements (auth Spine v2) ✅ · Identity Foundation ✅ · Bookings (auth Spine v2) ✅ · Dashboard (auth Spine) ✅ · Audit (auth Spine v2) ✅ · Reports (auth Spine) ✅ → Clubs leftover / remove legacy |
 
 ### Transitional runtime notes
 
@@ -133,23 +133,24 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
   - Test viewsets for authorization, scoping, validation errors, and response contracts.
   - Run targeted tests before committing changes.
 
-### Default test execution
+### Default test execution (required for AI coding agents)
 
-Prefer parallel execution with database reuse for normal verification:
+**Always** run tests with parallel workers and database reuse. This is the project-standard command, not an optimization to probe first:
 
 ```bash
 pytest -n 4 --reuse-db
 ```
 
-Do **not** default to sequential `pytest`. This repository supports parallel workers (`pytest-xdist`) and `--reuse-db` is the validated database strategy. Together they significantly reduce verification time.
+Do **not** default to sequential `pytest`. Do **not** spend a step checking whether `pytest-xdist` exists before using `-n 4`. The combination is validated and safe for this repository.
 
-Domain examples:
+Scoped examples:
 
 ```bash
 pytest -n 4 --reuse-db tests/players/
 pytest -n 4 --reuse-db tests/bookings/
 pytest -n 4 --reuse-db tests/transactions/
 pytest -n 4 --reuse-db tests/settlements/
+pytest -n 4 --reuse-db tests/authorization/
 ```
 
 Combined regression:
@@ -158,7 +159,13 @@ Combined regression:
 pytest -n 4 --reuse-db tests/players/ tests/bookings/ tests/transactions/ tests/settlements/
 ```
 
-Before a large suite, confirm `pytest-xdist` is available (`pytest -n 4 --collect-only` or `python -c "import xdist"`) and that `--reuse-db` is accepted (`pytest --help` lists it via `pytest-django`). Use the optimized command by default. Fall back to sequential `pytest` only when a specific test cannot safely run in parallel.
+If a parallel run reports failures, **retry only the failed node** sequentially to confirm it is a real regression (not a worker/collection artifact):
+
+```bash
+pytest --reuse-db path/to/test_file.py::TestClass::test_name
+```
+
+Fall back to a full sequential `pytest --reuse-db …` suite only after isolated retries, or when a specific test is proven unsafe under xdist.
 
 ### Failure classification (parallel runs)
 

@@ -5,8 +5,8 @@ from decimal import Decimal
 from django.utils import timezone
 from django.utils.translation import pgettext
 
-from apps.bookings.models import Booking
 from apps.courts.pricing import datetime_for_local_date, working_hour_bounds
+from apps.reports.authorization import scoped_report_bookings, scoped_report_courts
 from apps.reports.constants import (
     DEMAND_BUCKET_MINUTES,
     EVENING_START_TIME,
@@ -154,7 +154,7 @@ def add_booking_once(metrics, booking, *, include_financial=True):
 
 
 def get_court_usage_report(*, access, query):
-    selected_courts = access.scoped_report_courts_queryset().order_by("id")
+    selected_courts = scoped_report_courts(access).order_by("id")
     if query.get("court") is not None:
         selected_courts = selected_courts.filter(pk=query["court"].pk)
     selected_courts = list(
@@ -203,28 +203,15 @@ def get_court_usage_report(*, access, query):
                 ] += available
                 bucket_start = bucket_end
 
-    queryset = (
-        annotate_booking_paid_amount(
-            Booking.objects.filter(
-                court_id__in=court_ids,
-                status__in=query["included_statuses"],
-                start_time__lt=query["range_end"],
-                end_time__gt=query["range_start"],
-            ).select_related("court", "created_by")
+    queryset = annotate_booking_paid_amount(
+        scoped_report_bookings(access)
+        .filter(
+            court_id__in=court_ids,
+            status__in=query["included_statuses"],
+            start_time__lt=query["range_end"],
+            end_time__gt=query["range_start"],
         )
-        .only(
-            "id",
-            "court_id",
-            "court__name",
-            "start_time",
-            "end_time",
-            "status",
-            "total_price",
-            "created_by_id",
-            "created_by__first_name",
-            "created_by__last_name",
-            "created_by__username",
-        )
+        .select_related("court", "created_by")
         .order_by("start_time", "id")
     )
     if query.get("staff") is not None:

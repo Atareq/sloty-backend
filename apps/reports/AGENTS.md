@@ -7,39 +7,63 @@
 ## Domain Invariants
 
 - **Maximum Date Range**:
-  - Report date ranges are inclusive and capped at 31 calendar days (`REPORT_MAX_RANGE_DAYS = 31` in [`apps/reports/constants.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/reports/constants.py)).
+    - Report date ranges are inclusive and capped at 31 calendar days (`REPORT_MAX_RANGE_DAYS = 31` in [`apps/reports/constants.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/reports/constants.py)).
 - **Usage Status Inclusion**:
-  - Default usage statuses: `CONFIRMED`, `COMPLETED`, `NO_SHOW`.
-  - `HOLD` is included only when explicitly requested.
-  - `CANCELLED` and `EXPIRED` bookings are strictly excluded from usage analysis.
+    - Default usage statuses: `CONFIRMED`, `COMPLETED`, `NO_SHOW`.
+    - `HOLD` is included only when explicitly requested.
+    - `CANCELLED` and `EXPIRED` bookings are strictly excluded from usage analysis.
 - **Occupancy Clipping**:
-  - Bookings overlapping report period boundaries have their occupied minutes clipped to the selected window (e.g. daytime vs evening).
+    - Bookings overlapping report period boundaries have their occupied minutes clipped to the selected window (e.g. daytime vs evening).
 - **Financial Authority**:
-  - Financial values use historical `Booking.total_price` snapshots, **not** current court pricing periods.
-  - Financial totals sum non-cancelled attached transactions.
-  - Booking revenue is attributed entirely to the booking's local start date, even if occupancy spans past midnight.
+    - Financial values use historical `Booking.total_price` snapshots, **not** current court pricing periods.
+    - Financial totals sum non-cancelled attached transactions.
+    - Booking revenue is attributed entirely to the booking's local start date, even if occupancy spans past midnight.
 - **Customer identity**: Court Usage Report does **not** display `customer_name` / `customer_phone` or ClubPlayer. It is occupancy and financial aggregation only. Tests create bookings with snapshot fields; that is fixture data, not a report identity contract.
 - **Demand Analysis Buckets**:
-  - Demand is analyzed in 60-minute clock buckets (`DEMAND_BUCKET_MINUTES = 60`). Low-demand results must include zero-demand generated slots.
+    - Demand is analyzed in 60-minute clock buckets (`DEMAND_BUCKET_MINUTES = 60`). Low-demand results must include zero-demand generated slots.
 
 ## Service Layer
 
 - [`apps/reports/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/reports/services.py):
-  - `build_court_usage_report()`: Coordinates date window validation, booking query scoping, occupancy clipping, demand bucketing, and financial aggregation.
+    - `get_court_usage_report()`: Coordinates date window validation, occupancy clipping, demand bucketing, and financial aggregation on **already authorized** court and booking querysets.
 
 ## API Boundaries & Key Invariants
 
 - `/api/v1/clubs/{club_slug}/reports/court-usage/`:
-  - Query parameters: `date_from`, `date_to`, `court`, `period` (`all_day`, `daytime`, `evening`, `custom`), `hour_from`, `hour_to`, `staff`, `status`.
+    - Query parameters: `date_from`, `date_to`, `court`, `period` (`all_day`, `daytime`, `evening`, `custom`), `hour_from`, `hour_to`, `staff`, `status`.
+- No Excel / CSV / PDF export path exists. The JSON response is the only output.
 
-## Authorization & Scoping (Current-State)
+## Authorization & Scoping (Authorization Spine)
 
-> [!NOTE]
-> Current-state/legacy authorization rules. Do not treat as target architecture.
+Reports is a **read model**. There is no Report table, so the Court Usage endpoint composes `ClubScopedViewMixin` + `SlotyBasePermission` (`permission_view_name="CourtUsageReportViewSet"`, `action="list"`). It does **not** use `SlotyScopedResourceMixin`.
 
-- Scoped via `ClubAccessContext` and [`CanViewClubReports`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/permissions.py).
-- Accessible only to Platform Admins, Owners, and Managers.
-- Staff users are denied access (403 Forbidden).
+```text
+Request
+    ↓
+Authentication
+    ↓
+RequestAccessContext (club from URL)
+    ↓
+SlotyBasePermission (ROLE_PERMISSIONS["CourtUsageReportViewSet"] list)
+    ↓
+Authorized source querysets (Court / Booking authorization_config, COURT)
+    ↓
+Report filters (date, period, optional court, optional created_by staff, status)
+    ↓
+Aggregation / JSON response
+```
+
+### Report-by-report security boundary
+
+| Report | Data sources | Scope | Roles | Export |
+| :--- | :--- | :--- | :--- | :--- |
+| Court Usage | Courts, Bookings, paid amounts annotated from those bookings' transactions | Club + Court (Admin/Owner/Manager see all club courts). Not creator-scoped. Not collector-scoped. No Settlement/custody rows. | Platform Admin / Owner / Manager. Staff **403**. | None (JSON only, same querysets) |
+
+- Optional `court=` may only **narrow** the authorized court queryset. Another club's court → HTTP 403.
+- Optional `staff=` is a `Booking.created_by` report filter. The named user must have active access in this club (`REPORT_STAFF_NOT_IN_CLUB`); it is **not** Settlement collector isolation.
+- Do not apply Transaction Staff `created_by` narrowing or Settlement collector narrowing to report totals. Report viewers are financial roles.
+- [`apps/reports/authorization.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/reports/authorization.py) exists only for: Spine source querysets, court-filter 403, and the staff-membership filter rule.
+- Legacy `ClubAccessContext.scoped_report_courts_queryset()` / `CanViewClubReports` remain in `apps/clubs/` for unmigrated callers. Report views no longer use them (no implicit `last_sync_at` updates).
 
 ## Cross-App Dependencies
 
@@ -47,5 +71,8 @@
 
 ## Testing
 
+- Run with the project-standard command: `pytest -n 4 --reuse-db apps/reports/tests/`. Retry a failed node sequentially only if the parallel run reports a failure (see root `AGENTS.md` §8).
 - Test suite: [`apps/reports/tests/`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/reports/tests/).
-- Key test file: `test_court_usage_report.py` (clipping, multi-day ranges, demand buckets, role permissions).
+- Key test files:
+    - `test_court_usage_report.py` (clipping, multi-day ranges, demand buckets, role permissions, query bounds).
+    - `test_report_authorization.py` (Spine composition, club/court/staff isolation, aggregation isolation).

@@ -488,9 +488,9 @@ def can_record_transaction_attempt(*, access, booking):
         return False
     if hasattr(access, "can_access_court"):
         return access.can_access_court(booking.court)
-    from apps.transactions.authorization import can_access_court
+    from apps.transactions.authorization import can_create_transaction_for_booking
 
-    return can_access_court(access, booking.court)
+    return can_create_transaction_for_booking(access, booking)
 
 
 def record_rejected_transaction_attempt(

@@ -64,6 +64,27 @@ class Settlement(models.Model):
     created = models.DateTimeField(auto_now_add=True)
     modified = models.DateTimeField(auto_now=True)
 
+    # Authorization Spine v2 resource-query contract
+    # (apps/common/authorization/contracts.py). Financial boundary is club
+    # only — never court. Collector narrowing is applied in
+    # SettlementViewSet.filter_scoped_queryset(); it is not a Spine scope.
+    # Settlement.court is an optional display/filter field, not a security
+    # boundary.
+    authorization_config = {
+        "scopes": {
+            "club": {"path": "club"},
+        },
+        "default_scope": "club",
+        "select_related": (
+            "club",
+            "court",
+            "collected_by",
+            "created_by",
+            "settled_by",
+        ),
+        "prefetch_related": (),
+    }
+
     class Meta:
         constraints = [
             models.CheckConstraint(

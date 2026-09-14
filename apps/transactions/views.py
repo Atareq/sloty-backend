@@ -7,15 +7,13 @@ from rest_framework.mixins import CreateModelMixin, ListModelMixin, RetrieveMode
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
-from apps.common.authorization.mixins import ClubScopedViewMixin
+from apps.common.authorization.mixins import SlotyScopedResourceMixin
 from apps.common.authorization.permissions import SlotyBasePermission
+from apps.common.authorization.scopes import ResourceScope
 from apps.transactions.authorization import (
-    can_access_transaction,
-    can_access_transaction_attempt,
+    apply_staff_collector_scope,
     can_cancel_transaction,
     can_dismiss_transaction_attempt,
-    scoped_transaction_attempts_queryset,
-    scoped_transactions_queryset,
 )
 from apps.transactions.filters import TransactionAttemptFilter, TransactionFilter
 from apps.transactions.models import Transaction, TransactionAttempt
@@ -42,11 +40,19 @@ from apps.transactions.services import cancel_transaction, dismiss_transaction_a
     ),
 )
 class TransactionAttemptViewSet(
-    ClubScopedViewMixin,
+    SlotyScopedResourceMixin,
     ListModelMixin,
     RetrieveModelMixin,
     GenericViewSet,
 ):
+    """
+    Authorization: club+court via TransactionAttempt.authorization_config.
+    Staff are additionally restricted to attempted_by=request.user.
+    Dismiss remains attempter-only for every role.
+    """
+
+    authorization_model = TransactionAttempt
+    authorization_scope = ResourceScope.COURT
     permission_classes = (SlotyBasePermission,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = TransactionAttemptFilter
@@ -57,26 +63,18 @@ class TransactionAttemptViewSet(
             raise MethodNotAllowed(request.method)
         super().initial(request, *args, **kwargs)
 
+    def filter_scoped_queryset(self, queryset):
+        queryset = apply_staff_collector_scope(
+            self.get_access_context(),
+            queryset,
+            actor_field="attempted_by",
+        )
+        return queryset.order_by("-created", "-id")
+
     def check_object_permission(self, request, obj) -> bool:
         if self.action == "dismiss":
             return can_dismiss_transaction_attempt(self.access_context, obj)
-        return can_access_transaction_attempt(self.access_context, obj)
-
-    def get_queryset(self):
-        if getattr(self, "swagger_fake_view", False):
-            return TransactionAttempt.objects.none()
-        return (
-            scoped_transaction_attempts_queryset(self.access_context)
-            .select_related(
-                "booking",
-                "booking__club_player__player_profile",
-                "club",
-                "court",
-                "attempted_by",
-                "transaction",
-            )
-            .order_by("-created", "-id")
-        )
+        return True
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -134,12 +132,20 @@ class TransactionAttemptViewSet(
     ),
 )
 class TransactionViewSet(
-    ClubScopedViewMixin,
+    SlotyScopedResourceMixin,
     ListModelMixin,
     CreateModelMixin,
     RetrieveModelMixin,
     GenericViewSet,
 ):
+    """
+    Authorization: club+court via Transaction.authorization_config.
+    Staff are additionally restricted to created_by=request.user.
+    Cancel: Platform Admin any in-scope row; others only their own collections.
+    """
+
+    authorization_model = Transaction
+    authorization_scope = ResourceScope.COURT
     permission_classes = (SlotyBasePermission,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = TransactionFilter
@@ -150,26 +156,18 @@ class TransactionViewSet(
             raise MethodNotAllowed(request.method)
         super().initial(request, *args, **kwargs)
 
+    def filter_scoped_queryset(self, queryset):
+        queryset = apply_staff_collector_scope(
+            self.get_access_context(),
+            queryset,
+            actor_field="created_by",
+        )
+        return queryset.order_by("-created", "-id")
+
     def check_object_permission(self, request, obj) -> bool:
         if self.action == "cancel":
             return can_cancel_transaction(self.access_context, obj)
-        return can_access_transaction(self.access_context, obj)
-
-    def get_queryset(self):
-        if getattr(self, "swagger_fake_view", False):
-            return Transaction.objects.none()
-        return (
-            scoped_transactions_queryset(self.access_context)
-            .select_related(
-                "booking",
-                "booking__club_player__player_profile",
-                "club",
-                "court",
-                "created_by",
-                "cancelled_by",
-            )
-            .order_by("-created", "-id")
-        )
+        return True
 
     def get_serializer_class(self):
         if self.action == "list":

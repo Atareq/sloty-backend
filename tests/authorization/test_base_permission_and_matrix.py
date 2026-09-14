@@ -117,6 +117,12 @@ class BasePermissionAndMatrixTestCase(APITestCase):
         # 2. OWNER
         self.assertTrue(is_action_allowed(Role.OWNER, "BookingViewSet", "list"))
         self.assertTrue(is_action_allowed(Role.OWNER, "BookingViewSet", "cancel"))
+        self.assertTrue(
+            is_action_allowed(Role.OWNER, "BookingViewSet", "partial_update")
+        )
+        self.assertTrue(
+            is_action_allowed(Role.OWNER, "BookingViewSet", "cancellation_preview")
+        )
         self.assertTrue(is_action_allowed(Role.OWNER, "CourtViewSet", "create"))
         self.assertTrue(
             is_action_allowed(Role.OWNER, "ClubMembershipViewSet", "create")
@@ -141,14 +147,29 @@ class BasePermissionAndMatrixTestCase(APITestCase):
         self.assertTrue(is_action_allowed(Role.STAFF, "BookingViewSet", "list"))
         self.assertTrue(is_action_allowed(Role.STAFF, "BookingViewSet", "create"))
         self.assertTrue(is_action_allowed(Role.STAFF, "BookingViewSet", "cancel"))
+        self.assertTrue(
+            is_action_allowed(Role.STAFF, "BookingViewSet", "partial_update")
+        )
+        self.assertTrue(
+            is_action_allowed(Role.STAFF, "BookingViewSet", "cancellation_preview")
+        )
         self.assertTrue(is_action_allowed(Role.STAFF, "TransactionViewSet", "create"))
+        self.assertTrue(is_action_allowed(Role.STAFF, "TransactionViewSet", "cancel"))
         self.assertTrue(is_action_allowed(Role.STAFF, "SettlementViewSet", "preview"))
+        self.assertTrue(is_action_allowed(Role.STAFF, "SettlementViewSet", "list"))
         self.assertFalse(
             is_action_allowed(Role.STAFF, "AuditLogViewSet", "list")
         )  # Staff denied audit
         self.assertFalse(
             is_action_allowed(Role.STAFF, "SettlementViewSet", "create")
         )  # Staff cannot settle
+        self.assertFalse(
+            is_action_allowed(Role.STAFF, "SettlementViewSet", "mark_settled")
+        )
+        self.assertTrue(is_action_allowed(Role.STAFF, "DashboardViewSet", "summary"))
+        self.assertTrue(is_action_allowed(Role.STAFF, "DashboardViewSet", "calendar"))
+        self.assertFalse(is_action_allowed(Role.STAFF, "DashboardViewSet", "overview"))
+        self.assertFalse(is_action_allowed(Role.STAFF, "DashboardViewSet", "revenue"))
         self.assertFalse(
             is_action_allowed(Role.STAFF, "CourtViewSet", "create")
         )  # Staff cannot create courts

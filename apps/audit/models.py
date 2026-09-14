@@ -51,6 +51,21 @@ class AuditLog(models.Model):
     metadata = models.JSONField(blank=True, default=dict)
     created = models.DateTimeField(auto_now_add=True, db_index=True)
 
+    # Authorization Spine v2 resource-query contract
+    # (apps/common/authorization/contracts.py). Audit is a club-scoped read
+    # model: every event belongs to one club. Court is an optional event
+    # attribute (nullable for membership deletes and some settlements), not
+    # a security boundary. Do not apply Booking/Transaction court scope or
+    # Settlement collector scope to AuditLog rows.
+    authorization_config = {
+        "scopes": {
+            "club": {"path": "club"},
+        },
+        "default_scope": "club",
+        "select_related": ("club", "court", "actor"),
+        "prefetch_related": (),
+    }
+
     class Meta:
         ordering = ("-created", "-id")
         indexes = [

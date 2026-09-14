@@ -1878,7 +1878,7 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             closes_at=time(23, 0),
         )
 
-        with self.assertNumQueries(6):
+        with self.assertNumQueries(8):
             response = self.get_slots()
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -1902,7 +1902,7 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
                 closes_at=time(12, 0),
             )
 
-        with self.assertNumQueries(6):
+        with self.assertNumQueries(8):
             response = self.client.get(
                 self.booking_slots_url(self.club),
                 {
@@ -2748,7 +2748,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
 
         response = self.post_lifecycle(self.club, booking, "complete", self.staff)
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CONFIRMED)
 
@@ -3273,7 +3273,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             self.booking_lifecycle_url(self.club, booking, "recurrence-next")
         )
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_end_recurrence_keeps_booking_status_and_transactions(self):
         booking = self.create_booking(

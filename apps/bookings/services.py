@@ -24,6 +24,9 @@ from apps.bookings.identity import (
     booking_customer_display_phone,
 )
 from apps.bookings.models import Booking, BookingAttempt
+from apps.common.authorization.querysets import scoped_queryset
+from apps.common.authorization.roles import Role
+from apps.common.authorization.scopes import ResourceScope
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
 from apps.courts.pricing import (
@@ -611,7 +614,9 @@ def dismiss_booking_attempt(*, access, attempt, actor):
             .select_related("club", "court", "attempted_by", "booking")
             .get(pk=attempt.pk)
         )
-        if not access.can_dismiss_booking_attempt(locked_attempt):
+        if locked_attempt.club_id != access.club.id:
+            raise PermissionDenied("You cannot dismiss this booking attempt.")
+        if locked_attempt.attempted_by_id != actor.id:
             raise PermissionDenied("You cannot dismiss this booking attempt.")
         if locked_attempt.resolution == BookingAttempt.Resolution.DISMISSED:
             return locked_attempt
@@ -861,8 +866,6 @@ def generate_booking_slots(*, access, court, date_from, date_to):
         raise serializers.ValidationError(
             {"court": "Court must belong to the selected club."}
         )
-    if not access.can_view_court_availability(court):
-        raise PermissionDenied("You cannot view availability for this court.")
     if not court.is_active:
         raise serializers.ValidationError({"court": "Court is inactive."})
 
@@ -1221,8 +1224,6 @@ def validate_booking_for_lifecycle_action(*, access, booking):
             code="BOOKING_NOT_IN_CLUB",
             message=BOOKING_NOT_IN_CLUB_MESSAGE,
         )
-    if not access.can_change_booking_status(booking):
-        raise PermissionDenied("You cannot change this booking status.")
 
 
 def validate_allowed_status(*, booking, allowed_statuses, action_label):
@@ -1240,11 +1241,15 @@ def validate_allowed_status(*, booking, allowed_statuses, action_label):
 
 
 def actor_requires_staff_cancel_reason(access):
+    if getattr(access, "is_platform_admin", False):
+        return False
+    role = getattr(access, "role", None)
+    if role is not None:
+        return role == Role.STAFF
     return (
-        access.is_staff
-        and not access.is_platform_admin
-        and not access.is_owner
-        and not access.is_manager
+        getattr(access, "is_staff", False)
+        and not getattr(access, "is_owner", False)
+        and not getattr(access, "is_manager", False)
     )
 
 
@@ -1604,7 +1609,11 @@ def reschedule_booking(
             raise serializers.ValidationError(
                 {"court": "Court must belong to the selected club."}
             )
-        if not access.can_access_court(locked_court):
+        if (
+            not scoped_queryset(access, Court, scope=ResourceScope.COURT)
+            .filter(pk=locked_court.pk)
+            .exists()
+        ):
             raise PermissionDenied("You cannot reschedule bookings to this court.")
 
         validate_booking_duration(locked_court, start_time, end_time)

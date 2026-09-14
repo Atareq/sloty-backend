@@ -1845,6 +1845,16 @@ class SettlementImmutabilityFilterPatternTests(SettlementAPITestCase):
         self.assertNotIn("ClubAccessContext", filter_source)
         self.assertNotIn("club_slug", filter_source)
 
+    def test_settlement_viewset_uses_spine_v2_mixin(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        view_source = (repo_root / "apps" / "settlements" / "views.py").read_text()
+
+        self.assertIn("SlotyScopedResourceMixin", view_source)
+        self.assertIn("SlotyBasePermission", view_source)
+        self.assertNotIn("ClubScopedViewMixin", view_source)
+        self.assertNotIn("Settlement.objects.filter", view_source)
+        self.assertNotIn("scoped_settlements_queryset", view_source)
+
     def test_no_forbidden_role_or_permission_files_were_introduced(self):
         repo_root = Path(__file__).resolve().parents[2]
         user_fields = {field.name for field in User._meta.get_fields()}

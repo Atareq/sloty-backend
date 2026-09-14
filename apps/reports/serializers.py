@@ -8,6 +8,10 @@ from rest_framework.exceptions import PermissionDenied
 from apps.accounts.models import User
 from apps.courts.models import Court
 from apps.courts.pricing import is_valid_period_bounds
+from apps.reports.authorization import (
+    can_access_report_court,
+    can_filter_reports_by_staff,
+)
 from apps.reports.constants import (
     ALLOWED_USAGE_STATUSES,
     DEFAULT_USAGE_STATUSES,
@@ -90,13 +94,13 @@ class CourtUsageReportQuerySerializer(serializers.Serializer):
             attrs["hour_from"] = None
             attrs["hour_to"] = None
 
-        access = self.context["club_access"]
+        access = self.context.get("access_context") or self.context.get("club_access")
         court = attrs.get("court")
-        if court is not None and not access.can_access_court(court):
+        if court is not None and not can_access_report_court(access, court):
             raise PermissionDenied(_("You cannot access this court."))
 
         staff = attrs.get("staff")
-        if staff is not None and not access.can_filter_reports_by_staff(staff):
+        if staff is not None and not can_filter_reports_by_staff(access, staff):
             raise self.coded_error(
                 "staff",
                 _("Selected staff must be active in this club."),
