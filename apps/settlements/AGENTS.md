@@ -82,7 +82,7 @@ Pure financial services (apps/settlements/services.py)
 - Collector visibility cannot be a Spine `ResourceScope`: it depends on role plus `manager_can_settle_transactions`. `apply_collector_scope()` therefore narrows the already club-scoped queryset.
 - Operational Transactions remain Club + Court. A collector may have custody of collections from courts they are not assigned to.
 - URLs remain club-scoped: `/api/v1/clubs/{club_slug}/settlements/` (do not inject court into settlement URLs).
-- Settlement ViewSets use the Spine plus `apps/settlements/authorization.py`. They do not call `ClubAccessContext` querysets. Internal service wrappers (`create_approved_settlement` and unused preview helpers) still duck-type ClubAccessContext-shaped `can_*` methods for concurrency tests.
+- Settlement ViewSets use the Spine plus `apps/settlements/authorization.py`. They do not call `ClubAccessContext` querysets. Internal service wrapper `create_approved_settlement` duck-types access context methods for test compatibility, while dead pre-Spine settlement helpers (`validate_settlement_access`, `validate_preview_collected_by`, `validate_approval_collected_by`, `build_unsettled_collector_summaries`) have been removed as part of the Sprint 17 cleanup.
 
 ### Authorization Boundary (`apps/settlements/authorization.py`)
 

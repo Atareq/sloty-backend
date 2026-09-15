@@ -69,14 +69,21 @@ This reference (direction) + scoped AGENTS.md (domain rules)
   - **Dashboard** ✅ — Spine (`ClubScopedViewMixin` + `SlotyBasePermission` + source-domain `scoped_queryset`); public availability remains anonymous
   - **Audit** ✅ — Spine v2 (`authorization_config` club-only + `SlotyScopedResourceMixin` + `SlotyBasePermission`). Staff matrix-denied. Not court- or collector-scoped.
   - **Reports** ✅ — Spine read-model (`ClubScopedViewMixin` + `SlotyBasePermission` + source-domain `scoped_queryset`). Court Usage is Club + Court; Staff matrix-denied.
+  - **Clubs (Sprint 13)** ✅ — Spine v2 (`authorization_config` on `Club` and `ClubMembership` + `ClubMembershipViewSet` and `ClubUserListViewSet` on `SlotyScopedResourceMixin` + `SlotyBasePermission` + domain authorization in `apps/clubs/authorization.py`). Global `ClubViewSet` remains unscoped.
+  - **Authentication Hardening (Sprint 15)** ✅ — Authenticated own-password change (`POST /api/v1/auth/password/change/`); strict password-bound JWT invalidation (`PASSWORD_CHANGED`); live server-side membership authority; explicit heartbeat as sole intended sync writer; User auth separated from PlayerProfile/ClubPlayer.
+  - **Offline/Sync Finalization & Lifecycle Hardening (Sprint 16)** ✅ — Single authoritative heartbeat writer (`POST /api/v1/me/sync-heartbeat/`); server-authoritative reconnect idempotency (`client_request_id` -> 200 OK replay / 409 conflict); server financial validation authority; User account vs. ClubMembership lifecycle decoupling (`CLUB_ACCESS_REVOKED` on deactivation); offboarding `last_sync_at` retention; custody offboarding settlement guards.
+  - **Authorization Matrix & Compatibility Cleanup (Sprint 17)** ✅ — Centralized matrix aligned to strictly exposed ViewSet actions (removed obsolete `retrieve` and `update` entries); dead code removed (`ClubScopedAccessMixin`, `CanManageClubMemberships`, `CanListClubUsers`, pre-Spine settlement validation helpers); `ClubAccessContext` retained strictly for legacy test fixture duck-typing.
+  - **Booking Identity Finalization & Snapshot Retirement (Sprint 18)** ✅ — `Booking.club_player` made non-nullable (`PROTECT`); snapshot columns (`customer_name`, `customer_phone`) removed from the `Booking` model (migration 0009); `apps/bookings/identity.py` is the single authoritative identity module; all consumers (serializers, dashboard, audit, transactions, settlements) read via `club_player → player_profile`; `BookingAttempt` request-payload fields retained as evidence; walk-in create still accepts `customer_name`/`customer_phone` as resolution inputs only.
+  - **Cross-Domain Contract & Architecture Consistency (Sprint 19)** ✅ — Final dead-code removal missed in Sprint 17: `CanManageClubMemberships` and `CanListClubUsers` class bodies removed from `apps/clubs/permissions.py`; duplicate docstring and unused imports cleaned; cross-domain field access confirmed consistent (all booking identity reads via `club_player__player_profile`); authorization matrix verified against live URL routing.
 
 ### Not yet migrated / not yet created
 
-- Parts of Clubs still on legacy access layer
-- Full `authorization_config` adoption across all secured models
-- Removal of legacy `ClubAccessContext` / `ClubScopedAccessMixin`
+- Removal of legacy `ClubAccessContext` / `ClubScopedAccessMixin` (retained for backward compatibility with external test utilities)
 - Password change endpoint (planned)
+- Removal of legacy `ClubAccessContext` (retained for backward compatibility with external test utilities in `tests/test_postgresql_concurrency.py`, `tests/clubs/`, `tests/transactions/`, `tests/settlements/`)
 - Password reset (future; not scheduled)
+- Password reset via SMS/email (future product phase; not scheduled)
+- Fully deprecate legacy `ClubAccessContext` test fixtures once external test utilities migrate to `RequestAccessContext`.
 
 ---
 
@@ -172,14 +179,15 @@ Resource Access
 Request URL → Scope Resolver → Access Context → Authorization Spine
 ```
 
-**Password change (planned):** authenticated user only; verify current password; update only `request.user`. No admin-changing-another-user through this endpoint.
+**Password change:** authenticated user only; verify current password, validate the new password with Django validators, and update only `request.user`. No admin-changing-another-user through this endpoint.
 
 ### Current State
 
-- JWT obtain + refresh endpoints exist.
+- JWT obtain + refresh endpoints exist. JWTs carry a signed password-hash digest that is checked against the current database password hash; password changes invalidate both access and refresh tokens.
 - Optional `club_slug` on token obtain may embed convenience claims.
-- Password change / reset endpoints are not implemented yet.
-- Sync heartbeat is authentication-adjacent presence bookkeeping, **not** authorization.
+- `POST /api/v1/auth/password/change/` accepts `current_password`, `new_password`, and `new_password_confirmation` for the authenticated user and returns `204 No Content`. Claim-less tokens from before password-hash checking are intentionally rejected at rollout.
+- Password reset is not implemented; email/SMS/OTP reset remains a future product phase. Login/refresh throttling is a security-hardening opportunity, not current infrastructure.
+- `POST /api/v1/me/sync-heartbeat/` is authentication-adjacent presence bookkeeping, **not** authorization, and is the sole writer of `ClubMembership.last_sync_at`.
 
 ### Migration Notes
 
@@ -242,7 +250,7 @@ Services should **not** normally contain `if user.role == ...` or re-check club/
 - Dashboard uses Spine context + matrix (`DashboardViewSet` actions) and source-domain `scoped_queryset` aggregations.
 - Audit uses v2 resource query mixin (club only, never court). Staff are matrix-denied.
 - Reports uses Spine context + matrix (`CourtUsageReportViewSet` list) and source-domain `scoped_queryset` aggregations.
-- Parts of Clubs still use legacy `ClubAccessContext`.
+- Clubs memberships and club user lists use v2 resource query mixin (`ResourceScope.CLUB`). Global multi-club `ClubViewSet` uses `scoped_clubs_for_user()` and `CanManageClubs`. Legacy `ClubAccessContext` is retained for test helper compatibility.
 
 ### Migration Notes
 
@@ -370,7 +378,7 @@ Tenant IDs in request bodies/query params are not authoritative; URL + resolved 
 
 - Spine-migrated ViewSets follow this pattern (Courts, Bookings, Transactions, Settlements, Audit, Players ClubPlayer via mixin). Settlements and Audit are club-scoped; collector narrowing happens after the Spine queryset for Settlements only.
 - Dashboard and Reports authenticated endpoints are GenericAPIViews on `ClubScopedViewMixin` + `SlotyBasePermission`; they aggregate already-scoped source querysets.
-- Clubs memberships still centralize scoping inside `ClubAccessContext` helpers. Migrated-domain leftover `scoped_*` methods on that object were removed.
+- Clubs memberships and club user lists compose `SlotyScopedResourceMixin` with `ResourceScope.CLUB`. Domain object rules (owner editing, manager visibility) reside in `apps/clubs/authorization.py`.
 
 ### Migration Notes
 
@@ -420,7 +428,7 @@ class ExampleViewSet(
 - Settlements and Audit use `authorization_scope = ResourceScope.CLUB` (never court).
 - Dashboard uses `ClubScopedViewMixin` + `SlotyBasePermission` (read model, no resource table).
 - Reports uses `ClubScopedViewMixin` + `SlotyBasePermission` (read model, no resource table).
-- Legacy domains (Club memberships) compose `ClubScopedAccessMixin`.
+- Clubs memberships and club user lists compose `SlotyScopedResourceMixin` + `SlotyBasePermission` (`ResourceScope.CLUB`). Legacy `ClubScopedAccessMixin` is retained for backward compatibility.
 
 ### Migration Notes
 
@@ -569,7 +577,7 @@ Finding hardcoded role/status/permission strings is a **refactoring trigger**:
   - **Phase A (Complete):** Identity linkage (`club_player` FK, backend auto-resolution in `create_booking()`).
   - **Phase B (Complete):** Authorization Spine migration (`SlotyScopedResourceMixin`, `SlotyBasePermission`, `authorization_config`, fail-closed HTTP 404 for out-of-scope bookings).
   - **Identity finalization (Complete):** required `club_player`; snapshot columns removed.
-  - **Phase C (Intentional transition):** Clubs memberships still use `ClubScopedAccessMixin` / `ClubAccessContext`. Dead unused permission wrappers for migrated domains were removed.
+  - **Sprint 13 (Complete):** Clubs memberships and club user lists migrated to `SlotyScopedResourceMixin` + `SlotyBasePermission` + `apps/clubs/authorization.py`. Matrix aligned (Manager denied on `ClubMembershipViewSet`). Legacy mixin/context retained for backward compatibility.
 - See [`ADR-002`](adr/ADR-002-booking-identity-and-authorization-migration.md) and [`booking-migration-audit-v1.md`](booking-migration-audit-v1.md).
 
 #### Transactions
@@ -708,7 +716,19 @@ Audit ✅                                        ← club-only Spine v2 read res
         ↓
 Reports ✅                                      ← read-model Spine + source querysets
         ↓
-Remove leftover Clubs legacy                    ← ClubAccessContext / ClubScopedAccessMixin
+Clubs (Sprint 13) ✅                             ← Spine v2 (ClubMembership, ClubUserList)
+        ↓
+Authentication Hardening (Sprint 15) ✅           ← password change; password-bound JWT invalidation
+        ↓
+Offline/Sync & Lifecycle Hardening (Sprint 16) ✅ ← single-writer heartbeat; reconnect safety; lifecycle decoupling
+        ↓
+Authorization Matrix & Cleanup (Sprint 17) ✅     ← matrix action alignment; dead code removal; ClubScopedAccessMixin removed
+        ↓
+Booking Identity Finalization (Sprint 18) ✅    ← club_player non-nullable; snapshot columns removed; identity.py module
+        ↓
+Cross-Domain Consistency (Sprint 19) ✅         ← dead permission class bodies removed; cross-domain field access confirmed
+        ↓
+Full test helper deprecation (future)         ← migrate external test fixtures off duck-typed ClubAccessContext
 ```
 
 ### Already completed (mark and preserve)
@@ -725,6 +745,12 @@ Remove leftover Clubs legacy                    ← ClubAccessContext / ClubScop
 | Dashboard | ✅ | Read-model Spine (`ClubScopedViewMixin` + `DashboardViewSet` matrix); aggregations from source-domain querysets; public availability anonymous |
 | Audit | ✅ | Spine v2 club-only queryset; Staff matrix-denied; court/collector scopes from other domains are not applied; historical rows unchanged |
 | Reports | ✅ | Read-model Spine (`ClubScopedViewMixin` + `CourtUsageReportViewSet` matrix); Court Usage Club+Court source querysets; Staff matrix-denied; no export path |
+| Clubs (Sprint 13) | ✅ | Spine v2 club queryset (`ClubMembershipViewSet`, `ClubUserListViewSet`); global multi-club `ClubViewSet`; domain object rules in `apps/clubs/authorization.py` |
+| Auth Hardening (Sprint 15) | ✅ | Own-password change (`204 No Content`), password-hash token binding (`PASSWORD_CHANGED`), token refresh live recheck, user vs player decoupling |
+| Offline/Sync Hardening (Sprint 16) | ✅ | Explicit single-writer heartbeat (`POST /api/v1/me/sync-heartbeat/`); server-authoritative reconnect idempotency (`client_request_id`); financial validation authority; live membership revocation (`CLUB_ACCESS_REVOKED`); offboarding custody guards |
+| Matrix & Cleanup (Sprint 17) | ✅ | Centralized matrix aligned with exposed ViewSet actions; dead code removed (`ClubScopedAccessMixin`, dead permission classes, dead settlement helpers); single-spine consolidation |
+| Booking Identity Finalization (Sprint 18) | ✅ | `Booking.club_player` non-nullable (`PROTECT`); snapshot columns removed (migration 0009); `apps/bookings/identity.py` central module; all consumers read via ClubPlayer |
+| Cross-Domain Consistency (Sprint 19) | ✅ | Final dead permission class bodies removed from `apps/clubs/permissions.py`; cross-domain identity field access confirmed consistent; authorization matrix verified against live routing |
 
 ### Hard migration rules
 
@@ -737,9 +763,11 @@ Remove leftover Clubs legacy                    ← ClubAccessContext / ClubScop
 
 ### Current State
 
-- Documentation lock is in progress via this file.
-- Player foundation not started.
-- Legacy access layer still required for unmigrated domains.
+- All active domain migrations (Courts, Transactions, Settlements, Identity Foundation, Bookings, Dashboard, Audit, Reports, Clubs) are completed onto Authorization Spine v2.
+- Authentication Hardening (Sprint 15) and Offline/Sync & Lifecycle Hardening (Sprint 16) are completed with comprehensive automated test suites.
+- Authorization Matrix & Compatibility Cleanup (Sprint 17) is completed: `ClubScopedAccessMixin` and dead permission/settlement functions are removed, matrix actions strictly match exposed endpoints, and legacy `ClubAccessContext` is retained only for external test fixture duck-typing.
+- Booking Identity Finalization (Sprint 18) is completed: `Booking.club_player` is non-nullable, snapshot columns are gone, `apps/bookings/identity.py` is the sole identity module, and all cross-domain consumers read via `club_player → player_profile`.
+- Cross-Domain Consistency (Sprint 19) is completed: remaining dead permission class bodies (`CanManageClubMemberships`, `CanListClubUsers`) are removed from `apps/clubs/permissions.py`; cross-domain field access has been confirmed consistent across all domain serializers, services, and filters.
 
 ### Migration Notes
 

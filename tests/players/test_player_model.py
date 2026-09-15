@@ -105,6 +105,12 @@ class PlayerProfilePhoneUniquenessTests(TestCase):
 class PlayerProfileUserLinkTests(TestCase):
     """User FK is nullable. A player can exist without an account."""
 
+    def test_creating_user_does_not_create_player_profile_or_club_player(self):
+        user = make_user("account-without-player-profile")
+
+        self.assertFalse(PlayerProfile.objects.filter(user=user).exists())
+        self.assertFalse(ClubPlayer.objects.exists())
+
     def test_profile_without_user_is_valid(self):
         p = make_profile("+201012345678")
         self.assertIsNone(p.user)

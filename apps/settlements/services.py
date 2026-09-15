@@ -151,46 +151,6 @@ def validate_settlement_authority(*, access, actor, collector, court=None):
         raise PermissionDenied("You cannot approve settlements for this user.")
 
 
-def validate_settlement_access(*, access, court=None):
-    """Legacy backward-compatibility helper."""
-    if court is not None and court.club_id != access.club.id:
-        raise serializers.ValidationError(
-            {"court": "Court must belong to the selected club."}
-        )
-    if not access.can_create_settlement(court):
-        raise PermissionDenied("You cannot manage settlements for this club.")
-
-
-def validate_preview_collected_by(*, access, collected_by, actor):
-    """Legacy alias for validate_preview_authority."""
-    return validate_preview_authority(
-        access=access,
-        actor=actor,
-        collector=collected_by,
-    )
-
-
-def validate_approval_collected_by(*, access, collected_by, actor):
-    """Legacy alias for approval authorization validation."""
-    validate_collected_by_membership(
-        access=access,
-        collected_by=collected_by,
-        actor=actor,
-    )
-    if (
-        actor
-        and collected_by.id == actor.id
-        and not (access.is_platform_admin or access.is_owner)
-    ):
-        raise SlotyAPIException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            code="SELF_SETTLEMENT_APPROVAL_FORBIDDEN",
-            message=SELF_APPROVAL_MESSAGE,
-        )
-    if not access.can_approve_settlement_for_user(collected_by):
-        raise PermissionDenied("You cannot approve settlements for this user.")
-
-
 # =============================================================================
 # RESPONSIBILITY 2: AUTHORITATIVE CUSTODY RESOLUTION
 # =============================================================================
@@ -589,51 +549,6 @@ def build_current_custody_collector_rows(queryset, *, period_end=None):
             }
         )
     return results
-
-
-def build_unsettled_collector_summaries(
-    *,
-    access,
-    actor,
-    collected_by=None,
-    court=None,
-):
-    if collected_by is not None:
-        validate_preview_authority(
-            access=access,
-            actor=actor,
-            collector=collected_by,
-        )
-    queryset = get_unsettled_transactions_queryset(
-        club=access.club,
-        collector=collected_by,
-    )
-    grouped_rows = build_current_custody_collector_rows(queryset)
-    collector_ids = [row["collected_by"] for row in grouped_rows]
-    roles_by_user_id = access.active_roles_by_user_ids(collector_ids)
-    results = []
-    for row in grouped_rows:
-        collector_id = row["collected_by"]
-        roles = roles_by_user_id.get(collector_id, set())
-        if not access.can_preview_settlement_for_roles(
-            user_id=collector_id,
-            roles=roles,
-        ):
-            continue
-        results.append(
-            row
-            | {
-                "is_self": bool(actor and collector_id == actor.id),
-                "can_approve": access.can_approve_settlement_for_roles(
-                    user_id=collector_id,
-                    roles=roles,
-                ),
-            }
-        )
-    results.sort(
-        key=lambda item: (item["collected_by_name"].casefold(), item["collected_by"])
-    )
-    return {"results": results}
 
 
 # =============================================================================

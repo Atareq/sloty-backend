@@ -1,7 +1,6 @@
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import Q
 from django.utils.text import slugify
 from phonenumber_field.modelfields import PhoneNumberField
 
@@ -27,26 +26,14 @@ def generate_unique_club_slug(name: str, *, exclude_pk=None) -> str:
     return slug
 
 
-class ClubMembershipQuerySet(models.QuerySet):
-    def current(self):
-        return self.filter(deleted_at__isnull=True)
-
-    def granting_access(self):
-        return self.current().filter(is_active=True)
-
-
 class Club(models.Model):
     name = models.CharField(max_length=255, db_index=True)
     slug = models.SlugField(max_length=120, unique=True, db_index=True)
     governorate = models.CharField(
-        max_length=64,
-        choices=get_governorate_choices(),
-        db_index=True,
+        max_length=64, choices=get_governorate_choices(), db_index=True
     )
     city = models.CharField(
-        max_length=120,
-        choices=get_all_city_choices(),
-        db_index=True,
+        max_length=120, choices=get_all_city_choices(), db_index=True
     )
     address = models.TextField(blank=True)
     phone_number = PhoneNumberField(blank=True, null=True)
@@ -69,6 +56,13 @@ class Club(models.Model):
             models.Index(fields=["is_active"]),
         ]
 
+    authorization_config = {
+        "scopes": {"club": {"path": "self"}},
+        "default_scope": "club",
+        "select_related": ("created_by",),
+        "prefetch_related": (),
+    }
+
     def __str__(self) -> str:
         return self.name
 
@@ -85,122 +79,8 @@ class Club(models.Model):
         if not is_valid_city(self.city):
             errors["city"] = "Invalid city choice."
         elif self.governorate and not is_valid_city_for_governorate(
-            self.governorate,
-            self.city,
+            self.governorate, self.city
         ):
             errors["city"] = "City must belong to the selected governorate."
-        if errors:
-            raise ValidationError(errors)
-
-
-class ClubMembership(models.Model):
-    class Role(models.TextChoices):
-        OWNER = "OWNER", "Owner"
-        MANAGER = "MANAGER", "Manager"
-        STAFF = "STAFF", "Staff"
-
-    club = models.ForeignKey(
-        Club,
-        on_delete=models.CASCADE,
-        related_name="memberships",
-    )
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="club_memberships",
-    )
-    role = models.CharField(max_length=16, choices=Role.choices)
-    court = models.ForeignKey(
-        "courts.Court",
-        blank=True,
-        null=True,
-        on_delete=models.CASCADE,
-        related_name="memberships",
-    )
-    manager_can_settle_transactions = models.BooleanField(default=False)
-    manager_can_change_pricing = models.BooleanField(default=False)
-    is_active = models.BooleanField(default=True)
-    last_sync_at = models.DateTimeField(blank=True, null=True, db_index=True)
-    deleted_at = models.DateTimeField(blank=True, null=True, db_index=True)
-    deleted_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        blank=True,
-        null=True,
-        on_delete=models.SET_NULL,
-        related_name="deleted_club_memberships",
-    )
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        blank=True,
-        null=True,
-        on_delete=models.SET_NULL,
-        related_name="created_club_memberships",
-    )
-    created = models.DateTimeField(auto_now_add=True)
-    modified = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=["club", "user", "role"],
-                condition=Q(
-                    is_active=True,
-                    role__in=("OWNER", "MANAGER"),
-                    court__isnull=True,
-                ),
-                name="unique_active_club_role_membership",
-            ),
-            models.UniqueConstraint(
-                fields=["club", "user", "role", "court"],
-                condition=Q(is_active=True, role="STAFF"),
-                name="unique_active_staff_membership",
-            ),
-            models.UniqueConstraint(
-                fields=["user", "role"],
-                condition=Q(is_active=True, role="MANAGER"),
-                name="unique_active_manager_club_membership",
-            ),
-            models.UniqueConstraint(
-                fields=["user", "role"],
-                condition=Q(is_active=True, role="STAFF"),
-                name="unique_active_staff_club_membership",
-            ),
-            models.CheckConstraint(
-                check=Q(role="MANAGER")
-                | (
-                    Q(manager_can_settle_transactions=False)
-                    & Q(manager_can_change_pricing=False)
-                ),
-                name="club_membership_manager_flags_only_for_managers",
-            ),
-        ]
-        indexes = [
-            models.Index(fields=["club", "role", "is_active"]),
-            models.Index(fields=["court", "role", "is_active"]),
-            models.Index(fields=["user", "role", "is_active"]),
-            models.Index(fields=["club", "deleted_at"]),
-        ]
-
-    objects = ClubMembershipQuerySet.as_manager()
-
-    def __str__(self) -> str:
-        return f"{self.user} - {self.club} ({self.role})"
-
-    def clean(self):
-        super().clean()
-        errors = {}
-        if self.role in {self.Role.OWNER, self.Role.MANAGER} and self.court_id:
-            errors["court"] = "OWNER and MANAGER memberships cannot be court-scoped."
-        if self.role == self.Role.STAFF:
-            if not self.court_id:
-                errors["court"] = "STAFF memberships require a court."
-            elif self.club_id and self.court.club_id != self.club_id:
-                errors["court"] = "Staff membership court must belong to the club."
-        if self.role != self.Role.MANAGER and (
-            self.manager_can_settle_transactions or self.manager_can_change_pricing
-        ):
-            errors["manager_permissions"] = (
-                "Manager permission flags are only valid for MANAGER memberships."
-            )
         if errors:
             raise ValidationError(errors)

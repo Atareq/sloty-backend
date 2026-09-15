@@ -6,6 +6,10 @@ ARCHITECTURAL INVARIANTS:
 2. Only policy entries supported by verified repository contracts and tests
    are populated.
 3. Default Deny: If role, viewset, or action is unconfigured, access is strictly denied.
+4. Global tenant endpoint note: ClubViewSet (/api/v1/clubs/) serves as the
+   platform-level club onboarding & tenant discovery endpoint governed by
+   CanManageClubs and scoped_clubs_for_user. Its entries in ROLE_PERMISSIONS reflect
+   this policy for uniform reference and testing.
 """
 
 from typing import Dict, Set
@@ -34,14 +38,6 @@ _BOOKING_VIEWSET_ACTIONS = {
 ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
     Role.ADMIN: {
         "ClubViewSet": {
-            "list",
-            "retrieve",
-            "create",
-            "update",
-            "partial_update",
-            "destroy",
-        },
-        "ClubMembershipViewSet": {
             "list",
             "retrieve",
             "create",
@@ -93,14 +89,6 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
     },
     Role.OWNER: {
         "ClubViewSet": {"list", "retrieve", "update", "partial_update"},
-        "ClubMembershipViewSet": {
-            "list",
-            "retrieve",
-            "create",
-            "update",
-            "partial_update",
-            "destroy",
-        },
         "ClubUserListViewSet": {"list"},
         "CourtViewSet": {
             "list",
@@ -110,44 +98,6 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
             "partial_update",
             "destroy",
         },
-        "CourtWeeklyWorkingHoursViewSet": {
-            "list",
-            "retrieve",
-            "create",
-            "update",
-            "partial_update",
-            "destroy",
-        },
-        "BookingViewSet": set(_BOOKING_VIEWSET_ACTIONS),
-        "BookingAttemptViewSet": {"list", "retrieve", "dismiss"},
-        "TransactionViewSet": {"list", "retrieve", "create", "cancel"},
-        "TransactionAttemptViewSet": {"list", "retrieve", "dismiss"},
-        "SettlementViewSet": {
-            "list",
-            "retrieve",
-            "create",
-            "preview",
-            "unsettled_summary",
-            "mark_settled",
-        },
-        "AuditLogViewSet": {"list", "retrieve"},
-        "DashboardViewSet": {
-            "summary",
-            "overview",
-            "revenue",
-            "court_utilization",
-            "calendar",
-            "availability",
-        },
-        "CourtUsageReportViewSet": {"list", "retrieve"},
-        "PlayerProfileViewSet": {"list", "retrieve", "create"},
-        "ClubPlayerViewSet": {"list", "retrieve", "create"},
-    },
-    Role.MANAGER: {
-        "ClubViewSet": {"list", "retrieve"},
-        "ClubMembershipViewSet": {"list", "retrieve"},
-        "ClubUserListViewSet": {"list"},
-        "CourtViewSet": {"list", "retrieve"},
         "CourtWeeklyWorkingHoursViewSet": {
             "list",
             "retrieve",

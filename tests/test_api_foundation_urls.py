@@ -2,10 +2,13 @@ from django.urls import Resolver404, resolve, reverse
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework import status
 from rest_framework.test import APITestCase
-from rest_framework_simplejwt.views import TokenRefreshView
 
 from apps.accounts.models import User
-from apps.accounts.views import SlotyTokenObtainPairView
+from apps.accounts.views import (
+    PasswordChangeAPIView,
+    SlotyTokenObtainPairView,
+    SlotyTokenRefreshView,
+)
 
 
 class ApiFoundationUrlTests(APITestCase):
@@ -58,7 +61,12 @@ class ApiFoundationUrlTests(APITestCase):
     def test_jwt_refresh_url_exists(self):
         match = resolve("/api/v1/auth/token/refresh/")
 
-        self.assertIs(match.func.view_class, TokenRefreshView)
+        self.assertIs(match.func.view_class, SlotyTokenRefreshView)
+
+    def test_password_change_url_exists(self):
+        match = resolve("/api/v1/auth/password/change/")
+
+        self.assertIs(match.func.view_class, PasswordChangeAPIView)
 
     def test_old_unversioned_api_routes_are_not_kept(self):
         with self.assertRaises(Resolver404):

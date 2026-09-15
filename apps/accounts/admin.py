@@ -9,7 +9,6 @@ class UserAdmin(DjangoUserAdmin):
     list_display = (
         "username",
         "email",
-        "is_platform_admin",
         "phone_number",
         "is_active",
         "is_staff",
@@ -20,7 +19,6 @@ class UserAdmin(DjangoUserAdmin):
             "Sloty profile",
             {
                 "fields": (
-                    "is_platform_admin",
                     "phone_number",
                     "created_by",
                 )
@@ -32,7 +30,6 @@ class UserAdmin(DjangoUserAdmin):
             "Sloty profile",
             {
                 "fields": (
-                    "is_platform_admin",
                     "phone_number",
                     "created_by",
                 )

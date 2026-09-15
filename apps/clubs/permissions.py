@@ -1,76 +1,13 @@
-from rest_framework.permissions import SAFE_METHODS, BasePermission
+from rest_framework.permissions import BasePermission
 
-from apps.clubs.models import ClubMembership
-
-
-def has_active_club_membership(user, club) -> bool:
-    if not user.is_authenticated:
-        return False
-    if user.is_platform_super_admin():
-        return True
-    return (
-        ClubMembership.objects.granting_access()
-        .filter(
-            club=club,
-            user=user,
-        )
-        .exists()
-    )
-
-
-def has_active_owner_membership(user, club) -> bool:
-    if not user.is_authenticated:
-        return False
-    return (
-        ClubMembership.objects.granting_access()
-        .filter(
-            club=club,
-            user=user,
-            role=ClubMembership.Role.OWNER,
-        )
-        .exists()
-    )
+from apps.clubs.authorization import can_manage_club
 
 
 class CanManageClubs(BasePermission):
     def has_permission(self, request, view) -> bool:
-        user = request.user
-        if not user.is_authenticated:
+        if not request.user or not request.user.is_authenticated:
             return False
-        if view.action == "create":
-            return user.is_platform_super_admin()
-        return True
+        return view.action != "create" or request.user.is_platform_super_admin()
 
     def has_object_permission(self, request, view, obj) -> bool:
-        user = request.user
-        if not user.is_authenticated:
-            return False
-        if user.is_platform_super_admin():
-            return True
-        if view.action in {"update", "partial_update"}:
-            return has_active_owner_membership(user, obj)
-        return has_active_club_membership(user, obj)
-
-
-class CanManageClubMemberships(BasePermission):
-    def has_permission(self, request, view) -> bool:
-        return view.get_access_context().can_manage_memberships()
-
-    def has_object_permission(self, request, view, obj) -> bool:
-        access = view.get_access_context()
-        if obj.club_id != access.club.id:
-            return False
-        if request.method in SAFE_METHODS:
-            return access.can_manage_memberships()
-        if access.is_platform_admin:
-            return True
-        return access.is_owner and obj.role != ClubMembership.Role.OWNER
-
-
-class CanListClubUsers(BasePermission):
-    def has_permission(self, request, view) -> bool:
-        return view.get_access_context().can_list_club_users()
-
-    def has_object_permission(self, request, view, obj) -> bool:
-        access = view.get_access_context()
-        return obj.club_id == access.club.id and access.can_list_club_users()
+        return can_manage_club(request.user, obj, view.action)

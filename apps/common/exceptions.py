@@ -95,11 +95,16 @@ def _api_exception_code(exc, response):
     if isinstance(exc, AuthenticationFailed):
         detail = getattr(exc, "detail", None)
         detail_code = _first_detail_code(detail)
+        structured_code = ""
+        if isinstance(detail, dict) and "code" in detail:
+            structured_code = str(detail["code"]).lower()
         detail_text = str(detail).lower()
         if detail_code == "user_inactive" or "user is inactive" in detail_text:
             return "USER_INACTIVE"
         if detail_code == "user_not_found" or "user not found" in detail_text:
             return "USER_DELETED"
+        if detail_code == "password_changed" or structured_code == "password_changed":
+            return "PASSWORD_CHANGED"
     status_code = getattr(exc, "status_code", response.status_code)
     if status_code == status.HTTP_404_NOT_FOUND:
         return "NOT_FOUND"

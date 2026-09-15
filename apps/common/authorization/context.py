@@ -19,22 +19,15 @@ class RequestAccessContext:
     user: Any
     role: str
     club: Optional[Any] = None
-    membership: Optional[Any] = None
     profile: Optional[Any] = None
-    profile_type: Optional[str] = None
+    owner_profile: Optional[Any] = None
+    staff_profile: Optional[Any] = None
     court: Optional[Any] = None
     is_platform_admin: bool = False
 
     def __post_init__(self):
-        # Support forward-compatibility with future multi-profile architecture
-        # while drawing from current ClubMembership records.
-        if self.profile is None and self.membership is not None:
-            object.__setattr__(self, "profile", self.membership)
-        elif self.profile is None and self.is_platform_admin:
-            object.__setattr__(self, "profile", self.user)
-
-        if self.profile_type is None:
-            object.__setattr__(self, "profile_type", self.role)
+        if self.profile is None:
+            raise ValueError("RequestAccessContext requires the current Profile.")
 
     @property
     def is_authenticated(self) -> bool:

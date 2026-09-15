@@ -3,8 +3,8 @@ from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 
 from apps.accounts.models import User
-from apps.clubs.models import ClubMembership
 from apps.common.search import customer_phone_search_q
+from apps.profiles.models import Profile
 
 
 class UserFilter(django_filters.FilterSet):
@@ -17,9 +17,9 @@ class UserFilter(django_filters.FilterSet):
         help_text=_("Filter users by active status."),
     )
     role = django_filters.ChoiceFilter(
-        choices=ClubMembership.Role.choices,
+        choices=Profile.Role.choices,
         method="filter_role",
-        help_text=_("Filter users by membership role."),
+        help_text=_("Filter users by application profile role."),
     )
     club = django_filters.CharFilter(
         method="filter_club",
@@ -47,8 +47,7 @@ class UserFilter(django_filters.FilterSet):
         if not value:
             return queryset
         return queryset.filter(
-            club_memberships__role=value,
-            club_memberships__deleted_at__isnull=True,
+            profile__role=value,
         ).distinct()
 
     def filter_club(self, queryset, name, value):
@@ -56,10 +55,11 @@ class UserFilter(django_filters.FilterSet):
         if not cleaned:
             return queryset
         if cleaned.isdigit():
-            club_q = Q(club_memberships__club_id=int(cleaned))
+            club_q = Q(profile__owner_profile__clubs__id=int(cleaned)) | Q(
+                profile__staff_profile__court__club_id=int(cleaned)
+            )
         else:
-            club_q = Q(club_memberships__club__slug=cleaned)
-        return queryset.filter(
-            club_q,
-            club_memberships__deleted_at__isnull=True,
-        ).distinct()
+            club_q = Q(profile__owner_profile__clubs__slug=cleaned) | Q(
+                profile__staff_profile__court__club__slug=cleaned
+            )
+        return queryset.filter(club_q).distinct()

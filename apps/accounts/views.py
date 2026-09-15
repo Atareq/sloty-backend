@@ -1,7 +1,8 @@
-from django.db.models import Prefetch, Subquery
+from django.db.models import Subquery
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
+from rest_framework import status
 from rest_framework.generics import RetrieveAPIView
 from rest_framework.mixins import (
     CreateModelMixin,
@@ -13,24 +14,45 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.viewsets import GenericViewSet
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from apps.accounts.filters import UserFilter
 from apps.accounts.models import User
 from apps.accounts.permissions import CanAccessUsers
 from apps.accounts.serializers import (
+    PasswordChangeSerializer,
     SlotyTokenObtainPairSerializer,
+    SlotyTokenRefreshSerializer,
     SyncHeartbeatResponseSerializer,
     UserCreateSerializer,
     UserListSerializer,
     UserMeSerializer,
     UserUpdateSerializer,
 )
-from apps.clubs.models import ClubMembership
+from apps.profiles.models import Profile
 
 
 class SlotyTokenObtainPairView(TokenObtainPairView):
     serializer_class = SlotyTokenObtainPairSerializer
+
+
+class SlotyTokenRefreshView(TokenRefreshView):
+    serializer_class = SlotyTokenRefreshSerializer
+
+
+@extend_schema(
+    tags=["Accounts"], request=PasswordChangeSerializer, responses={204: None}
+)
+class PasswordChangeAPIView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request, *args, **kwargs):
+        serializer = PasswordChangeSerializer(
+            data=request.data, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @extend_schema(tags=["Accounts"], responses=UserMeSerializer)
@@ -39,18 +61,8 @@ class MeAPIView(RetrieveAPIView):
     serializer_class = UserMeSerializer
 
     def get_object(self):
-        return (
-            User.objects.select_related("created_by")
-            .prefetch_related(
-                Prefetch(
-                    "club_memberships",
-                    queryset=ClubMembership.objects.granting_access()
-                    .select_related("club", "court")
-                    .order_by("club__name", "role", "id"),
-                    to_attr="active_memberships_for_me",
-                )
-            )
-            .get(pk=self.request.user.pk)
+        return User.objects.select_related("created_by", "profile").get(
+            pk=self.request.user.pk
         )
 
 
@@ -75,9 +87,6 @@ class SyncHeartbeatAPIView(APIView):
 
     def post(self, request, *args, **kwargs):
         now = timezone.now()
-        ClubMembership.objects.granting_access().filter(user=request.user).update(
-            last_sync_at=now
-        )
         return Response(SyncHeartbeatResponseSerializer({"last_sync_at": now}).data)
 
 
@@ -118,24 +127,14 @@ class UserViewSet(
 
         if user.is_platform_super_admin():
             return User.objects.select_related("created_by").order_by("id")
-
-        owned_club_ids = (
-            ClubMembership.objects.granting_access()
-            .filter(
-                user=user,
-                role=ClubMembership.Role.OWNER,
-            )
-            .values("club_id")
-        )
-
-        staff_user_ids = (
-            ClubMembership.objects.current()
-            .filter(
-                club_id__in=Subquery(owned_club_ids),
-                role=ClubMembership.Role.STAFF,
-            )
-            .values("user_id")
-        )
+        profile = getattr(user, "profile", None)
+        if not profile or profile.role != Profile.Role.OWNER:
+            return User.objects.none()
+        owned_club_ids = profile.owner_profile.clubs.values("id")
+        staff_user_ids = Profile.objects.filter(
+            role=Profile.Role.STAFF,
+            staff_profile__court__club_id__in=owned_club_ids,
+        ).values("user_id")
 
         return (
             User.objects.filter(id__in=Subquery(staff_user_ids))

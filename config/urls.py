@@ -4,9 +4,8 @@ from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework.permissions import AllowAny
-from rest_framework_simplejwt.views import TokenRefreshView
 
-from apps.accounts.views import SlotyTokenObtainPairView
+from apps.accounts.views import SlotyTokenObtainPairView, SlotyTokenRefreshView
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -41,7 +40,7 @@ urlpatterns = [
     ),
     path(
         "api/v1/auth/token/refresh/",
-        TokenRefreshView.as_view(),
+        SlotyTokenRefreshView.as_view(),
         name="token_refresh",
     ),
 ]

@@ -12,18 +12,12 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework import status
 from rest_framework.exceptions import NotAuthenticated
 
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.common.authorization.context import RequestAccessContext
 from apps.common.authorization.roles import Role
 from apps.common.exceptions import SlotyAPIException
 
 CLUB_ACCESS_REVOKED_MESSAGE = _("Your access to the selected club is no longer active.")
-
-ROLE_PRECEDENCE = {
-    Role.OWNER: 0,
-    Role.MANAGER: 1,
-    Role.STAFF: 2,
-}
 
 
 def resolve_club_scope(
@@ -53,17 +47,37 @@ def resolve_club_scope(
         raise NotAuthenticated("Authentication credentials were not provided.")
 
     club = get_object_or_404(Club, slug=club_slug)
-    is_platform_admin = bool(user.is_platform_super_admin())
+    try:
+        profile = user.profile
+    except Exception:
+        profile = None
+    if profile is None:
+        raise SlotyAPIException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="CLUB_ACCESS_REVOKED",
+            message=CLUB_ACCESS_REVOKED_MESSAGE,
+            details={"club_slug": club.slug},
+        )
 
-    # Fetch active access-granting memberships for this user in this club
-    memberships = list(
-        ClubMembership.objects.granting_access()
-        .filter(club=club, user=user)
-        .select_related("club", "user")
-        .order_by("id")
-    )
-
-    if not is_platform_admin and not memberships:
+    role = profile.role
+    is_platform_admin = role == Role.ADMIN
+    owner_profile = getattr(profile, "owner_profile", None)
+    staff_profile = getattr(profile, "staff_profile", None)
+    if role == Role.OWNER and not owner_profile.clubs.filter(pk=club.pk).exists():
+        raise SlotyAPIException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="CLUB_ACCESS_REVOKED",
+            message=CLUB_ACCESS_REVOKED_MESSAGE,
+            details={"club_slug": club.slug},
+        )
+    if role == Role.STAFF and staff_profile.court.club_id != club.pk:
+        raise SlotyAPIException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="CLUB_ACCESS_REVOKED",
+            message=CLUB_ACCESS_REVOKED_MESSAGE,
+            details={"club_slug": club.slug},
+        )
+    if role not in Role.ALL:
         raise SlotyAPIException(
             status_code=status.HTTP_403_FORBIDDEN,
             code="CLUB_ACCESS_REVOKED",
@@ -72,16 +86,6 @@ def resolve_club_scope(
         )
 
     resolved_court = None
-    if is_platform_admin:
-        role = Role.ADMIN
-        membership = memberships[0] if memberships else None
-    else:
-        primary_membership = min(
-            memberships,
-            key=lambda m: ROLE_PRECEDENCE.get(m.role, 99),
-        )
-        membership = primary_membership
-        role = primary_membership.role
 
     # Resolve Court ONLY when explicitly requested via URL parameters
     if court_id is not None:
@@ -93,7 +97,9 @@ def resolve_club_scope(
         user=user,
         role=role,
         club=club,
-        membership=membership,
+        profile=profile,
+        owner_profile=owner_profile,
+        staff_profile=staff_profile,
         court=resolved_court,
         is_platform_admin=is_platform_admin,
     )
@@ -115,14 +121,22 @@ def resolve_global_scope(request) -> RequestAccessContext:
     if not user or not user.is_authenticated:
         raise NotAuthenticated("Authentication credentials were not provided.")
 
-    is_platform_admin = bool(user.is_platform_super_admin())
-    role = Role.ADMIN if is_platform_admin else "USER"
+    profile = getattr(user, "profile", None)
+    if profile is None:
+        raise SlotyAPIException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="PROFILE_REQUIRED",
+            message=_("An application profile is required."),
+        )
+    is_platform_admin = profile.role == Role.ADMIN
 
     context = RequestAccessContext(
         user=user,
-        role=role,
+        role=profile.role,
         club=None,
-        membership=None,
+        profile=profile,
+        owner_profile=getattr(profile, "owner_profile", None),
+        staff_profile=getattr(profile, "staff_profile", None),
         court=None,
         is_platform_admin=is_platform_admin,
     )

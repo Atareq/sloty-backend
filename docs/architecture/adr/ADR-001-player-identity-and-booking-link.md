@@ -112,3 +112,9 @@ Authentication Identity
 - [`docs/architecture/security-architecture-v1.md §11`](../security-architecture-v1.md) — Player Architecture
 - [`docs/architecture/security-architecture-v1.md §12`](../security-architecture-v1.md) — Migration Strategy
 - [`apps/players/AGENTS.md`](../../../apps/players/AGENTS.md) — Players Domain Engineering Guide
+
+---
+
+## 7. Addendum — Authentication Lifecycle Boundary (2026-09-15)
+
+Own-password changes operate only on `User` credentials. They never create, link, update, or authorize `PlayerProfile` or `ClubPlayer`; explicit player-linking services remain the only way to establish the optional `PlayerProfile.user` relationship. JWT authentication identifies the account, while live `ClubMembership` resolution remains responsible for club access.

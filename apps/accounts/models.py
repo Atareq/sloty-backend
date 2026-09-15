@@ -4,7 +4,6 @@ from phonenumber_field.modelfields import PhoneNumberField
 
 
 class User(AbstractUser):
-    is_platform_admin = models.BooleanField(default=False)
     phone_number = PhoneNumberField(blank=True, null=True)
     created_by = models.ForeignKey(
         "self",
@@ -17,4 +16,5 @@ class User(AbstractUser):
     REQUIRED_FIELDS = ["email"]
 
     def is_platform_super_admin(self) -> bool:
-        return self.is_platform_admin
+        profile = getattr(self, "profile", None)
+        return bool(profile and profile.role == "ADMIN")

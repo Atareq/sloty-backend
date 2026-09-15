@@ -1,7 +1,6 @@
-from django.db.models import Subquery
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
-from apps.clubs.models import ClubMembership
+from apps.profiles.models import Profile
 
 
 class IsPlatformSuperAdmin(BasePermission):
@@ -26,14 +25,7 @@ class CanAccessUsers(BasePermission):
         if user.is_platform_super_admin():
             return True
         if request.method in SAFE_METHODS:
-            return (
-                ClubMembership.objects.granting_access()
-                .filter(
-                    user=user,
-                    role=ClubMembership.Role.OWNER,
-                )
-                .exists()
-            )
+            return Profile.objects.filter(user=user, role=Profile.Role.OWNER).exists()
         return False
 
     def has_object_permission(self, request, view, obj) -> bool:
@@ -43,21 +35,9 @@ class CanAccessUsers(BasePermission):
         if user.is_platform_super_admin():
             return True
         if request.method in SAFE_METHODS:
-            owned_club_ids = (
-                ClubMembership.objects.granting_access()
-                .filter(
-                    user=user,
-                    role=ClubMembership.Role.OWNER,
-                )
-                .values("club_id")
-            )
-            return (
-                ClubMembership.objects.current()
-                .filter(
-                    club_id__in=Subquery(owned_club_ids),
-                    role=ClubMembership.Role.STAFF,
-                    user=obj,
-                )
-                .exists()
-            )
+            return Profile.objects.filter(
+                user=user,
+                role=Profile.Role.OWNER,
+                owner_profile__clubs__staff_profiles__profile__user=obj,
+            ).exists()
         return False

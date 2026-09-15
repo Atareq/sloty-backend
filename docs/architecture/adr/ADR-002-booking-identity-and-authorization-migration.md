@@ -404,3 +404,9 @@ PlayerProfile (phone identity key)
 ### What this supersedes
 
 Decision 1's permanent Booking snapshot columns, and Sprint 4's nullable `club_player` + snapshot fallback.
+
+---
+
+## 10. Addendum — Authentication Lifecycle Boundary (2026-09-15)
+
+Password changes and JWT password-hash invalidation are account-authentication concerns only. They do not alter Booking identity, `ClubPlayer` versioning, booking URLs, or Booking authorization. A JWT may carry convenience role or club claims, but booking access continues to resolve the current server-side `ClubMembership` through the Authorization Spine for every request.

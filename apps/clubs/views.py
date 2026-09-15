@@ -1,60 +1,37 @@
-from django_filters.rest_framework import DjangoFilterBackend
-from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework.mixins import (
     CreateModelMixin,
-    DestroyModelMixin,
     ListModelMixin,
     RetrieveModelMixin,
     UpdateModelMixin,
 )
 from rest_framework.viewsets import GenericViewSet
 
-from apps.clubs.filters import ClubUserFilter
-from apps.clubs.mixins import ClubScopedAccessMixin
-from apps.clubs.models import Club, ClubMembership
-from apps.clubs.permissions import (
-    CanListClubUsers,
-    CanManageClubMemberships,
-    CanManageClubs,
-)
+from apps.clubs.models import Club
+from apps.clubs.permissions import CanManageClubs
 from apps.clubs.serializers import (
     ClubCreateSerializer,
     ClubDetailSerializer,
     ClubListSerializer,
-    ClubMembershipCreateSerializer,
-    ClubMembershipSerializer,
     ClubUpdateSerializer,
-    ClubUserListSerializer,
 )
-from apps.clubs.services import soft_delete_membership
+from apps.profiles.models import Profile
 
 
 def scoped_clubs_for_user(user):
-    if not user.is_authenticated:
+    if not user or not user.is_authenticated:
         return Club.objects.none()
-    if user.is_platform_super_admin():
+    profile = getattr(user, "profile", None)
+    if profile is None:
+        return Club.objects.none()
+    if profile.role == Profile.Role.ADMIN:
         return Club.objects.all()
-    return Club.objects.filter(
-        memberships__user=user,
-        memberships__is_active=True,
-        memberships__deleted_at__isnull=True,
-    ).distinct()
+    if profile.role == Profile.Role.OWNER:
+        return profile.owner_profile.clubs.all()
+    if profile.role == Profile.Role.STAFF:
+        return Club.objects.filter(pk=profile.staff_profile.court.club_id)
+    return Club.objects.none()
 
 
-@extend_schema_view(
-    list=extend_schema(tags=["Clubs"], responses=ClubListSerializer),
-    create=extend_schema(
-        tags=["Clubs"],
-        request=ClubCreateSerializer,
-        responses=ClubDetailSerializer,
-    ),
-    retrieve=extend_schema(tags=["Clubs"], responses=ClubDetailSerializer),
-    partial_update=extend_schema(
-        tags=["Clubs"],
-        request=ClubUpdateSerializer,
-        responses=ClubDetailSerializer,
-    ),
-)
 class ClubViewSet(
     ListModelMixin,
     CreateModelMixin,
@@ -73,100 +50,12 @@ class ClubViewSet(
         )
 
     def get_serializer_class(self):
-        if self.action == "list":
-            return ClubListSerializer
-        if self.action == "create":
-            return ClubCreateSerializer
-        if self.action in {"partial_update", "update"}:
-            return ClubUpdateSerializer
-        return ClubDetailSerializer
+        return {
+            "list": ClubListSerializer,
+            "create": ClubCreateSerializer,
+            "partial_update": ClubUpdateSerializer,
+            "update": ClubUpdateSerializer,
+        }.get(self.action, ClubDetailSerializer)
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
-
-
-@extend_schema_view(
-    list=extend_schema(tags=["Clubs"], responses=ClubMembershipSerializer),
-    create=extend_schema(
-        tags=["Clubs"],
-        request=ClubMembershipCreateSerializer,
-        responses=ClubMembershipSerializer,
-    ),
-    retrieve=extend_schema(tags=["Clubs"], responses=ClubMembershipSerializer),
-    partial_update=extend_schema(
-        tags=["Clubs"],
-        request=ClubMembershipSerializer,
-        responses=ClubMembershipSerializer,
-    ),
-    destroy=extend_schema(
-        tags=["Clubs"],
-        responses=None,
-        description=(
-            "Permanently remove a club membership (soft delete). Distinct from "
-            "PATCH is_active=false. Soft-deleted memberships cannot be "
-            "reactivated and are excluded from current membership lists."
-        ),
-    ),
-)
-class ClubMembershipViewSet(
-    ClubScopedAccessMixin,
-    ListModelMixin,
-    CreateModelMixin,
-    RetrieveModelMixin,
-    UpdateModelMixin,
-    DestroyModelMixin,
-    GenericViewSet,
-):
-    serializer_class = ClubMembershipSerializer
-    permission_classes = (CanManageClubMemberships,)
-    http_method_names = ("get", "post", "patch", "delete", "head", "options")
-
-    def get_queryset(self):
-        if getattr(self, "swagger_fake_view", False):
-            return ClubMembership.objects.none()
-        return (
-            self.get_access_context()
-            .scoped_memberships_queryset()
-            .select_related("club", "court", "user", "created_by", "deleted_by")
-            .order_by("id")
-        )
-
-    def get_serializer_class(self):
-        if self.action == "create":
-            return ClubMembershipCreateSerializer
-        return ClubMembershipSerializer
-
-    def perform_create(self, serializer):
-        serializer.save()
-
-    def perform_destroy(self, instance):
-        soft_delete_membership(
-            access=self.get_access_context(),
-            membership=instance,
-            actor=self.request.user,
-        )
-
-
-@extend_schema_view(
-    list=extend_schema(tags=["Clubs"], responses=ClubUserListSerializer),
-)
-class ClubUserListViewSet(
-    ClubScopedAccessMixin,
-    ListModelMixin,
-    GenericViewSet,
-):
-    serializer_class = ClubUserListSerializer
-    permission_classes = (CanListClubUsers,)
-    filter_backends = (DjangoFilterBackend,)
-    filterset_class = ClubUserFilter
-    http_method_names = ("get", "head", "options")
-
-    def get_queryset(self):
-        if getattr(self, "swagger_fake_view", False):
-            return ClubMembership.objects.none()
-        return (
-            self.get_access_context()
-            .scoped_club_users_queryset()
-            .select_related("user", "club", "court")
-            .order_by("id")
-        )

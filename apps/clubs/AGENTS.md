@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-`apps/clubs/` owns club tenant definitions, location validation, club membership lifecycle, and hosts the repository's current-state club-scoped access layer (`ClubAccessContext`).
+`apps/clubs/` owns club tenant definitions, location validation, club membership lifecycle, domain authorization rules (`apps/clubs/authorization.py`), and hosts backward-compatibility helpers for the legacy access layer (`ClubAccessContext`).
 
 ## Locked Identity Role
 
@@ -39,7 +39,9 @@ Per root [`AGENTS.md` §5.1](file:///home/tarek/Desktop/sloty/sloty-backend/AGEN
   - `is_active`: Controls club operational status.
 - [`ClubMembership`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/models.py):
   - QuerySets: `.current()` excludes soft-deleted; `.granting_access()` filters `is_active=True` and non-deleted.
-  - `last_sync_at`: Nullable server timestamp. Read-only to clients. Updated exclusively by the explicit `POST /api/v1/me/sync-heartbeat/` endpoint (`apps/accounts/views.py::SyncHeartbeatAPIView`; see `apps/accounts/AGENTS.md`). Legacy behavior still updates it as a side effect of `ClubScopedAccessMixin` on successful authenticated requests for domains not yet migrated off that mixin (backward-compatible carryover, not a pattern to extend) — domains migrated to the Authorization Spine (`ClubScopedViewMixin` / `SlotyScopedResourceMixin`) never update it implicitly.
+  - `last_sync_at`: Nullable server timestamp. Read-only to clients. Updated exclusively by the explicit `POST /api/v1/me/sync-heartbeat/` endpoint (`apps/accounts/views.py::SyncHeartbeatAPIView`; see `apps/accounts/AGENTS.md`). Authorization requests, including legacy `ClubScopedAccessMixin` requests, never update it implicitly.
+  - **Offboarding & Forensic Visibility**: Deactivating or suspending a membership preserves `last_sync_at` intact so owners and managers can inspect the employee's last known connection time (*"آخر اتصال معروف للموظف كان من X ساعات"*). Subsequent heartbeats ignore deactivated memberships.
+  - **Live Authorization Revocation**: Deactivating a membership takes immediate effect. The next request to any club-scoped endpoint returns `403 Forbidden` (`CLUB_ACCESS_REVOKED`), completely neutralizing unexpired JWTs without needing token blacklists. Changing roles (e.g. Manager to Staff) takes immediate live effect on permissions and court-scoping.
 
 ## Service Layer
 
@@ -57,26 +59,31 @@ Per root [`AGENTS.md` §5.1](file:///home/tarek/Desktop/sloty/sloty-backend/AGEN
   - `DELETE`: Soft delete membership with audit trail (`MEMBERSHIP_DELETED`).
 - `/api/v1/clubs/{club_slug}/users/`: Read-only club users list. Platform admins and owners see all non-deleted memberships. Managers see active managers and staff. Staff cannot list club users.
 
-## Remaining Spine migration (intentional)
+## Authorization Architecture (Spine v2)
 
-Do **not** force Clubs onto the Authorization Spine in this sprint. Remaining work is architecturally ambiguous:
+The Clubs domain is migrated to the Authorization Spine v2:
 
-- `ClubViewSet` is global (`/api/v1/clubs/`), not club-slug scoped. It lists clubs the user can see via `scoped_clubs_for_user()` + `CanManageClubs`. That is a different boundary from club-scoped resources.
-- `ClubMembershipViewSet` / `ClubUserListViewSet` are club-slug scoped on `ClubScopedAccessMixin`, including the leftover `last_sync_at` side effect and owner-cannot-edit-owner object rules.
-- Matrix rows exist for Club ViewSets as a forward-compat target, but those ViewSets do not currently evaluate `SlotyBasePermission`.
+- **Resource Configuration**:
+  - `Club`: `scopes={"club": {"path": "self"}}`, `default_scope="club"`, `select_related=("created_by",)`.
+  - `ClubMembership`: `scopes={"club": {"path": "club"}}`, `default_scope="club"`, `select_related=("club", "user", "court")`.
+- **ViewSets**:
+  - `ClubMembershipViewSet`: Composes `SlotyScopedResourceMixin` + `SlotyBasePermission` (`authorization_model = ClubMembership`, `authorization_scope = ResourceScope.CLUB`). Object updates evaluate `can_manage_membership_object` (Owners cannot edit or deactivate other Owners; only Platform Admin or self can edit self).
+  - `ClubUserListViewSet`: Composes `SlotyScopedResourceMixin` + `SlotyBasePermission` (`authorization_model = ClubMembership`, `authorization_scope = ResourceScope.CLUB`). Overrides `filter_scoped_queryset()` using `apply_club_users_scoping` (Platform Admins and Owners see all non-deleted members; Managers see active Managers and Staff only; Staff are matrix-denied).
+  - `ClubViewSet`: Global multi-club list/detail endpoint (`/api/v1/clubs/`). Preserves `scoped_clubs_for_user(request.user)` and `CanManageClubs` evaluating `can_manage_club(user, club, action)`. It does not compose `SlotyScopedResourceMixin` because there is no club in the URL path.
+- **Domain Authorization Module** ([`apps/clubs/authorization.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/authorization.py)):
+  - Houses all domain business rules: `can_manage_memberships`, `can_create_membership`, `can_manage_membership_object`, `can_list_club_users`, `apply_club_users_scoping`, `can_manage_club`.
+- **No Sync Side Effects**:
+  - Migrated Clubs endpoints never update `ClubMembership.last_sync_at`. Heartbeats are strictly handled by `POST /api/v1/me/sync-heartbeat/`.
 
-## Current-State Authorization Engine
+## Legacy Access Layer (Compatibility Only)
 
-> [!WARNING]
-> **Legacy / Current-State Notice**: The access layer below is the existing implementation for domains not yet migrated. Target architecture is the Authorization Spine in root [`AGENTS.md` §5](file:///home/tarek/Desktop/sloty/sloty-backend/AGENTS.md) and `apps/common/authorization/`. Do **not** extend this legacy layer to new domains.
-
-Current components in this app:
-- [`ClubAccessContext`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/access.py): Legacy access engine for **Clubs memberships and club users only**. Instantiated per request (`from_request(request, club_slug)`).
-  - Validates active membership; raises `CLUB_ACCESS_REVOKED` (403) if access was lost.
-  - Computes membership facts (`is_owner`, `is_manager`, `is_staff`, manager flags) and membership querysets (`scoped_memberships_queryset()`, `scoped_club_users_queryset()`).
-  - Also retains duck-typed settlement/transaction helpers used by internal service wrappers and concurrency tests (`can_access_court`, `can_create_transaction_for_booking`, `can_preview_settlement_for_user`, etc.). Migrated-domain scoped querysets (`scoped_bookings_queryset`, `scoped_transactions_queryset`, …) were removed; those domains use the Authorization Spine.
-- [`ClubScopedAccessMixin`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/mixins.py): Base mixin for club-scoped ViewSets. Attaches access context, injects `club_access` into serializer context, and updates `ClubMembership.last_sync_at` (throttled). Still used by Club membership / club-user list ViewSets.
-- [`apps/clubs/permissions.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/permissions.py): Thin DRF permission wrappers for Clubs (`CanManageClubs`, `CanManageClubMemberships`, `CanListClubUsers`). Unused migrated-domain wrappers were removed.
+> [!NOTE]
+> Following Sprint 17 (Authorization Matrix & Compatibility Cleanup):
+> Following Sprint 17 (Authorization Matrix & Compatibility Cleanup) and Sprint 19 (Cross-Domain Consistency):
+> - `ClubScopedAccessMixin` has been removed from `apps/clubs/mixins.py`. All club-scoped views use `SlotyScopedResourceMixin`.
+> - Obsolete permission classes `CanManageClubMemberships` and `CanListClubUsers` have been removed from `apps/clubs/permissions.py`. `CanManageClubs` is retained as the intentional global policy for `/api/v1/clubs/`.
+> - Obsolete permission classes `CanManageClubMemberships` and `CanListClubUsers` have been fully removed from `apps/clubs/permissions.py` (Sprint 17 removed their import usage in views; Sprint 19 removed the class bodies, unused imports, and `__all__` entries). `CanManageClubs` is retained as the intentional global policy for `/api/v1/clubs/`.
+> - [`ClubAccessContext`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/access.py): Retained strictly for backward compatibility with legacy test fixtures and duck-typed service helpers. All operational endpoints and services resolve access via `RequestAccessContext`.
 
 ## Cross-App Dependencies
 
@@ -87,3 +94,7 @@ Current components in this app:
 
 - Test suite: [`tests/clubs/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/clubs/).
 - Key test file: `test_club_api.py` (club setup, onboarding, soft deletion, and access checks).
+- Key test files:
+  - `test_club_api.py`: Club setup, onboarding, soft deletion, and access checks.
+  - `tests/accounts/test_account_membership_lifecycle.py`: Cross-domain integration verifying live membership deactivation/reactivation, role transition enforcement, custody offboarding guards, and delegation flags.
+  - `tests/accounts/test_sync_heartbeat_api.py`: Presence verification and offboarding `last_sync_at` retention.

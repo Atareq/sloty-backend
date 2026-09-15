@@ -80,6 +80,7 @@ THIRD_PARTY_APPS = [
 
 APPS = [
     "apps.accounts.apps.AccountsConfig",
+    "apps.profiles.apps.ProfilesConfig",
     "apps.common.apps.CommonConfig",
     "apps.clubs.apps.ClubsConfig",
     "apps.players.apps.PlayersConfig",
@@ -116,6 +117,7 @@ SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=JWT_ACCESS_TOKEN_MINUTES),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=JWT_REFRESH_TOKEN_DAYS),
     "AUTH_HEADER_TYPES": ("Bearer",),
+    "CHECK_REVOKE_TOKEN": True,
 }
 
 DB_ENGINE = os.environ.get("DB_ENGINE", "sqlite").strip().lower()

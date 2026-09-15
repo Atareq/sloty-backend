@@ -17,13 +17,14 @@ from uuid import uuid4
 
 import pytest
 from django.conf import settings
-from django.db import close_old_connections
+from django.db import IntegrityError, close_old_connections
 from django.test import TransactionTestCase
 from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.bookings.models import Booking, BookingAttempt
 from apps.bookings.services import (
+    cancel_booking,
     complete_booking,
     create_booking,
     expire_due_hold_bookings,
@@ -32,6 +33,11 @@ from apps.clubs.access import ClubAccessContext
 from apps.clubs.models import Club, ClubMembership
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
+from apps.players.models import ClubPlayer, PlayerProfile
+from apps.players.services import (
+    find_or_create_player_profile,
+    get_or_create_club_player,
+)
 from apps.settlements.services import create_approved_settlement
 from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.services import create_booking_transaction
@@ -419,3 +425,121 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             Booking.RecurrenceStatus.RENEWED,
         )
         self.assertTrue(errors)
+
+    def test_player_profile_concurrent_same_phone_creates_single_record(self):
+        phone = "+201099990099"
+
+        def worker():
+            profile, _ = find_or_create_player_profile(
+                phone_number=phone,
+                full_name="Concurrent Player",
+            )
+            return profile
+
+        results, errors = self.run_threads([worker, worker])
+        self.assertFalse(errors)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].id, results[1].id)
+        self.assertEqual(PlayerProfile.objects.filter(phone_number=phone).count(), 1)
+
+    def test_club_player_concurrent_resolution_creates_single_current_version(self):
+        profile, _ = find_or_create_player_profile(
+            phone_number="+201099990088",
+            full_name="Concurrent CP Profile",
+        )
+
+        def worker():
+            club_player, _ = get_or_create_club_player(
+                club=self.club,
+                player_profile=profile,
+                display_name="Concurrent CP",
+            )
+            return club_player
+
+        results, errors = self.run_threads([worker, worker])
+        self.assertFalse(errors)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].id, results[1].id)
+        self.assertEqual(
+            ClubPlayer.objects.filter(
+                club=self.club,
+                player_profile=profile,
+                is_current_version=True,
+            ).count(),
+            1,
+        )
+
+    def test_booking_state_transition_race_cancel_versus_complete(self):
+        start, end = self.slot(10)
+        booking = create_booking(
+            created_by=self.admin,
+            court=self.court,
+            start_time=start,
+            end_time=end,
+            customer_name="Transition Race",
+            customer_phone="+201099990077",
+        )
+        access = self.make_access()
+        create_booking_transaction(
+            access=access,
+            booking=booking,
+            amount=booking.total_price,
+            payment_method=Transaction.PaymentMethod.CASH,
+            payment_reference="PG-TRANS-PAY",
+            created_by=self.admin,
+        )
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+
+        def do_cancel():
+            return cancel_booking(
+                access=access,
+                booking=booking,
+                actor=self.admin,
+                reason="Race Cancel",
+            )
+
+        def do_complete():
+            return complete_booking(
+                access=access,
+                booking=booking,
+                actor=self.admin,
+            )
+
+        results, errors = self.run_threads([do_cancel, do_complete])
+        booking.refresh_from_db()
+        self.assertIn(
+            booking.status,
+            {Booking.Status.CANCELLED, Booking.Status.COMPLETED},
+        )
+        # Exactly one action must succeed and one must fail
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(errors), 1)
+
+    def test_membership_active_uniqueness_race_enforces_single_active_role(self):
+        member_user = User.objects.create_user(
+            username="pg-member-race-user",
+            password="test-pass-123",
+        )
+
+        def worker():
+            return ClubMembership.objects.create(
+                club=self.club,
+                user=member_user,
+                role=ClubMembership.Role.MANAGER,
+                is_active=True,
+            )
+
+        results, errors = self.run_threads([worker, worker])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], IntegrityError)
+        self.assertEqual(
+            ClubMembership.objects.filter(
+                club=self.club,
+                user=member_user,
+                role=ClubMembership.Role.MANAGER,
+                is_active=True,
+            ).count(),
+            1,
+        )

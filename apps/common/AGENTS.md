@@ -41,6 +41,7 @@
   - `SESSION_EXPIRED`: Expired JWT access token.
   - `USER_INACTIVE`: Authenticated user is inactive.
   - `USER_DELETED`: User record no longer exists.
+  - `PASSWORD_CHANGED`: JWT password-hash claim no longer matches the current user password hash; clients must authenticate again.
   - `CLUB_ACCESS_REVOKED`: User is authenticated but active membership in selected club was lost.
 
 ### 3. Egyptian Phone Number Search ([`apps/common/search.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/search.py))
@@ -136,8 +137,7 @@ Rules:
 - Compose it before DRF's class: `class ExampleViewSet(SlotyScopedResourceMixin, ModelViewSet): ...`. DRF `ModelViewSet` itself remains untouched — unscoped ViewSets may still use plain `ModelViewSet`.
 - ViewSets may add relations with `authorization_select_related`, `authorization_prefetch_related`, or their getter hooks. They must not remove mandatory model relations.
 - Domain filtering belongs in `filter_scoped_queryset(queryset)` or standard DRF filter backends. Both receive the already-authorized queryset and may only narrow it.
-- A participating ViewSet must not override `get_queryset()` to start from a model manager, use a second access context, or accept client-provided tenant IDs.
-- Domain migrations remain separate, deliberate tasks. The legacy `ClubAccessContext` and `ClubScopedAccessMixin` stay in place until each domain's behavior and tests are migrated. **Courts**, **Bookings**, **Transactions**, **Settlements**, **Dashboard**, **Audit**, and **Reports** are migrated onto this foundation. Dashboard and Reports are read models: `ClubScopedViewMixin` + `SlotyBasePermission` with source-domain `scoped_queryset` aggregations — not `SlotyScopedResourceMixin`. Audit is a club-only resource (`AuditLog.authorization_config` `default_scope="club"`); Staff are matrix-denied; court/collector scopes from Bookings/Transactions/Settlements are not applied to audit rows. Parts of Clubs remain on the legacy layer until explicitly migrated.
+- Domain migrations remain separate, deliberate tasks. The legacy `ClubAccessContext` and `ClubScopedAccessMixin` stay in place for backward compatibility. **Courts**, **Bookings**, **Transactions**, **Settlements**, **Dashboard**, **Audit**, **Reports**, and **Clubs** (`ClubMembershipViewSet`, `ClubUserListViewSet`) are migrated onto this foundation. Dashboard and Reports are read models: `ClubScopedViewMixin` + `SlotyBasePermission` with source-domain `scoped_queryset` aggregations — not `SlotyScopedResourceMixin`. Audit is a club-only resource (`AuditLog.authorization_config` `default_scope="club"`); Staff are matrix-denied; court/collector scopes from Bookings/Transactions/Settlements are not applied to audit rows. Clubs memberships use `SlotyScopedResourceMixin` (`authorization_model = ClubMembership`); global `ClubViewSet` remains unscoped.
 - **Not a presence/activity tracker**: The Spine (`RequestAccessContext`, `ClubScopedViewMixin`, `SlotyScopedResourceMixin`) intentionally has no request-level side effects beyond authorization/scoping. `ClubMembership.last_sync_at` (offline/PWA sync bookkeeping) is updated only by the dedicated `POST /api/v1/me/sync-heartbeat/` endpoint (`apps/accounts/`), never implicitly by any Spine mixin. Do not add such side effects when migrating further domains.
 
 ## Testing

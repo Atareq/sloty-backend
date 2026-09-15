@@ -45,8 +45,9 @@ User                          ← this app (authentication identity)
 Authentication answers **only** “Who are you?”. It must not decide club/court/resource access.
 
 - `/api/v1/auth/token/`: JWT token obtain endpoint (`SlotyTokenObtainPairView`). Accepts optional `club_slug` to return **convenience** JWT claims (`role`, `club_id`, `court_id`).
-- `/api/v1/auth/token/refresh/`: JWT token refresh endpoint.
-- Auth failure codes: Expired tokens raise `SESSION_EXPIRED`; inactive accounts return `USER_INACTIVE`; deleted accounts return `USER_DELETED`.
+- `/api/v1/auth/token/refresh/`: JWT token refresh endpoint. It rechecks the current user record before issuing access, so inactive, deleted, and password-changed accounts cannot refresh.
+- `/api/v1/auth/password/change/`: authenticated own-password endpoint. It accepts `current_password`, `new_password`, and `new_password_confirmation`, applies Django validators, and returns `204 No Content`.
+- Auth failure codes: expired access tokens raise `SESSION_EXPIRED`; malformed/expired refresh tokens use `TOKEN_NOT_VALID`; inactive accounts return `USER_INACTIVE`; deleted accounts return `USER_DELETED`; password-hash mismatches return `PASSWORD_CHANGED`.
 
 **JWT rule (locked):** Token claims are UX convenience only. They are never authority. Authority is:
 
@@ -56,19 +57,21 @@ Request URL → resolve_club_scope / resolve_global_scope → RequestAccessConte
 
 Frontend must never treat “JWT contains `club_id`” as proof of access.
 
-**Password change (Phase 2 — not implemented yet):**
-- Target: `POST /api/v1/auth/password/change/`
-- Authenticated user only; verify current password; update only `request.user`.
-- No admin-changing-another-user via this endpoint.
-- Password **reset** (email/SMS/OTP) is explicitly out of Phase 2.
+**Password lifecycle:**
+- Tokens include SimpleJWT's signed password-hash digest and are revalidated against the current database password hash. A password change immediately invalidates previously issued access and refresh tokens; clients must sign in again.
+- The strict initial rollout also rejects claim-less tokens issued before this setting was enabled.
+- No admin can change another account's password through this endpoint. Password reset (email/SMS/OTP) is a future product phase and is not implemented.
+- Login retains the generic credential failure response for unknown, incorrect-password, and inactive accounts to avoid account enumeration.
 
 ### Current Authenticated Profile
 
 - `GET /api/v1/me/`: Returns current authenticated user profile, creator details (`account_created_by`), and active memberships. Must prefetch memberships with `to_attr="active_memberships_for_me"` selecting club and court to avoid per-membership queries.
 
-### Sync Heartbeat
+### Sync Heartbeat (Sole Authoritative Writer)
 
-- `POST /api/v1/me/sync-heartbeat/` (`SyncHeartbeatAPIView`): Authenticated-only, no request payload. Updates `last_sync_at` (server `timezone.now()`, never client-supplied) on **all** of the authenticated user's active, access-granting `ClubMembership` rows (`ClubMembership.objects.granting_access().filter(user=request.user)`), and returns `{"last_sync_at": ...}`. This is the **only** mechanism that updates `last_sync_at`. Authorization and sync/presence tracking are separate concerns by design: neither `ClubScopedViewMixin` nor `SlotyScopedResourceMixin` update `last_sync_at` as an implicit response side effect. The legacy `ClubScopedAccessMixin` (`apps/clubs/mixins.py`) still does this for domains not yet migrated off it — do not extend that side effect to new code or migrate it into the Spine.
+- `POST /api/v1/me/sync-heartbeat/` (`SyncHeartbeatAPIView`): Authenticated-only, no request payload. Updates `last_sync_at` (server `timezone.now()`, completely ignoring any client-supplied timestamp) on **all** of the authenticated user's active, access-granting `ClubMembership` rows (`ClubMembership.objects.granting_access().filter(user=request.user)`), and returns `{"last_sync_at": ...}`.
+- **Sole Authoritative Writer Invariant**: This endpoint is the **only** writer to `ClubMembership.last_sync_at`. Neither the Authorization Spine, legacy access mixins, normal API traffic, login, refresh, `/me`, nor scope resolution update it.
+- **Offboarding Presence**: Deactivated or soft-deleted memberships are never updated by heartbeat, preserving their final known connection time for auditing. Users with zero active memberships receive a safe `200 OK` without database mutation.
 
 ### Platform User Management
 
@@ -97,4 +100,6 @@ Frontend must never treat “JWT contains `club_id`” as proof of access.
   - `test_user_model.py`: Identity constraints and platform admin checks.
   - `test_account_api.py`: `/api/v1/me/` and `/api/v1/users/` permissions and serialization.
   - `test_sync_heartbeat_api.py`: `/api/v1/me/sync-heartbeat/` contract, backend-authoritative timestamp, multi-membership fan-out, user isolation, and the regression guard that ordinary API traffic (e.g. Courts) never updates `last_sync_at` implicitly.
+  - `test_sync_heartbeat_api.py`: Complete test coverage of the heartbeat contract: unauthenticated rejection, server-timestamp authority (ignores client clocks), multi-membership fan-out, user isolation, ordinary API traffic immunity, login/refresh/me immunity, deactivated/soft-deleted membership exclusion, zero-membership safe response, and owner offboarding visibility.
+  - `test_account_membership_lifecycle.py`: End-to-end lifecycle integration tests verifying account vs. membership lifecycle decoupling, password change token revocation (`PASSWORD_CHANGED`), deactivated user rejection (`USER_INACTIVE`), deactivated membership immediate revocation (`CLUB_ACCESS_REVOKED`), reactivation access restoration, soft-deleted membership protection (`MEMBERSHIP_DELETED_CANNOT_RECREATE`), live role changes taking immediate effect on permissions and court scoping, manager pricing delegation, manager custody offboarding guards (`MEMBERSHIP_CURRENT_CUSTODY_NOT_SETTLED`), and customer identity independence.
   - `test_seed_demo_data.py`: Multi-club demo seed data creation.

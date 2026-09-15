@@ -1,4 +1,3 @@
-from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1610,36 +1609,24 @@ class ClubMembershipLastSyncAPITests(ClubAPITestCase):
         )
 
     def legacy_scoped_url(self, club):
-        # ClubMembership.last_sync_at is updated only by the legacy
-        # ClubScopedAccessMixin.finalize_response() side effect. Dashboard
-        # has migrated to ClubScopedViewMixin / SlotyBasePermission, which
-        # intentionally does NOT perform this update (see
-        # apps.accounts.views.SyncHeartbeatAPIView). Use a still-legacy-mixin
-        # endpoint so this suite keeps exercising ClubScopedAccessMixin itself.
+        # Use a still-legacy-mixin endpoint to guard the rule that ordinary
+        # authenticated traffic never updates sync presence. Only the explicit
+        # accounts heartbeat endpoint owns ClubMembership.last_sync_at.
         # Staff cannot list memberships; Owner can.
         return reverse("club-membership-list", kwargs={"club_slug": club.slug})
 
-    def test_successful_club_scoped_contact_updates_selected_membership_last_sync(self):
-        sync_time = timezone.datetime(
-            2026,
-            9,
-            8,
-            12,
-            0,
-            tzinfo=timezone.get_current_timezone(),
-        )
+    def test_successful_legacy_club_request_does_not_update_last_sync(self):
         self.client.force_authenticate(user=self.owner)
 
-        with patch("apps.clubs.mixins.timezone.now", return_value=sync_time):
-            response = self.client.get(self.legacy_scoped_url(self.club))
+        response = self.client.get(self.legacy_scoped_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.owner_membership.refresh_from_db()
         self.other_staff_membership.refresh_from_db()
-        self.assertEqual(self.owner_membership.last_sync_at, sync_time)
+        self.assertIsNone(self.owner_membership.last_sync_at)
         self.assertIsNone(self.other_staff_membership.last_sync_at)
 
-    def test_recent_last_sync_is_not_rewritten_on_every_request(self):
+    def test_legacy_club_request_preserves_existing_last_sync(self):
         original_sync_time = timezone.datetime(
             2026,
             9,
@@ -1648,13 +1635,11 @@ class ClubMembershipLastSyncAPITests(ClubAPITestCase):
             0,
             tzinfo=timezone.get_current_timezone(),
         )
-        request_time = original_sync_time + timedelta(minutes=2)
         self.owner_membership.last_sync_at = original_sync_time
         self.owner_membership.save(update_fields=["last_sync_at"])
         self.client.force_authenticate(user=self.owner)
 
-        with patch("apps.clubs.mixins.timezone.now", return_value=request_time):
-            response = self.client.get(self.legacy_scoped_url(self.club))
+        response = self.client.get(self.legacy_scoped_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.owner_membership.refresh_from_db()
@@ -1687,15 +1672,7 @@ class ClubMembershipLastSyncAPITests(ClubAPITestCase):
         self.inactive_user_membership.refresh_from_db()
         self.assertIsNone(self.inactive_user_membership.last_sync_at)
 
-    def test_selected_club_contact_does_not_update_other_club_membership(self):
-        sync_time = timezone.datetime(
-            2026,
-            9,
-            8,
-            13,
-            0,
-            tzinfo=timezone.get_current_timezone(),
-        )
+    def test_legacy_club_request_does_not_update_any_membership(self):
         self.create_membership(
             self.owner,
             self.other_club,
@@ -1703,8 +1680,7 @@ class ClubMembershipLastSyncAPITests(ClubAPITestCase):
         )
         self.client.force_authenticate(user=self.owner)
 
-        with patch("apps.clubs.mixins.timezone.now", return_value=sync_time):
-            response = self.client.get(self.legacy_scoped_url(self.club))
+        response = self.client.get(self.legacy_scoped_url(self.club))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         selected_membership = ClubMembership.objects.get(
@@ -1715,7 +1691,7 @@ class ClubMembershipLastSyncAPITests(ClubAPITestCase):
             user=self.owner,
             club=self.other_club,
         )
-        self.assertEqual(selected_membership.last_sync_at, sync_time)
+        self.assertIsNone(selected_membership.last_sync_at)
         self.assertIsNone(other_membership.last_sync_at)
 
     def test_me_and_club_user_responses_expose_membership_last_sync_at(self):

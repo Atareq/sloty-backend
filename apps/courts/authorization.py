@@ -42,8 +42,4 @@ def can_manage_working_hours(context, court) -> bool:
     """
     if context.is_platform_admin or context.role == Role.OWNER:
         return True
-    if context.role == Role.MANAGER:
-        return bool(
-            context.membership and context.membership.manager_can_change_pricing
-        )
     return False

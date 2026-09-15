@@ -27,24 +27,24 @@ def _is_valid_club_context(context) -> bool:
             role == Role.ADMIN and callable(is_platform_admin) and is_platform_admin()
         )
 
-    membership = getattr(context, "membership", None)
-    return bool(
-        role in Role.CLUB_ROLES
-        and membership is not None
-        and getattr(membership, "role", None) == role
-        and getattr(membership, "club_id", None) == club.pk
-        and getattr(membership, "user_id", None) == user.pk
-        and getattr(membership, "is_active", False)
-        and getattr(membership, "deleted_at", None) is None
-    )
+    profile = getattr(context, "profile", None)
+    if not profile or profile.user_id != user.pk or profile.role != role:
+        return False
+    if role == Role.OWNER:
+        owner_profile = getattr(context, "owner_profile", None)
+        return bool(owner_profile and owner_profile.clubs.filter(pk=club.pk).exists())
+    if role == Role.STAFF:
+        staff_profile = getattr(context, "staff_profile", None)
+        return bool(staff_profile and staff_profile.court.club_id == club.pk)
+    return False
 
 
 def _authorized_staff_court_ids(context) -> tuple[Any, ...]:
     court_ids = tuple(getattr(context, "court_ids", ()) or ())
     if court_ids:
         return court_ids
-    membership = getattr(context, "membership", None)
-    court_id = getattr(membership, "court_id", None)
+    staff_profile = getattr(context, "staff_profile", None)
+    court_id = getattr(staff_profile, "court_id", None)
     return (court_id,) if court_id is not None else ()
 
 
@@ -82,10 +82,7 @@ def _apply_court_scope(queryset, *, context, path: str) -> QuerySet:
             return queryset.none()
         return _filter_scope_ids(queryset, path=path, values=court_ids)
 
-    if getattr(context, "is_platform_admin", False) or context.role in {
-        Role.OWNER,
-        Role.MANAGER,
-    }:
+    if getattr(context, "is_platform_admin", False) or context.role == Role.OWNER:
         return queryset
     return queryset.none()
 

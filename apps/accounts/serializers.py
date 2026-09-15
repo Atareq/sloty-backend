@@ -1,34 +1,40 @@
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers, status
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.serializers import (
+    TokenObtainPairSerializer,
+    TokenRefreshSerializer,
+)
 
 from apps.accounts.models import User
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.common.exceptions import SlotyAPIException
+from apps.profiles.models import Profile
 
 
 def get_token_name(user):
     return user.get_full_name() or user.username
 
 
-def get_membership_for_token_context(*, user, club):
-    role_order = {
-        ClubMembership.Role.OWNER: 0,
-        ClubMembership.Role.MANAGER: 1,
-        ClubMembership.Role.STAFF: 2,
-    }
-    memberships = list(
-        ClubMembership.objects.granting_access()
-        .filter(
-            user=user,
-            club=club,
-        )
-        .select_related("court")
-        .order_by("id")
-    )
-    if not memberships:
+def get_profile_for_token_context(*, user, club):
+    profile = getattr(user, "profile", None)
+    if profile is None:
         return None
-    return sorted(memberships, key=lambda item: role_order[item.role])[0]
+    if profile.role == Profile.Role.ADMIN:
+        return profile
+    if (
+        profile.role == Profile.Role.OWNER
+        and profile.owner_profile.clubs.filter(pk=club.pk).exists()
+    ):
+        return profile
+    if (
+        profile.role == Profile.Role.STAFF
+        and profile.staff_profile.court.club_id == club.pk
+    ):
+        return profile
+    return None
 
 
 def build_token_claims(*, user, club_slug=None):
@@ -38,8 +44,9 @@ def build_token_claims(*, user, club_slug=None):
         "name": get_token_name(user),
     }
 
-    if user.is_platform_super_admin():
-        claims["role"] = "PLATFORM_ADMIN"
+    profile = getattr(user, "profile", None)
+    if profile is not None:
+        claims["role"] = profile.role
 
     if not club_slug:
         return claims
@@ -51,12 +58,12 @@ def build_token_claims(*, user, club_slug=None):
             {"club_slug": "Invalid club context."}
         ) from exc
 
-    if user.is_platform_super_admin():
+    if profile and profile.role == Profile.Role.ADMIN:
         claims["club_id"] = club.id
         return claims
 
-    membership = get_membership_for_token_context(user=user, club=club)
-    if membership is None:
+    profile = get_profile_for_token_context(user=user, club=club)
+    if profile is None:
         raise SlotyAPIException(
             status_code=status.HTTP_403_FORBIDDEN,
             code="CLUB_ACCESS_REVOKED",
@@ -66,10 +73,10 @@ def build_token_claims(*, user, club_slug=None):
             },
         )
 
-    claims["role"] = membership.role
+    claims["role"] = profile.role
     claims["club_id"] = club.id
-    if membership.role == ClubMembership.Role.STAFF and membership.court_id:
-        claims["court_id"] = membership.court_id
+    if profile.role == Profile.Role.STAFF:
+        claims["court_id"] = profile.staff_profile.court_id
     return claims
 
 
@@ -98,6 +105,48 @@ class SlotyTokenObtainPairSerializer(TokenObtainPairSerializer):
         }
 
 
+class SlotyTokenRefreshSerializer(TokenRefreshSerializer):
+    """Preserve SimpleJWT refresh behavior while revalidating the user state."""
+
+    def validate(self, attrs):
+        refresh = self.token_class(attrs["refresh"])
+        JWTAuthentication().get_user(refresh)
+        return super().validate(attrs)
+
+
+class PasswordChangeSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True, trim_whitespace=False)
+    new_password = serializers.CharField(write_only=True, trim_whitespace=False)
+    new_password_confirmation = serializers.CharField(
+        write_only=True,
+        trim_whitespace=False,
+    )
+
+    def validate_current_password(self, value):
+        if not self.context["request"].user.check_password(value):
+            raise serializers.ValidationError("Current password is incorrect.")
+        return value
+
+    def validate(self, attrs):
+        if attrs["new_password"] != attrs["new_password_confirmation"]:
+            raise serializers.ValidationError(
+                {"new_password_confirmation": "Passwords do not match."}
+            )
+
+        try:
+            validate_password(attrs["new_password"], self.context["request"].user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"new_password": exc.messages}) from exc
+
+        return attrs
+
+    def save(self, **kwargs):
+        user = self.context["request"].user
+        user.set_password(self.validated_data["new_password"])
+        user.save(update_fields=["password"])
+        return user
+
+
 class UserMembershipClubSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     slug = serializers.SlugField()
@@ -115,35 +164,18 @@ class UserMembershipPermissionsSerializer(serializers.Serializer):
     can_manage_settlements = serializers.BooleanField()
 
 
-class UserMembershipSerializer(serializers.ModelSerializer):
+class UserMembershipSerializer(serializers.Serializer):
     club = UserMembershipClubSerializer(read_only=True)
     court = UserMembershipCourtSerializer(read_only=True)
     permissions = serializers.SerializerMethodField()
 
-    class Meta:
-        model = ClubMembership
-        fields = (
-            "id",
-            "role",
-            "club",
-            "court",
-            "last_sync_at",
-            "permissions",
-        )
-
     @extend_schema_field(UserMembershipPermissionsSerializer)
-    def get_permissions(self, membership):
-        if membership.role == ClubMembership.Role.OWNER:
+    def get_permissions(self, profile):
+        if profile.role == Profile.Role.OWNER:
             permissions = {
                 "can_change_pricing": True,
                 "can_manage_working_hours": True,
                 "can_manage_settlements": True,
-            }
-        elif membership.role == ClubMembership.Role.MANAGER:
-            permissions = {
-                "can_change_pricing": membership.manager_can_change_pricing,
-                "can_manage_working_hours": membership.manager_can_change_pricing,
-                "can_manage_settlements": (membership.manager_can_settle_transactions),
             }
         else:
             permissions = {
@@ -171,7 +203,9 @@ class AccountCreatorSerializer(serializers.Serializer):
 
 class UserMeSerializer(serializers.ModelSerializer):
     account_created_by = serializers.SerializerMethodField()
-    memberships = serializers.SerializerMethodField()
+    profile_role = serializers.CharField(
+        source="profile.role", read_only=True, allow_null=True
+    )
 
     class Meta:
         model = User
@@ -183,9 +217,8 @@ class UserMeSerializer(serializers.ModelSerializer):
             "last_name",
             "phone_number",
             "is_active",
-            "is_platform_admin",
+            "profile_role",
             "account_created_by",
-            "memberships",
         )
         read_only_fields = fields
 
@@ -201,17 +234,6 @@ class UserMeSerializer(serializers.ModelSerializer):
             }
         ).data
 
-    @extend_schema_field(UserMembershipSerializer(many=True))
-    def get_memberships(self, obj):
-        memberships = getattr(obj, "active_memberships_for_me", None)
-        if memberships is None:
-            memberships = (
-                obj.club_memberships.granting_access()
-                .select_related("club", "court")
-                .order_by("club__name", "role", "id")
-            )
-        return UserMembershipSerializer(memberships, many=True).data
-
 
 class UserListSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
@@ -226,7 +248,6 @@ class UserListSerializer(serializers.ModelSerializer):
             "last_name",
             "phone_number",
             "is_active",
-            "is_platform_admin",
             "created_by",
         )
         read_only_fields = fields
@@ -234,6 +255,9 @@ class UserListSerializer(serializers.ModelSerializer):
 
 class UserCreateSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
+    is_platform_admin = serializers.BooleanField(
+        write_only=True, required=False, default=False
+    )
     non_platform_user_error = (
         "Club users must be created through a club-scoped membership endpoint."
     )
@@ -249,7 +273,6 @@ class UserCreateSerializer(serializers.ModelSerializer):
             "last_name",
             "phone_number",
             "is_active",
-            "is_platform_admin",
         )
         read_only_fields = ("id",)
         extra_kwargs = {
@@ -281,12 +304,19 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         password = validated_data.pop("password")
-        return User.objects.create_user(
+        is_platform_admin = validated_data.pop("is_platform_admin", False)
+        user = User.objects.create_user(
             password=password,
             is_staff=False,
             is_superuser=False,
             **validated_data,
         )
+        if is_platform_admin:
+            profile = Profile.objects.create(user=user, role=Profile.Role.ADMIN)
+            from apps.profiles.models import AdminProfile
+
+            AdminProfile.objects.create(profile=profile)
+        return user
 
     def to_representation(self, instance):
         return UserListSerializer(instance, context=self.context).data
@@ -301,7 +331,6 @@ class UserUpdateSerializer(serializers.ModelSerializer):
             "last_name",
             "phone_number",
             "is_active",
-            "is_platform_admin",
         )
 
     def to_representation(self, instance):

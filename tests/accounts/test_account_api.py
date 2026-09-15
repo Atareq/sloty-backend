@@ -7,12 +7,14 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
+from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from apps.accounts.models import User
 from apps.accounts.services import find_orphan_business_users
 from apps.clubs.models import Club, ClubMembership
 from apps.courts.models import Court
+from apps.players.models import PlayerProfile
 
 
 class AccountAPITestCase(APITestCase):
@@ -125,6 +127,7 @@ class MeAPITests(AccountAPITestCase):
             {"id": creator.id, "name": "Creator User"},
         )
         self.assertNotIn("password", response.data)
+        self.assertNotIn("hash_password", response.data)
 
         memberships = {item["id"]: item for item in response.data["memberships"]}
         self.assertEqual(set(memberships), {owner_membership.id, staff_membership.id})
@@ -264,6 +267,49 @@ class JWTAPITests(AccountAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_login_failures_do_not_reveal_account_state(self):
+        active_user = self.create_user(username="enumeration-active-user")
+        inactive_user = self.create_user(
+            username="enumeration-inactive-user",
+            is_active=False,
+        )
+
+        wrong_password_response = self.client.post(
+            reverse("token_obtain_pair"),
+            {"username": active_user.username, "password": "wrong-password"},
+            format="json",
+        )
+        unknown_user_response = self.client.post(
+            reverse("token_obtain_pair"),
+            {"username": "unknown-user", "password": "wrong-password"},
+            format="json",
+        )
+        inactive_user_response = self.client.post(
+            reverse("token_obtain_pair"),
+            {"username": inactive_user.username, "password": self.password},
+            format="json",
+        )
+
+        self.assertEqual(
+            wrong_password_response.status_code, status.HTTP_401_UNAUTHORIZED
+        )
+        self.assertEqual(
+            unknown_user_response.status_code, status.HTTP_401_UNAUTHORIZED
+        )
+        self.assertEqual(
+            inactive_user_response.status_code, status.HTTP_401_UNAUTHORIZED
+        )
+        self.assertEqual(wrong_password_response.data, unknown_user_response.data)
+        self.assertEqual(wrong_password_response.data, inactive_user_response.data)
+
+    def test_malformed_login_returns_validation_error(self):
+        response = self.client.post(reverse("token_obtain_pair"), {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
+        self.assertIn("username", response.data["field_errors"])
+        self.assertIn("password", response.data["field_errors"])
 
     def test_inactive_user_cannot_obtain_token(self):
         user = self.create_user(username="inactive-token-user", is_active=False)
@@ -425,12 +471,279 @@ class JWTAPITests(AccountAPITestCase):
         self.assertEqual(claims["club_id"], club.id)
         self.assertEqual(claims["court_id"], court.id)
 
+    def test_invalid_refresh_token_returns_token_not_valid(self):
+        response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": "not-a-token"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["code"], "TOKEN_NOT_VALID")
+
+    def test_expired_refresh_token_returns_token_not_valid(self):
+        user = self.create_user(username="expired-refresh-user")
+        refresh = RefreshToken.for_user(user)
+        refresh.set_exp(lifetime=timedelta(seconds=-1))
+
+        response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": str(refresh)},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["code"], "TOKEN_NOT_VALID")
+
+    def test_refresh_is_repeatable_without_rotation(self):
+        user = self.create_user(username="repeatable-refresh-user")
+        token_response = self.obtain_token(user.username)
+
+        first_response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": token_response.data["refresh"]},
+            format="json",
+        )
+        second_response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": token_response.data["refresh"]},
+            format="json",
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", first_response.data)
+        self.assertIn("access", second_response.data)
+        self.assertNotIn("refresh", first_response.data)
+        self.assertNotIn("refresh", second_response.data)
+
+    def test_refresh_for_inactive_user_returns_user_inactive(self):
+        user = self.create_user(username="inactive-refresh-user")
+        token_response = self.obtain_token(user.username)
+        user.is_active = False
+        user.save(update_fields=["is_active"])
+
+        response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": token_response.data["refresh"]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["code"], "USER_INACTIVE")
+
+    def test_refresh_for_deleted_user_returns_user_deleted(self):
+        user = self.create_user(username="deleted-refresh-user")
+        token_response = self.obtain_token(user.username)
+        user.delete()
+
+        response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": token_response.data["refresh"]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["code"], "USER_DELETED")
+
+    def test_claimless_access_and_refresh_tokens_require_reauthentication(self):
+        user = self.create_user(username="claimless-token-user")
+        refresh = RefreshToken.for_user(user)
+        del refresh[api_settings.REVOKE_TOKEN_CLAIM]
+        access = refresh.access_token
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+        access_response = self.client.get(reverse("me"))
+        refresh_response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": str(refresh)},
+            format="json",
+        )
+
+        self.assertEqual(access_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(access_response.data["code"], "PASSWORD_CHANGED")
+        self.assertEqual(refresh_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(refresh_response.data["code"], "PASSWORD_CHANGED")
+
+    def test_stale_club_claim_does_not_bypass_deactivated_membership(self):
+        staff = self.create_user(username="stale-membership-claims-user")
+        club = self.create_club("Stale Claims Club", "stale-claims-club")
+        court = self.create_court(club, "Stale Claims Court")
+        membership = self.create_membership(
+            staff,
+            club,
+            ClubMembership.Role.STAFF,
+            court=court,
+        )
+        token_response = self.obtain_token(staff.username, club_slug=club.slug)
+        membership.is_active = False
+        membership.save(update_fields=["is_active"])
+
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {token_response.data['access']}"
+        )
+        response = self.client.get(
+            reverse("club-court-list", kwargs={"club_slug": club.slug})
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["code"], "CLUB_ACCESS_REVOKED")
+
     def test_user_model_does_not_store_club_scoped_role_fields(self):
         user_fields = {field.name for field in User._meta.get_fields()}
 
         self.assertNotIn("role", user_fields)
         self.assertNotIn("club", user_fields)
         self.assertNotIn("court", user_fields)
+
+
+class PasswordChangeAPITests(AccountAPITestCase):
+    new_password = "New-password-987"
+
+    def setUp(self):
+        self.user = self.create_user(username="password-change-user")
+
+    def password_change_url(self):
+        return reverse("password-change")
+
+    def obtain_token(self, username):
+        return self.client.post(
+            reverse("token_obtain_pair"),
+            {"username": username, "password": self.password},
+            format="json",
+        )
+
+    def authenticate_user(self):
+        self.client.force_authenticate(user=self.user)
+
+    def password_change_payload(self, **overrides):
+        payload = {
+            "current_password": self.password,
+            "new_password": self.new_password,
+            "new_password_confirmation": self.new_password,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_anonymous_user_cannot_change_password(self):
+        response = self.client.post(
+            self.password_change_url(),
+            self.password_change_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_user_can_change_own_password_without_changing_memberships(self):
+        club = self.create_club("Password Change Club", "password-change-club")
+        membership = self.create_membership(
+            self.user,
+            club,
+            ClubMembership.Role.OWNER,
+        )
+        player_profile = PlayerProfile.objects.create(
+            phone_number="+201066661111",
+            full_name="Password Change Player",
+            user=self.user,
+        )
+        original_password_hash = self.user.password
+        self.authenticate_user()
+
+        response = self.client.post(
+            self.password_change_url(),
+            self.password_change_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(response.content, b"")
+        self.user.refresh_from_db()
+        membership.refresh_from_db()
+        player_profile.refresh_from_db()
+        self.assertNotEqual(self.user.password, original_password_hash)
+        self.assertTrue(self.user.check_password(self.new_password))
+        self.assertFalse(self.user.check_password(self.password))
+        self.assertTrue(membership.is_active)
+        self.assertEqual(membership.role, ClubMembership.Role.OWNER)
+        self.assertEqual(player_profile.user_id, self.user.id)
+
+    def test_wrong_current_password_returns_validation_error(self):
+        self.authenticate_user()
+
+        response = self.client.post(
+            self.password_change_url(),
+            self.password_change_payload(current_password="wrong-password"),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
+        self.assertIn("current_password", response.data["field_errors"])
+
+    def test_password_confirmation_mismatch_returns_validation_error(self):
+        self.authenticate_user()
+
+        response = self.client.post(
+            self.password_change_url(),
+            self.password_change_payload(
+                new_password_confirmation="different-password"
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
+        self.assertIn("new_password_confirmation", response.data["field_errors"])
+
+    def test_invalid_new_password_returns_validation_error(self):
+        self.authenticate_user()
+
+        response = self.client.post(
+            self.password_change_url(),
+            self.password_change_payload(
+                new_password="short",
+                new_password_confirmation="short",
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
+        self.assertIn("new_password", response.data["field_errors"])
+
+    def test_password_change_invalidates_existing_access_and_refresh_tokens(self):
+        token_response = self.obtain_token(self.user.username)
+        self.authenticate_user()
+
+        password_change_response = self.client.post(
+            self.password_change_url(),
+            self.password_change_payload(),
+            format="json",
+        )
+        self.client.force_authenticate(user=None)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {token_response.data['access']}"
+        )
+        access_response = self.client.get(reverse("me"))
+        refresh_response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": token_response.data["refresh"]},
+            format="json",
+        )
+        new_login_response = self.client.post(
+            reverse("token_obtain_pair"),
+            {"username": self.user.username, "password": self.new_password},
+            format="json",
+        )
+
+        self.assertEqual(
+            password_change_response.status_code, status.HTTP_204_NO_CONTENT
+        )
+        self.assertEqual(access_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(access_response.data["code"], "PASSWORD_CHANGED")
+        self.assertEqual(refresh_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(refresh_response.data["code"], "PASSWORD_CHANGED")
+        self.assertEqual(new_login_response.status_code, status.HTTP_200_OK)
 
 
 class PlatformUserManagementAPITests(AccountAPITestCase):

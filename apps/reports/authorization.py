@@ -17,11 +17,11 @@ This module keeps:
 """
 
 from apps.bookings.models import Booking
-from apps.clubs.models import ClubMembership
 from apps.common.authorization.context import RequestAccessContext
 from apps.common.authorization.querysets import scoped_queryset
 from apps.common.authorization.scopes import ResourceScope
 from apps.courts.models import Court
+from apps.profiles.models import Profile
 
 
 def can_access_report_court(context: RequestAccessContext, court) -> bool:
@@ -44,11 +44,16 @@ def can_filter_reports_by_staff(context: RequestAccessContext, user) -> bool:
     """
     if user is None or getattr(context, "club", None) is None:
         return False
-    return (
-        ClubMembership.objects.granting_access()
-        .filter(club=context.club, user=user)
-        .exists()
-    )
+    profile = Profile.objects.filter(user=user).first()
+    if profile is None:
+        return False
+    if profile.role == Profile.Role.ADMIN:
+        return True
+    if profile.role == Profile.Role.OWNER:
+        return profile.owner_profile.clubs.filter(pk=context.club.pk).exists()
+    if profile.role == Profile.Role.STAFF:
+        return profile.staff_profile.court.club_id == context.club.pk
+    return False
 
 
 def scoped_report_courts(context: RequestAccessContext):
