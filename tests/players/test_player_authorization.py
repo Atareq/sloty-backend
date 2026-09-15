@@ -14,7 +14,7 @@ from django.test import TestCase
 from rest_framework.test import APIRequestFactory
 
 from apps.accounts.models import User
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.common.authorization.contracts import load_authorization_config
 from apps.common.authorization.querysets import scoped_queryset
 from apps.common.authorization.resolver import resolve_club_scope
@@ -34,7 +34,6 @@ def make_club(name, slug):
 
 
 def make_membership(user, club, role):
-    return ClubMembership.objects.create(club=club, user=user, role=role)
     role = role.upper()
     if role == "OWNER":
         profile, _ = Profile.objects.get_or_create(
@@ -108,7 +107,6 @@ class ClubPlayerScopedQuerysetTests(TestCase):
         self.owner = make_user("scope-owner")
         self.club_a = make_club("Scope Club A", "scope-club-a")
         self.club_b = make_club("Scope Club B", "scope-club-b")
-        make_membership(self.owner, self.club_a, ClubMembership.Role.OWNER)
         make_membership(self.owner, self.club_a, "OWNER")
 
         self.profile_1 = make_profile("+201010001111")
@@ -140,7 +138,6 @@ class ClubPlayerScopedQuerysetTests(TestCase):
 
     def test_club_b_scope_excludes_club_a_players(self):
         owner_b = make_user("scope-owner-b")
-        make_membership(owner_b, self.club_b, ClubMembership.Role.OWNER)
         make_membership(owner_b, self.club_b, "OWNER")
         ctx = self._context(owner_b, self.club_b)
         qs = scoped_queryset(ctx, ClubPlayer, scope=ResourceScope.CLUB)
@@ -155,7 +152,6 @@ class ClubPlayerScopedQuerysetTests(TestCase):
         cp_b2 = make_club_player(self.club_b, shared_profile, "Club B View")
 
         owner_b = make_user("scope-owner-b2")
-        make_membership(owner_b, self.club_b, ClubMembership.Role.OWNER)
         make_membership(owner_b, self.club_b, "OWNER")
 
         ctx_a = self._context(self.owner, self.club_a)

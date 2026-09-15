@@ -6,7 +6,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.profiles.models import AdminProfile, OwnerProfile, Profile, StaffProfile
 
@@ -22,7 +22,6 @@ class CourtAPITestCase(APITestCase):
         )
 
     def create_platform_admin(self, username="court-admin") -> User:
-        return self.create_user(username=username, is_platform_admin=True)
         user = self.create_user(username=username)
         profile, _ = Profile.objects.get_or_create(
             user=user, defaults={"role": Profile.Role.ADMIN}
@@ -135,23 +134,11 @@ class CourtAPITests(CourtAPITestCase):
         self.platform_admin = self.create_platform_admin()
         self.owner = self.create_user("court-owner")
         self.other_owner = self.create_user("other-court-owner")
-        self.manager = self.create_user("court-manager")
         self.staff = self.create_user("court-staff")
         self.club = self.create_club("Court Club", slug="court-club")
         self.other_club = self.create_club("Other Court Club", slug="other-court-club")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
         self.create_membership(self.owner, self.club, "OWNER")
-        self.create_membership(
-            self.other_owner,
-            self.other_club,
-            ClubMembership.Role.OWNER,
-            "OWNER",
-        )
-        self.manager_membership = self.create_membership(
-            self.manager,
-            self.club,
-            ClubMembership.Role.MANAGER,
-        )
+        self.create_membership(self.other_owner, self.other_club, "OWNER")
 
     def authenticate_platform_admin(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -219,19 +206,11 @@ class CourtAPITests(CourtAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_manager_cannot_create_court(self):
-        self.client.force_authenticate(user=self.manager)
-
-        response = self.post_court(self.club, name="Manager Court")
-
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-
     def test_staff_cannot_create_court(self):
         court = self.create_court(self.club, "Staff Assigned Court")
         self.create_membership(
             self.staff,
             self.club,
-            ClubMembership.Role.STAFF,
             "STAFF",
             court=court,
         )
@@ -296,24 +275,12 @@ class CourtAPITests(CourtAPITestCase):
         self.assertEqual(unrelated_response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertNotIn(other_court.id, self.list_ids(owned_response))
 
-    def test_manager_can_list_courts_inside_assigned_club(self):
-        assigned_court = self.create_court(self.club, "Assigned Court")
-        other_court = self.create_court(self.other_club, "Other Manager Court")
-        self.client.force_authenticate(user=self.manager)
-
-        response = self.client.get(self.court_list_url(self.club))
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(self.list_ids(response), {assigned_court.id})
-        self.assertNotIn(other_court.id, self.list_ids(response))
-
     def test_staff_can_see_assigned_court_only(self):
         assigned_court = self.create_court(self.club, "Staff Court")
         other_court = self.create_court(self.club, "Hidden Staff Court")
         self.create_membership(
             self.staff,
             self.club,
-            ClubMembership.Role.STAFF,
             "STAFF",
             court=assigned_court,
         )
@@ -337,22 +304,6 @@ class CourtAPITests(CourtAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_manager_cannot_update_non_price_fields(self):
-        self.manager_membership.manager_can_change_pricing = True
-        self.manager_membership.save(update_fields=["manager_can_change_pricing"])
-        court = self.create_court(self.club, "Manager Non Price Court")
-        self.client.force_authenticate(user=self.manager)
-
-        response = self.client.patch(
-            self.court_detail_url(self.club, court),
-            {"name": "Blocked Name"},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        court.refresh_from_db()
-        self.assertEqual(court.name, "Manager Non Price Court")
-
     def test_owner_can_update_court_name(self):
         court = self.create_court(self.club, "Owner Name Court")
         self.client.force_authenticate(user=self.owner)
@@ -372,7 +323,6 @@ class CourtAPITests(CourtAPITestCase):
         self.create_membership(
             self.staff,
             self.club,
-            ClubMembership.Role.STAFF,
             "STAFF",
             court=court,
         )
@@ -392,7 +342,6 @@ class CourtAPITests(CourtAPITestCase):
         self.create_membership(
             self.staff,
             self.club,
-            ClubMembership.Role.STAFF,
             "STAFF",
             court=assigned_court,
         )
@@ -413,24 +362,12 @@ class CourtAPITests(CourtAPITestCase):
 class CourtWorkingHourAPITests(CourtAPITestCase):
     def setUp(self):
         self.owner = self.create_user("hours-owner")
-        self.manager = self.create_user("hours-manager")
         self.other_owner = self.create_user("hours-other-owner")
         self.staff = self.create_user("hours-staff")
         self.club = self.create_club("Hours Club", slug="hours-club")
         self.other_club = self.create_club("Other Hours Club", slug="other-hours-club")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.manager_membership = self.create_membership(
-            self.manager,
-            self.club,
-            ClubMembership.Role.MANAGER,
-        )
         self.create_membership(self.owner, self.club, "OWNER")
-        self.create_membership(
-            self.other_owner,
-            self.other_club,
-            ClubMembership.Role.OWNER,
-            "OWNER",
-        )
+        self.create_membership(self.other_owner, self.other_club, "OWNER")
         self.court = self.create_court(self.club, "Hours Court")
         self.other_court = self.create_court(self.other_club, "Other Hours Court")
 
@@ -500,17 +437,6 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(response.data["code"], "WORKING_HOURS_USE_WEEKLY_ENDPOINT")
 
-    def test_manager_without_pricing_permission_cannot_manage_working_hours(self):
-        self.client.force_authenticate(user=self.manager)
-
-        response = self.client.put(
-            self.nested_working_hour_url(self.club, self.court),
-            self.weekly_payload(self.open_row()),
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-
     def test_owner_cannot_manage_unrelated_court_working_hours(self):
         self.client.force_authenticate(user=self.owner)
 
@@ -522,7 +448,6 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         self.create_membership(
             self.staff,
             self.club,
-            ClubMembership.Role.STAFF,
             "STAFF",
             court=self.court,
         )
@@ -583,7 +508,6 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         self.create_membership(
             self.staff,
             self.club,
-            ClubMembership.Role.STAFF,
             "STAFF",
             court=self.court,
         )
@@ -832,7 +756,6 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         self.create_membership(
             self.staff,
             self.club,
-            ClubMembership.Role.STAFF,
             "STAFF",
             court=self.court,
         )

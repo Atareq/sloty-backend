@@ -109,7 +109,7 @@ class PlayerProfileUserLinkTests(TestCase):
         user = make_user("account-without-player-profile")
 
         self.assertFalse(PlayerProfile.objects.filter(user=user).exists())
-        self.assertFalse(ClubPlayer.objects.exists())
+        self.assertFalse(ClubPlayer.objects.filter(player_profile__user=user).exists())
 
     def test_profile_without_user_is_valid(self):
         p = make_profile("+201012345678")

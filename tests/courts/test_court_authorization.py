@@ -13,10 +13,9 @@ Validates:
    touched.
 4. Staff assigned-court isolation returns 404 (no existence leak) for both
    the Court detail endpoint and the nested weekly working-hours endpoint.
-5. The one rule the centralized Role -> ViewSet -> Action matrix cannot
-   express - a Manager's per-membership `manager_can_change_pricing`
-   delegation - is covered directly at the apps.courts.authorization unit
-   level and through the API.
+5. Working-hours write authority is covered at the
+   apps.courts.authorization unit level: only Platform Admin and Owner may
+   manage working hours; Staff cannot.
 6. The deprecated CourtWorkingHourViewSet reuses the
    CourtWeeklyWorkingHoursViewSet matrix entries (no duplicated/second
    permission surface for the legacy endpoint).
@@ -195,25 +194,6 @@ class CourtAuthorizationAPITests(CourtAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-    def test_manager_without_pricing_flag_gets_conflict_on_legacy_write(self):
-        """
-        The centralized matrix grants MANAGER the "create" action on the
-        deprecated endpoint (same authority surface as the weekly endpoint);
-        the view unconditionally converts every individual write into 409
-        WORKING_HOURS_USE_WEEKLY_ENDPOINT before any pricing-flag check would
-        even apply.
-        """
-        self.client.force_authenticate(user=self.manager)
-
-        response = self.client.post(
-            self.working_hour_list_url(self.club),
-            {"court": self.court.id, "weekday": 0},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-        self.assertEqual(response.data["code"], "WORKING_HOURS_USE_WEEKLY_ENDPOINT")
-
     def test_legacy_working_hour_viewset_reuses_weekly_matrix_entry(self):
         from apps.courts.views import CourtWorkingHourViewSet
 
@@ -225,9 +205,6 @@ class CourtAuthorizationAPITests(CourtAPITestCase):
 
 class CanManageWorkingHoursHelperTests(CourtAPITestCase):
     """
-    Unit coverage of the single domain invariant the centralized matrix
-    cannot express: a Manager's authority to manage working hours is gated
-    by a per-membership delegation flag, not by role alone.
     Unit coverage of domain invariants for managing working hours.
     """
 
@@ -251,18 +228,6 @@ class CanManageWorkingHoursHelperTests(CourtAPITestCase):
         )
         self.assertTrue(
             can_manage_working_hours(self.context_for(self.owner), self.court)
-        )
-
-    def test_manager_requires_pricing_delegation_flag(self):
-        self.assertFalse(
-            can_manage_working_hours(self.context_for(self.manager), self.court)
-        )
-
-        self.manager_membership.manager_can_change_pricing = True
-        self.manager_membership.save(update_fields=["manager_can_change_pricing"])
-
-        self.assertTrue(
-            can_manage_working_hours(self.context_for(self.manager), self.court)
         )
 
     def test_staff_can_never_manage_working_hours(self):
