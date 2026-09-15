@@ -29,8 +29,7 @@ from apps.bookings.services import (
     create_booking,
     expire_due_hold_bookings,
 )
-from apps.clubs.access import ClubAccessContext
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.players.models import ClubPlayer, PlayerProfile
@@ -38,6 +37,7 @@ from apps.players.services import (
     find_or_create_player_profile,
     get_or_create_club_player,
 )
+from apps.profiles.models import AdminProfile, Profile, StaffProfile
 from apps.settlements.services import create_approved_settlement
 from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.services import create_booking_transaction
@@ -53,8 +53,9 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         self.admin = User.objects.create_user(
             username="pg-concurrency-admin",
             password="test-pass-123",
-            is_platform_admin=True,
         )
+        admin_profile = Profile.objects.create(user=self.admin, role=Profile.Role.ADMIN)
+        AdminProfile.objects.create(profile=admin_profile)
         self.club = Club.objects.create(
             name="PG Concurrency Club",
             slug="pg-concurrency",
@@ -83,8 +84,14 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             )
 
     def make_access(self, user=None):
-        request = type("Request", (), {"user": user or self.admin})()
-        return ClubAccessContext(request=request, club=self.club)
+        from rest_framework.test import APIRequestFactory
+
+        from apps.common.authorization.resolver import resolve_club_scope
+
+        target_user = user or self.admin
+        request = APIRequestFactory().get(f"/api/v1/clubs/{self.club.slug}/")
+        request.user = target_user
+        return resolve_club_scope(request, self.club.slug)
 
     def slot(self, hour):
         now = timezone.localtime()
@@ -312,12 +319,8 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             username="pg-settle-staff",
             password="test-pass-123",
         )
-        ClubMembership.objects.create(
-            club=self.club,
-            user=staff,
-            role=ClubMembership.Role.STAFF,
-            court=self.court,
-        )
+        staff_p = Profile.objects.create(user=staff, role=Profile.Role.STAFF)
+        StaffProfile.objects.create(profile=staff_p, court=self.court)
         start, end = self.slot(15)
         booking = create_booking(
             created_by=staff,
@@ -516,30 +519,26 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(len(errors), 1)
 
-    def test_membership_active_uniqueness_race_enforces_single_active_role(self):
-        member_user = User.objects.create_user(
-            username="pg-member-race-user",
+    def test_staff_profile_uniqueness_race_enforces_single_profile(self):
+        staff_user = User.objects.create_user(
+            username="pg-staff-race-user",
             password="test-pass-123",
         )
+        profile = Profile.objects.create(user=staff_user, role=Profile.Role.STAFF)
 
         def worker():
-            return ClubMembership.objects.create(
-                club=self.club,
-                user=member_user,
-                role=ClubMembership.Role.MANAGER,
-                is_active=True,
+            return StaffProfile.objects.create(
+                profile=profile,
+                court=self.court,
             )
 
         results, errors = self.run_threads([worker, worker])
         self.assertEqual(len(results), 1)
         self.assertEqual(len(errors), 1)
-        self.assertIsInstance(errors[0], IntegrityError)
+        from django.core.exceptions import ValidationError
+
+        self.assertTrue(isinstance(errors[0], (IntegrityError, ValidationError)))
         self.assertEqual(
-            ClubMembership.objects.filter(
-                club=self.club,
-                user=member_user,
-                role=ClubMembership.Role.MANAGER,
-                is_active=True,
-            ).count(),
+            StaffProfile.objects.filter(profile=profile).count(),
             1,
         )

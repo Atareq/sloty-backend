@@ -8,7 +8,7 @@
 
 - **Operational vs. Financial Access Separation**:
   - Operational metrics (court availability, calendar, summary operational cards) are accessible to Staff for their assigned court.
-  - Financial endpoints (`overview`, `revenue`, `court-utilization`) are restricted to Platform Admins, Owners, and Managers; Staff receive 403 from `ROLE_PERMISSIONS["DashboardViewSet"]`.
+  - Financial endpoints (`overview`, `revenue`, `court-utilization`) are restricted to Platform Admins and Owners; Staff receive 403 from `ROLE_PERMISSIONS["DashboardViewSet"]`.
   - The `/dashboard/summary/` endpoint supports both: Staff receive operational counts, while all financial fields are set to `null` (`can_view_financial_summary() == False`). This is a read-model presentation rule, not a second security engine.
 - **Unsettled Transactions Authority**:
   - Dashboard settlement metrics are computed from live unsettled transactions (`is_cancelled=False` and `settlement_line IS NULL`), **never** from `Settlement.status=PENDING`.
@@ -53,7 +53,7 @@ Authorized source querysets are built **before** aggregation via source-domain `
 | `availability` | All club roles | Court in URL; Staff unassigned court → 403 |
 | `calendar` | All club roles | Booking Club + Court |
 | `summary` | All club roles | Bookings/courts Club + Court; financial fields null for Staff; custody Club + optional Collector (explicit `court`/`collected_by` query filters only) |
-| `overview` / `revenue` / `court_utilization` | Admin / Owner / Manager | Bookings & period transactions Club + Court (all club courts for these roles); custody Club + optional Collector; settled settlement totals Club (never collector narrowing) |
+| `overview` / `revenue` / `court_utilization` | Admin / Owner | Bookings & period transactions Club + Court (all club courts for these roles); custody Club + optional Collector; settled settlement totals Club (never collector narrowing) |
 
 Do not apply Transaction Staff `created_by` narrowing to dashboard financial aggregations. Do not apply Settlement collector narrowing to dashboard settlement totals. Do not implicitly court-scope custody from Staff assignment.
 

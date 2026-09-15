@@ -5,7 +5,7 @@ Court Usage Report is a read/aggregation endpoint with no Report table.
 Ordinary Club/Court WHERE is resolved through source-domain
 authorization_config + scoped_queryset:
 
-- Courts / Bookings → COURT (Admin/Owner/Manager see all club courts)
+- Courts / Bookings → COURT (Admin/Owner see all club courts)
 - Paid amounts are annotations on those authorized bookings. Do not apply
   Transaction Staff created_by narrowing or Settlement collector narrowing.
 - There is no Settlement/custody dataset on this report.

@@ -26,9 +26,15 @@ def scoped_clubs_for_user(user):
     if profile.role == Profile.Role.ADMIN:
         return Club.objects.all()
     if profile.role == Profile.Role.OWNER:
-        return profile.owner_profile.clubs.all()
+        owner_profile = getattr(profile, "owner_profile", None)
+        return owner_profile.clubs.all() if owner_profile else Club.objects.none()
     if profile.role == Profile.Role.STAFF:
-        return Club.objects.filter(pk=profile.staff_profile.court.club_id)
+        staff_profile = getattr(profile, "staff_profile", None)
+        return (
+            Club.objects.filter(pk=staff_profile.court.club_id)
+            if staff_profile
+            else Club.objects.none()
+        )
     return Club.objects.none()
 
 

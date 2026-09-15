@@ -61,8 +61,8 @@ DjangoFilterBackend / search / pagination / serializers
 - **Club only.** Every `AuditLog` row has a required `club` FK. List and retrieve are scoped to the URL club before filters, search, or pagination.
 - **Not court-scoped.** `AuditLog.court` is nullable (membership deletes, some settlements). Do not apply Booking/Transaction `CLUB + COURT` to audit rows — that would hide null-court events.
 - **Not collector-scoped.** Do not apply Settlement collector narrowing to audit rows.
-- **Not actor-scoped.** Owners and Managers see all actors in the club, including Staff actions.
-- **WHO:** Platform Admin, Owner, and Manager may `list` and `retrieve`. Staff are matrix-denied (HTTP 403), including their own actions.
+- **Not actor-scoped.** Owners see all actors in the club, including Staff actions.
+- **WHO:** Platform Admin and Owner may `list` and `retrieve`. Staff are matrix-denied (HTTP 403), including their own actions.
 - **Out-of-club IDs:** omitted from the scoped queryset → HTTP 404. Other-club members hitting this club's URL remain HTTP 403.
 - Search (phone / entity / actor / court filters) may only narrow the already-authorized queryset.
 - Event creation (`record_audit_log()`) is unchanged. This migration does not rewrite historical rows, snapshots, payloads, timestamps, or actors.

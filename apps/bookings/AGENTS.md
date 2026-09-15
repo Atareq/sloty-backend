@@ -154,9 +154,9 @@ Request → Authentication → resolve_club_scope → Spine scoped QuerySet (clu
 - **Booking boundary:** Club + Court. Not `created_by`. Staff on Court A see all bookings on Court A.
 - **Out-of-scope rows:** omitted from the queryset → HTTP 404 on retrieve and lifecycle actions (no existence leak via 403).
 - **Create / slots / reschedule target court:** the court in the request body must be inside the same Spine court queryset; denial remains HTTP 403.
-- **BookingAttempt:** Club + Court, then Staff narrowed to `attempted_by=request.user`. Owner/Manager/Admin can list/retrieve club+court attempts but may dismiss only their own (`check_object_permission`).
+- **BookingAttempt:** Club + Court, then Staff narrowed to `attempted_by=request.user`. Owner/Admin can list/retrieve club+court attempts but may dismiss only their own (`check_object_permission`).
 - Do **not** create `bookings/authorization.py` to re-express court assignment. `actor_requires_staff_cancel_reason()` remains a service business rule (Staff cancel requires a reason).
-- Legacy `ClubAccessContext` / `ClubScopedAccessMixin` remain because Club memberships are unmigrated. Dead booking/audit/dashboard/report/settlement permission wrappers were removed. Booking ViewSets do not use the legacy layer.
+- Booking ViewSets consume the Profile-backed Authorization Spine. The compatibility-only `ClubAccessContext` is not used by runtime request handling.
 
 ## Service Layer
 

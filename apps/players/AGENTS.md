@@ -22,7 +22,7 @@ Authentication Identity
         │
        User (apps/accounts)
         │
-        ├── Club Operational Actor ──► ClubMembership (apps/clubs)
+        ├── Operational Profile ──► Profile (apps/profiles)
         │
         └── Customer Identity ──► PlayerProfile ──► ClubPlayer  ← THIS APP
 ```
@@ -44,7 +44,7 @@ Authentication Identity
 6. **Phone is the only merge key**: same phone = same `PlayerProfile`. Different phone = different `PlayerProfile`. No name-based matching, no automatic merging, no identity transfer.
 7. **`PlayerProfile.full_name` is the player's preferred personal name.** Clubs do not control it. It is never auto-synchronized with `ClubPlayer.display_name`.
 8. **Identity fields are immutable after create**: `club`, `player_profile`, `display_name`, `player_number`, `previous_version`. The only allowed post-create update is `is_current_version` (current → historical pointer). No `last_used_at`. No `updated_at`. No PATCH endpoint.
-9. **No `StaffProfile` / `OwnerProfile`**: Do not create staff or owner profile tables here. `ClubMembership` is the operational actor; this app is purely for customer identity.
+9. **Separate identity boundaries**: Do not create or modify operational Profile tables here. `apps/profiles` owns owner/staff/admin authority; this app is purely for customer identity.
 
 ---
 
@@ -170,7 +170,6 @@ Entries in [`apps/common/authorization/matrix.py`](file:///home/tarek/Desktop/sl
 |---|---|---|
 | ADMIN | list, retrieve, create | list, retrieve, create |
 | OWNER | list, retrieve, create | list, retrieve, create |
-| MANAGER | list, retrieve, create | list, retrieve, create |
 | STAFF | list, retrieve, create | list, retrieve, create |
 
 No `update`/`partial_update` for any role. See "ClubPlayer Lifecycle (Versioned, Append-Only)" above.
@@ -272,7 +271,8 @@ Test suite: [`tests/players/`](file:///home/tarek/Desktop/sloty/sloty-backend/te
 ## Cross-App Dependencies & References
 
 - `apps/accounts` — `User` model (nullable FK on `PlayerProfile`)
-- `apps/clubs` — `Club` model (FK on `ClubPlayer`), `ClubMembership`
+- `apps/clubs` — `Club` model (FK on `ClubPlayer`)
+- `apps/profiles` — operational role authority; it is separate from customer identity
 - `apps/common/authorization/` — Spine v2
 - `apps/bookings` — `Booking.club_player` FK; default current version; optional historical id; recurrence copies the anchor version
 - Architecture: [`docs/architecture/security-architecture-v1.md §11`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md)

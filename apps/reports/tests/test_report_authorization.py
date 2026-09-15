@@ -3,7 +3,7 @@ Regression tests for Reports Authorization Spine Migration (Sprint 10).
 
 Court Usage Report is a read model. These tests prove:
 1. The endpoint composes ClubScopedViewMixin + SlotyBasePermission.
-2. Matrix: Admin / Owner / Manager list; Staff denied.
+2. Matrix: Admin / Owner list; Staff denied.
 3. Club isolation of occupancy and financial aggregates.
 4. Court filter cannot broaden to another club (HTTP 403).
 5. Staff created_by filter cannot name a user outside this club.
@@ -19,7 +19,6 @@ from django.urls import reverse
 from rest_framework import status
 
 from apps.bookings.models import Booking
-from apps.clubs.models import ClubMembership
 from apps.common.authorization.matrix import is_action_allowed
 from apps.common.authorization.mixins import ClubScopedViewMixin
 from apps.common.authorization.permissions import SlotyBasePermission
@@ -42,7 +41,7 @@ class CourtUsageReportSpineCompositionTests(CourtUsageReportAPITestCase):
         self.assertEqual(CourtUsageReportAPIView.action, "list")
 
     def test_matrix_matches_approved_report_actions(self):
-        for role in (Role.ADMIN, Role.OWNER, Role.MANAGER):
+        for role in (Role.ADMIN, Role.OWNER):
             self.assertTrue(is_action_allowed(role, "CourtUsageReportViewSet", "list"))
             self.assertTrue(
                 is_action_allowed(role, "CourtUsageReportViewSet", "retrieve")
@@ -169,11 +168,11 @@ class CourtUsageReportAuthorizationTests(CourtUsageReportAPITestCase):
             "1200.00",
         )
 
-    def test_report_does_not_update_last_sync_at(self):
-        membership = ClubMembership.objects.get(user=self.owner, club=self.club)
-        self.assertIsNone(membership.last_sync_at)
+    def test_report_does_not_update_profile_state(self):
+        profile = self.owner.profile
+        modified = profile.modified
         self.client.force_authenticate(user=self.owner)
         response = self.client.get(self.url(), self.params())
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        membership.refresh_from_db()
-        self.assertIsNone(membership.last_sync_at)
+        profile.refresh_from_db()
+        self.assertEqual(profile.modified, modified)

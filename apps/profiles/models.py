@@ -1,5 +1,5 @@
 from django.conf import settings
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import models
 
 
@@ -26,6 +26,29 @@ class Profile(models.Model):
     def __str__(self) -> str:
         return f"{self.user} ({self.role})"
 
+    def clean(self):
+        super().clean()
+        if not self.pk:
+            return
+        extension_roles = (
+            ("owner_profile", self.Role.OWNER),
+            ("staff_profile", self.Role.STAFF),
+            ("admin_profile", self.Role.ADMIN),
+        )
+        for relation, expected_role in extension_roles:
+            try:
+                getattr(self, relation)
+            except ObjectDoesNotExist:
+                continue
+            if self.role != expected_role:
+                raise ValidationError(
+                    {"role": f"{relation} requires role {expected_role}."}
+                )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
 
 class OwnerProfile(models.Model):
     """Owner-specific extension; club ownership is intentionally many-to-many."""
@@ -46,6 +69,10 @@ class OwnerProfile(models.Model):
 
     def __str__(self) -> str:
         return f"OwnerProfile({self.profile.user})"
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
 
 
 class StaffProfile(models.Model):
@@ -70,6 +97,10 @@ class StaffProfile(models.Model):
     def __str__(self) -> str:
         return f"StaffProfile({self.profile.user}, court={self.court_id})"
 
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
 
 class AdminProfile(models.Model):
     """Admin-specific extension. Platform-wide authority remains Profile.role."""
@@ -89,3 +120,7 @@ class AdminProfile(models.Model):
 
     def __str__(self) -> str:
         return f"AdminProfile({self.profile.user})"
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)

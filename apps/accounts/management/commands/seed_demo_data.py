@@ -9,9 +9,10 @@ from apps.accounts.models import User
 from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.bookings.services import resolve_booking_club_player
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.courts.services import replace_weekly_working_hours
+from apps.profiles.models import AdminProfile, OwnerProfile, Profile, StaffProfile
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
@@ -23,7 +24,7 @@ ALBALADYA_USER_SPECS = (
         "email": "admin@sloty.test",
         "first_name": "Platform",
         "last_name": "Admin",
-        "is_platform_admin": True,
+        "role": Profile.Role.ADMIN,
         "created_by": None,
     },
     {
@@ -31,39 +32,28 @@ ALBALADYA_USER_SPECS = (
         "email": "owner@sloty.test",
         "first_name": "Test",
         "last_name": "Owner",
-        "is_platform_admin": False,
+        "role": Profile.Role.OWNER,
         "created_by": "admin",
-    },
-    {
-        "username": "manager",
-        "email": "manager@sloty.test",
-        "first_name": "Test",
-        "last_name": "Manager",
-        "is_platform_admin": False,
-        "created_by": "owner",
     },
     {
         "username": "staff",
         "email": "staff@sloty.test",
         "first_name": "Test",
         "last_name": "Staff",
-        "is_platform_admin": False,
+        "role": Profile.Role.STAFF,
         "created_by": "owner",
     },
 )
 
 USER_SPECS = (
-    ("platform_admin", "Tarek", "Platform Admin", True, True, True),
-    ("hossam_admin", "Hossam", "Platform Admin", True, True, True),
-    ("owner_a", "Owner", "Tarek", False, False, False),
-    ("manager_a", "Manager", "Tarek", False, False, False),
-    ("staff_a", "Staff", "Tarek", False, False, False),
-    ("owner_b", "Owner", "Hossam", False, False, False),
-    ("manager_b", "Manager", "Hossam", False, False, False),
-    ("staff_b", "Staff", "Hossam", False, False, False),
-    ("owner_c", "Owner", "Tarek", False, False, False),
-    ("manager_c", "Manager", "Tarek", False, False, False),
-    ("staff_c", "Staff", "Tarek", False, False, False),
+    ("platform_admin", "Tarek", "Platform Admin", Profile.Role.ADMIN, True, True),
+    ("hossam_admin", "Hossam", "Platform Admin", Profile.Role.ADMIN, True, True),
+    ("owner_a", "Owner", "Tarek", Profile.Role.OWNER, False, False),
+    ("staff_a", "Staff", "Tarek", Profile.Role.STAFF, False, False),
+    ("owner_b", "Owner", "Hossam", Profile.Role.OWNER, False, False),
+    ("staff_b", "Staff", "Hossam", Profile.Role.STAFF, False, False),
+    ("owner_c", "Owner", "Tarek", Profile.Role.OWNER, False, False),
+    ("staff_c", "Staff", "Tarek", Profile.Role.STAFF, False, False),
 )
 
 CLUB_SPECS = (
@@ -75,8 +65,6 @@ CLUB_SPECS = (
         "city": "ASSIUT_MARKAZ",
         "address": "Barcelona FC demo club, Assiut",
         "court_names": ("Spotify Camp Nou", "La Masia Training Court"),
-        "manager_can_settle_transactions": True,
-        "manager_can_change_pricing": True,
     },
     {
         "key": "B",
@@ -86,8 +74,6 @@ CLUB_SPECS = (
         "city": "SOHAG_MARKAZ",
         "address": "Real Madrid CF demo club, Sohag",
         "court_names": ("Santiago Bernabeu", "Valdebebas Training Court"),
-        "manager_can_settle_transactions": False,
-        "manager_can_change_pricing": False,
     },
     {
         "key": "C",
@@ -97,8 +83,6 @@ CLUB_SPECS = (
         "city": "MINYA_MARKAZ",
         "address": "Liverpool FC demo club, Minya",
         "court_names": ("Anfield", "Kirkby Academy Court"),
-        "manager_can_settle_transactions": True,
-        "manager_can_change_pricing": False,
     },
 )
 CLUB_SPECS_BY_KEY = {spec["key"]: spec for spec in CLUB_SPECS}
@@ -139,7 +123,7 @@ TRANSACTION_SPECS = (
 
 AUDIT_ACTION_SPECS = (
     (AuditLog.Action.BOOKING_CREATED, "Booking", "hold", "staff"),
-    (AuditLog.Action.BOOKING_CANCELLED, "Booking", "cancelled", "manager"),
+    (AuditLog.Action.BOOKING_CANCELLED, "Booking", "cancelled", "owner"),
     (AuditLog.Action.TRANSACTION_CREATED, "Transaction", "partial", "staff"),
     (AuditLog.Action.SETTLEMENT_CREATED, "Settlement", "pending", "owner"),
     (AuditLog.Action.SETTLEMENT_MARKED_SETTLED, "Settlement", "settled", "platform"),
@@ -166,7 +150,7 @@ class Command(BaseCommand):
         clubs = self.create_clubs(users)
         courts = self.create_courts(users, clubs)
         self.create_working_hours(courts)
-        memberships = self.create_memberships(users, clubs, courts)
+        profiles = self.create_profiles(users, clubs, courts)
         bookings = self.create_bookings(users, clubs, courts)
         transactions = self.create_transactions(users, bookings)
         settlements = self.create_settlements(users, clubs, courts, transactions)
@@ -182,7 +166,7 @@ class Command(BaseCommand):
             users,
             clubs,
             courts,
-            memberships,
+            profiles,
             bookings,
             transactions,
             settlements,
@@ -194,9 +178,9 @@ class Command(BaseCommand):
             users = self.create_albaladya_users()
             club = self.create_albaladya_club(users)
             court = self.create_albaladya_court(users, club)
-            memberships = self.create_albaladya_memberships(users, club, court)
+            profiles = self.create_albaladya_profiles(users, club, court)
             self.replace_albaladya_working_hours(court)
-        self.print_albaladya_summary(users, club, court, memberships)
+        self.print_albaladya_summary(users, club, court, profiles)
 
     def create_albaladya_users(self):
         users = {}
@@ -208,9 +192,8 @@ class Command(BaseCommand):
                     "first_name": spec["first_name"],
                     "last_name": spec["last_name"],
                     "is_active": True,
-                    "is_platform_admin": spec["is_platform_admin"],
-                    "is_staff": spec["is_platform_admin"],
-                    "is_superuser": spec["is_platform_admin"],
+                    "is_staff": spec["role"] == Profile.Role.ADMIN,
+                    "is_superuser": spec["role"] == Profile.Role.ADMIN,
                 },
             )
             user.set_password(ALBALADYA_PASSWORD)
@@ -226,6 +209,7 @@ class Command(BaseCommand):
             if user.created_by_id != getattr(created_by, "id", None):
                 user.created_by = created_by
                 user.save(update_fields=["created_by"])
+        User.objects.filter(username="manager").update(is_active=False)
         return users
 
     def create_albaladya_club(self, users):
@@ -261,51 +245,25 @@ class Command(BaseCommand):
         )
         return court
 
-    def create_albaladya_memberships(self, users, club, court):
-        specs = (
-            {
-                "key": "owner",
-                "role": ClubMembership.Role.OWNER,
-                "court": None,
-                "created_by": users["admin"],
-                "manager_can_settle_transactions": False,
-                "manager_can_change_pricing": False,
-            },
-            {
-                "key": "manager",
-                "role": ClubMembership.Role.MANAGER,
-                "court": None,
-                "created_by": users["owner"],
-                "manager_can_settle_transactions": True,
-                "manager_can_change_pricing": True,
-            },
-            {
-                "key": "staff",
-                "role": ClubMembership.Role.STAFF,
-                "court": court,
-                "created_by": users["owner"],
-                "manager_can_settle_transactions": False,
-                "manager_can_change_pricing": False,
-            },
-        )
-        memberships = {}
-        for spec in specs:
-            membership, _ = ClubMembership.objects.update_or_create(
-                club=club,
-                user=users[spec["key"]],
-                role=spec["role"],
-                defaults={
-                    "court": spec["court"],
-                    "is_active": True,
-                    "created_by": spec["created_by"],
-                    "manager_can_settle_transactions": spec[
-                        "manager_can_settle_transactions"
-                    ],
-                    "manager_can_change_pricing": spec["manager_can_change_pricing"],
-                },
+    def create_albaladya_profiles(self, users, club, court):
+        profiles = {}
+        for username, role in (
+            ("admin", Profile.Role.ADMIN),
+            ("owner", Profile.Role.OWNER),
+            ("staff", Profile.Role.STAFF),
+        ):
+            profile, _ = Profile.objects.update_or_create(
+                user=users[username], defaults={"role": role}
             )
-            memberships[spec["key"]] = membership
-        return memberships
+            profiles[username] = profile
+
+        AdminProfile.objects.get_or_create(profile=profiles["admin"])
+        owner_profile, _ = OwnerProfile.objects.get_or_create(profile=profiles["owner"])
+        owner_profile.clubs.set([club])
+        StaffProfile.objects.update_or_create(
+            profile=profiles["staff"], defaults={"court": court}
+        )
+        return profiles
 
     def albaladya_working_hours_payload(self):
         rows = []
@@ -349,7 +307,7 @@ class Command(BaseCommand):
             username,
             first_name,
             last_name,
-            is_platform_admin,
+            role,
             is_staff,
             is_superuser,
         ) in USER_SPECS:
@@ -360,7 +318,6 @@ class Command(BaseCommand):
                     "first_name": first_name,
                     "last_name": last_name,
                     "is_active": True,
-                    "is_platform_admin": is_platform_admin,
                     "is_staff": is_staff,
                     "is_superuser": is_superuser,
                 },
@@ -368,6 +325,9 @@ class Command(BaseCommand):
             user.set_password(DEMO_PASSWORD)
             user.save(update_fields=["password"])
             users[username] = user
+        User.objects.filter(
+            username__in=("manager_a", "manager_b", "manager_c")
+        ).update(is_active=False)
         return users
 
     def create_clubs(self, users):
@@ -427,52 +387,27 @@ class Command(BaseCommand):
                         },
                     )
 
-    def create_memberships(self, users, clubs, courts):
-        memberships = {}
+    def create_profiles(self, users, clubs, courts):
+        profiles = {}
+        for username, _, _, role, _, _ in USER_SPECS:
+            profile, _ = Profile.objects.update_or_create(
+                user=users[username], defaults={"role": role}
+            )
+            profiles[username] = profile
+            if role == Profile.Role.ADMIN:
+                AdminProfile.objects.get_or_create(profile=profile)
+
         for club_key, club in clubs.items():
             suffix = club_key.lower()
-            specs = (
-                (
-                    f"owner_{suffix}",
-                    ClubMembership.Role.OWNER,
-                    None,
-                ),
-                (
-                    f"manager_{suffix}",
-                    ClubMembership.Role.MANAGER,
-                    None,
-                ),
-                (
-                    f"staff_{suffix}",
-                    ClubMembership.Role.STAFF,
-                    courts[club_key][1],
-                ),
+            owner_profile, _ = OwnerProfile.objects.get_or_create(
+                profile=profiles[f"owner_{suffix}"]
             )
-            for username, role, court in specs:
-                membership, _ = ClubMembership.objects.update_or_create(
-                    club=club,
-                    user=users[username],
-                    role=role,
-                    defaults={
-                        "court": court,
-                        "manager_can_settle_transactions": (
-                            role == ClubMembership.Role.MANAGER
-                            and CLUB_SPECS_BY_KEY[club_key][
-                                "manager_can_settle_transactions"
-                            ]
-                        ),
-                        "manager_can_change_pricing": (
-                            role == ClubMembership.Role.MANAGER
-                            and CLUB_SPECS_BY_KEY[club_key][
-                                "manager_can_change_pricing"
-                            ]
-                        ),
-                        "is_active": True,
-                        "created_by": users["platform_admin"],
-                    },
-                )
-                memberships[(club_key, role)] = membership
-        return memberships
+            owner_profile.clubs.set([club])
+            StaffProfile.objects.update_or_create(
+                profile=profiles[f"staff_{suffix}"],
+                defaults={"court": courts[club_key][1]},
+            )
+        return profiles
 
     def base_day(self):
         return timezone.localdate() + timedelta(days=7)
@@ -549,7 +484,7 @@ class Command(BaseCommand):
                             "status": status,
                             "source": Booking.Source.MANUAL,
                             "notes": "Demo seed booking.",
-                            "created_by": users["manager_a"],
+                            "created_by": users["owner_a"],
                         },
                     )
                     bookings[(club_key, f"court2_{index}")] = booking
@@ -771,7 +706,7 @@ class Command(BaseCommand):
         users,
         clubs,
         courts,
-        memberships,
+        profiles,
         bookings,
         transactions,
         settlements,
@@ -788,8 +723,7 @@ class Command(BaseCommand):
             self.stdout.write(f"- {club.slug}")
         self.stdout.write("")
         self.stdout.write("Useful checks:")
-        self.stdout.write("- manager_a can settle in barcelona-fc")
-        self.stdout.write("- manager_b cannot settle in real-madrid-cf")
+        self.stdout.write("- owner_a can settle in barcelona-fc")
         self.stdout.write("- staff_a can access only Spotify Camp Nou")
         self.stdout.write("- staff_a cannot access La Masia Training Court")
         self.stdout.write("- staff_a cannot access Real Madrid CF or Liverpool FC data")
@@ -807,12 +741,12 @@ class Command(BaseCommand):
             "Counts: "
             f"users={len(users)}, clubs={len(clubs)}, "
             f"courts={sum(len(club_courts) for club_courts in courts.values())}, "
-            f"memberships={len(memberships)}, bookings={len(bookings)}, "
+            f"profiles={len(profiles)}, bookings={len(bookings)}, "
             f"transactions={len(transactions)}, settlements={len(settlements)}, "
             f"audit_logs={len(audit_logs)}"
         )
 
-    def print_albaladya_summary(self, users, club, court, memberships):
+    def print_albaladya_summary(self, users, club, court, profiles):
         self.stdout.write(self.style.SUCCESS("Albaladya test data is ready."))
         self.stdout.write("")
         self.stdout.write("Club:")
@@ -820,7 +754,7 @@ class Command(BaseCommand):
         self.stdout.write(f"- slug: {club.slug}")
         self.stdout.write("")
         self.stdout.write("Users:")
-        for username in ("admin", "owner", "manager", "staff"):
+        for username in ("admin", "owner", "staff"):
             self.stdout.write(f"- {username} / {ALBALADYA_PASSWORD}")
         self.stdout.write("")
         self.stdout.write("Password:")
@@ -831,18 +765,7 @@ class Command(BaseCommand):
         self.stdout.write("Creation hierarchy:")
         self.stdout.write("- admin created by bootstrap/null")
         self.stdout.write("- owner created by admin")
-        self.stdout.write("- manager created by owner")
         self.stdout.write("- staff created by owner")
-        self.stdout.write("")
-        self.stdout.write("Manager permissions:")
-        self.stdout.write(
-            "- settlements: "
-            f"{'enabled' if memberships['manager'].manager_can_settle_transactions else 'disabled'}"  # noqa
-        )
-        self.stdout.write(
-            "- pricing and working hours: "
-            f"{'enabled' if memberships['manager'].manager_can_change_pricing else 'disabled'}"  # noqa
-        )
         self.stdout.write("")
         self.stdout.write("Staff court:")
         self.stdout.write(f"- {court.name}")

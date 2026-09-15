@@ -7,7 +7,7 @@ authorization_config + scoped_queryset:
 
 - Bookings / operational courts / operational transactions → COURT
 - Persisted Settlement totals on financial dashboards → CLUB (never collector
-  narrowing; financial viewers are Admin/Owner/Manager)
+  narrowing; financial viewers are Admin/Owner)
 - Current custody candidates → Club + optional Collector, with an optional
   explicit court query filter as a read-model filter — never Staff assignment
 

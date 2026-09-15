@@ -16,8 +16,26 @@ from apps.clubs.models import Club
 from apps.common.authorization.context import RequestAccessContext
 from apps.common.authorization.roles import Role
 from apps.common.exceptions import SlotyAPIException
+from apps.profiles.models import Profile
 
 CLUB_ACCESS_REVOKED_MESSAGE = _("Your access to the selected club is no longer active.")
+
+
+def _get_profile_scope(user):
+    """Load the Profile graph once for authorization resolution."""
+    return (
+        Profile.objects.select_related("owner_profile", "staff_profile__court")
+        .prefetch_related("owner_profile__clubs")
+        .filter(user_id=user.pk)
+        .first()
+    )
+
+
+def _owner_has_club(owner_profile, club) -> bool:
+    return bool(
+        owner_profile
+        and any(owner_club.pk == club.pk for owner_club in owner_profile.clubs.all())
+    )
 
 
 def resolve_club_scope(
@@ -47,10 +65,7 @@ def resolve_club_scope(
         raise NotAuthenticated("Authentication credentials were not provided.")
 
     club = get_object_or_404(Club, slug=club_slug)
-    try:
-        profile = user.profile
-    except Exception:
-        profile = None
+    profile = _get_profile_scope(user)
     if profile is None:
         raise SlotyAPIException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -63,14 +78,18 @@ def resolve_club_scope(
     is_platform_admin = role == Role.ADMIN
     owner_profile = getattr(profile, "owner_profile", None)
     staff_profile = getattr(profile, "staff_profile", None)
-    if role == Role.OWNER and not owner_profile.clubs.filter(pk=club.pk).exists():
+    if role == Role.OWNER and (
+        owner_profile is None or not _owner_has_club(owner_profile, club)
+    ):
         raise SlotyAPIException(
             status_code=status.HTTP_403_FORBIDDEN,
             code="CLUB_ACCESS_REVOKED",
             message=CLUB_ACCESS_REVOKED_MESSAGE,
             details={"club_slug": club.slug},
         )
-    if role == Role.STAFF and staff_profile.court.club_id != club.pk:
+    if role == Role.STAFF and (
+        staff_profile is None or staff_profile.court.club_id != club.pk
+    ):
         raise SlotyAPIException(
             status_code=status.HTTP_403_FORBIDDEN,
             code="CLUB_ACCESS_REVOKED",
@@ -121,7 +140,7 @@ def resolve_global_scope(request) -> RequestAccessContext:
     if not user or not user.is_authenticated:
         raise NotAuthenticated("Authentication credentials were not provided.")
 
-    profile = getattr(user, "profile", None)
+    profile = _get_profile_scope(user)
     if profile is None:
         raise SlotyAPIException(
             status_code=status.HTTP_403_FORBIDDEN,

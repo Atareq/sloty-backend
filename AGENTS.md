@@ -37,7 +37,8 @@ Domain-specific business rules, models, invariants, and workflows live inside sc
 | :--- | :--- | :--- |
 | **Accounts** | [`apps/accounts/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/AGENTS.md) | Authentication identity (`User`), platform admin authority, auth endpoints, orphan diagnostics. |
 | **Players** | [`apps/players/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/AGENTS.md) | Global `PlayerProfile` + club-local `ClubPlayer` customer identity (see [`ADR-001`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-001-player-identity-and-booking-link.md)). |
-| **Clubs** | [`apps/clubs/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/AGENTS.md) | Club tenant definitions, `ClubMembership` operational actor lifecycle, location validation, Authorization Spine v2. |
+| **Profiles** | [`apps/profiles/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/profiles/AGENTS.md) | Application role authority: `Profile`, `OwnerProfile`, `StaffProfile`, and `AdminProfile`. |
+| **Clubs** | [`apps/clubs/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/AGENTS.md) | Club tenant definitions, location validation, and profile-backed club scope. |
 | **Courts** | [`apps/courts/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/AGENTS.md) | Court settings, working hours, pricing periods, midnight/slot time semantics. |
 | **Bookings** | [`apps/bookings/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/bookings/AGENTS.md) | Booking lifecycle, agreed price snapshots, overlap protection, recurrence, hold expiry (see [`ADR-002`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-002-booking-identity-and-authorization-migration.md)). |
 | **Transactions** | [`apps/transactions/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/transactions/AGENTS.md) | Immutable financial ledger, payment thresholds, cancellation/correction workflow. |
@@ -82,7 +83,7 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 
 | Concern | Target direction |
 | :--- | :--- |
-| Identity | `User` (auth) · `ClubMembership` (ops) · `PlayerProfile` → `ClubPlayer` → `Booking.club_player` (customers) |
+| Identity | `User` (auth) · `Profile` (application role) · `PlayerProfile` → `ClubPlayer` → `Booking.club_player` (customers) |
 | Authentication | Answers “who?” only (JWT and own-password change). Never club/court/resource access. |
 | Authorization | Spine owns WHERE/WHO · domain `authorization.py` owns special business rules only |
 | Resource config | Implemented `authorization_config` contract only — no second metadata format |
@@ -92,10 +93,10 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 ### Transitional runtime notes
 
 - Spine code: [`apps/common/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/)
-- Clubs domain endpoints (`ClubMembershipViewSet`, `ClubUserListViewSet`) are migrated to Authorization Spine v2. `ClubScopedAccessMixin` and dead permissions have been removed in Sprint 17; legacy `ClubAccessContext` is retained strictly for duck-typed test fixture compatibility.
-- `ClubMembership.last_sync_at` is updated only by `POST /api/v1/me/sync-heartbeat/`. Authorization mixins, ordinary API traffic, login, refresh, `/me`, and scope resolution never update it.
+- Club scope is derived from the current `Profile`: an owner through `OwnerProfile.clubs`, staff through `StaffProfile.court`, and an admin by `Profile.role == ADMIN`. `ClubAccessContext` is retained strictly as a duck-typed direct-service test fixture; it is not an authorization source.
+- `POST /api/v1/me/sync-heartbeat/` is a compatibility acknowledgement only. Authorization mixins, ordinary API traffic, login, refresh, `/me`, and scope resolution never write presence state.
 - **Offline & Reconnect Safety**: Server is authoritative. Reconnect mutations require idempotency keys (`client_request_id`). Duplicate requests return `200 OK` with the existing entity; mismatched payloads return `409 Conflict`. Financial mutations (payments, refunds, settlements) require live server authority and can never be committed offline.
-- **Account vs. Membership Lifecycle**: Account identity (`User`) and operational club access (`ClubMembership`) are decoupled. Deactivating or deleting a membership revokes club access immediately (`CLUB_ACCESS_REVOKED`), regardless of whether the client holds an unexpired JWT. Offboarding retains `last_sync_at` intact for forensic and auditing purposes.
+- **Account and Profile Lifecycle**: `User` is authentication identity; the current `Profile` is application-role authority. A missing or invalid profile scope is denied immediately (`CLUB_ACCESS_REVOKED`), regardless of JWT claims.
 
 ---
 
@@ -220,4 +221,4 @@ Key Django management commands for maintenance and development:
   # Or with specific test scenario:
   python manage.py seed_demo_data --scenario albaladya-test
   ```
-  Idempotently populates multi-club test fixtures, demo users (`owner`, `manager`, `staff`), courts, working hours, bookings, transactions, and settlements for local development and manual testing.
+  Idempotently populates multi-club test fixtures, demo users (`admin`, `owner`, `staff`), profile extensions, courts, working hours, bookings, transactions, and settlements for local development and manual testing.

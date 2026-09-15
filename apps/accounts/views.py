@@ -71,16 +71,9 @@ class SyncHeartbeatAPIView(APIView):
     """
     Explicit offline/PWA sync heartbeat.
 
-    ARCHITECTURAL NOTE:
-    This is the ONLY mechanism that updates `ClubMembership.last_sync_at`.
-    Ordinary authenticated API traffic (Courts, Transactions, Bookings, etc.)
-    never updates it as an implicit response side effect. Authorization
-    (authentication, role authority, club/resource scope, authorized
-    queryset construction) and sync/presence tracking are separate
-    concerns; the Authorization Spine (apps/common/authorization/) owns
-    only the former. The frontend/PWA is expected to call this endpoint
-    periodically (e.g. every ~5 minutes) while active so the backend clock
-    remains the single source of truth for "last synced" state.
+    The endpoint is retained as a no-op acknowledgement for existing clients.
+    Profile authorization has no request-level side effects and no longer
+    stores membership presence or sync timestamps.
     """
 
     permission_classes = (IsAuthenticated,)

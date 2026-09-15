@@ -58,7 +58,7 @@ class CourtViewSet(
     """
     Authorization: club boundary + Court.authorization_config (court scope)
     resolve the authorized queryset (Staff limited to assigned court(s);
-    Owner/Manager/Admin see all club courts). SlotyBasePermission +
+    Owner/Admin see all club courts). SlotyBasePermission +
     ROLE_PERMISSIONS["CourtViewSet"] gate create/update to Admin/Owner only.
     """
 
@@ -178,9 +178,8 @@ class CourtWeeklyWorkingHoursViewSet(SlotyScopedResourceMixin, GenericViewSet):
     The scoped queryset then enforces Staff assigned-court isolation for the
     same explicitly targeted court. SlotyBasePermission +
     ROLE_PERMISSIONS["CourtWeeklyWorkingHoursViewSet"] gate list to any club
-    member and update/create-adjacent actions to Admin/Owner/Manager. The one
-    rule the matrix cannot express -- a Manager's per-membership
-    `manager_can_change_pricing` delegation -- is checked explicitly via
+    member and update/create-adjacent actions to Admin/Owner. The
+    domain-specific working-hours predicate is checked explicitly via
     apps.courts.authorization.can_manage_working_hours().
     """
 

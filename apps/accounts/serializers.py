@@ -26,11 +26,13 @@ def get_profile_for_token_context(*, user, club):
         return profile
     if (
         profile.role == Profile.Role.OWNER
+        and getattr(profile, "owner_profile", None)
         and profile.owner_profile.clubs.filter(pk=club.pk).exists()
     ):
         return profile
     if (
         profile.role == Profile.Role.STAFF
+        and getattr(profile, "staff_profile", None)
         and profile.staff_profile.court.club_id == club.pk
     ):
         return profile
@@ -147,50 +149,11 @@ class PasswordChangeSerializer(serializers.Serializer):
         return user
 
 
-class UserMembershipClubSerializer(serializers.Serializer):
-    id = serializers.IntegerField()
-    slug = serializers.SlugField()
-    name = serializers.CharField()
-
-
-class UserMembershipCourtSerializer(serializers.Serializer):
-    id = serializers.IntegerField()
-    name = serializers.CharField()
-
-
-class UserMembershipPermissionsSerializer(serializers.Serializer):
-    can_change_pricing = serializers.BooleanField()
-    can_manage_working_hours = serializers.BooleanField()
-    can_manage_settlements = serializers.BooleanField()
-
-
-class UserMembershipSerializer(serializers.Serializer):
-    club = UserMembershipClubSerializer(read_only=True)
-    court = UserMembershipCourtSerializer(read_only=True)
-    permissions = serializers.SerializerMethodField()
-
-    @extend_schema_field(UserMembershipPermissionsSerializer)
-    def get_permissions(self, profile):
-        if profile.role == Profile.Role.OWNER:
-            permissions = {
-                "can_change_pricing": True,
-                "can_manage_working_hours": True,
-                "can_manage_settlements": True,
-            }
-        else:
-            permissions = {
-                "can_change_pricing": False,
-                "can_manage_working_hours": False,
-                "can_manage_settlements": False,
-            }
-        return UserMembershipPermissionsSerializer(permissions).data
-
-
 class SyncHeartbeatResponseSerializer(serializers.Serializer):
     """
-    Response for the explicit offline/PWA sync heartbeat endpoint
-    (POST /api/v1/me/sync-heartbeat/). The timestamp always originates from
-    the server clock; clients never supply it.
+    Compatibility response for the explicit offline/PWA sync heartbeat
+    endpoint. The timestamp is an acknowledgement clock, not persisted
+    authorization or membership state.
     """
 
     last_sync_at = serializers.DateTimeField(read_only=True)
@@ -258,9 +221,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
     is_platform_admin = serializers.BooleanField(
         write_only=True, required=False, default=False
     )
-    non_platform_user_error = (
-        "Club users must be created through a club-scoped membership endpoint."
-    )
+    non_platform_user_error = "Only platform-admin accounts can be created here."
 
     class Meta:
         model = User
@@ -273,6 +234,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
             "last_name",
             "phone_number",
             "is_active",
+            "is_platform_admin",
         )
         read_only_fields = ("id",)
         extra_kwargs = {

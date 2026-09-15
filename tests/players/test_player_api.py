@@ -28,9 +28,10 @@ from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
 from apps.bookings.models import Booking
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.courts.models import Court
 from apps.players.models import ClubPlayer, PlayerProfile
+from apps.profiles.models import OwnerProfile, Profile, StaffProfile
 
 
 class PlayerAPITestCase(APITestCase):
@@ -51,8 +52,37 @@ class PlayerAPITestCase(APITestCase):
             city="ASSIUT_MARKAZ",
         )
 
-    def create_membership(self, user, club, role, **kwargs) -> ClubMembership:
-        return ClubMembership.objects.create(club=club, user=user, role=role, **kwargs)
+    def create_membership(self, user, club, role, **kwargs):
+        role = role.upper()
+        if role == "OWNER":
+            profile, _ = Profile.objects.get_or_create(
+                user=user, defaults={"role": Profile.Role.OWNER}
+            )
+            if profile.role != Profile.Role.OWNER:
+                profile.role = Profile.Role.OWNER
+                profile.save(update_fields=["role"])
+            owner_profile, _ = OwnerProfile.objects.get_or_create(profile=profile)
+            owner_profile.clubs.add(club)
+            return owner_profile
+        elif role == "STAFF":
+            profile, _ = Profile.objects.get_or_create(
+                user=user, defaults={"role": Profile.Role.STAFF}
+            )
+            if profile.role != Profile.Role.STAFF:
+                profile.role = Profile.Role.STAFF
+                profile.save(update_fields=["role"])
+            staff_court = club.courts.first()
+            if not staff_court:
+                staff_court = Court.objects.create(
+                    club=club,
+                    name=f"{club.name} Court",
+                    default_price=Decimal("100.00"),
+                )
+            staff_profile, _ = StaffProfile.objects.update_or_create(
+                profile=profile, defaults={"court": staff_court}
+            )
+            return staff_profile
+        return None
 
     def create_profile(self, phone, full_name="", user=None) -> PlayerProfile:
         return PlayerProfile.objects.create(
@@ -89,7 +119,7 @@ class ClubPlayerCRUDTests(PlayerAPITestCase):
     def setUp(self):
         self.owner = self.create_user("crud-owner")
         self.club = self.create_club("CRUD Club", slug="crud-club")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.create_membership(self.owner, self.club, "OWNER")
         self.client.force_authenticate(user=self.owner)
 
     def test_create_club_player_returns_201(self):
@@ -126,7 +156,7 @@ class ClubPlayerCRUDTests(PlayerAPITestCase):
 
         other_club = self.create_club("Other Club", slug="other-club")
         other_owner = self.create_user("other-owner")
-        self.create_membership(other_owner, other_club, ClubMembership.Role.OWNER)
+        self.create_membership(other_owner, other_club, "OWNER")
         other_profile = self.create_profile("+201011110004")
         self.create_club_player(other_club, other_profile, "Other Player")
 
@@ -179,8 +209,8 @@ class ClubPlayerCrossClubIsolationTests(PlayerAPITestCase):
         self.owner_b = self.create_user("iso-owner-b")
         self.club_a = self.create_club("Iso Club A", slug="iso-club-a")
         self.club_b = self.create_club("Iso Club B", slug="iso-club-b")
-        self.create_membership(self.owner_a, self.club_a, ClubMembership.Role.OWNER)
-        self.create_membership(self.owner_b, self.club_b, ClubMembership.Role.OWNER)
+        self.create_membership(self.owner_a, self.club_a, "OWNER")
+        self.create_membership(self.owner_b, self.club_b, "OWNER")
 
         self.shared_profile = self.create_profile("+201022220001")
         self.cp_a = self.create_club_player(
@@ -215,15 +245,11 @@ class ClubPlayerRoleTests(PlayerAPITestCase):
 
     def setUp(self):
         self.club = self.create_club("Role Test Club", slug="role-test-club")
-        # Staff is not assigned to a specific court for these ClubPlayer tests.
-
         self.owner = self.create_user("role-owner")
-        self.manager = self.create_user("role-manager")
         self.staff = self.create_user("role-staff")
 
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
-        self.create_membership(self.staff, self.club, ClubMembership.Role.STAFF)
+        self.create_membership(self.owner, self.club, "OWNER")
+        self.create_membership(self.staff, self.club, "STAFF")
 
     def _create_player(self, user, phone, display_name=""):
         self.client.force_authenticate(user=user)
@@ -235,10 +261,6 @@ class ClubPlayerRoleTests(PlayerAPITestCase):
 
     def test_owner_can_create_club_player(self):
         response = self._create_player(self.owner, "+201033331001", "Owner Player")
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-
-    def test_manager_can_create_club_player(self):
-        response = self._create_player(self.manager, "+201033331002", "Manager Player")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
     def test_staff_can_create_club_player(self):
@@ -254,8 +276,8 @@ class ClubPlayerSamePhoneTwoClubsTests(PlayerAPITestCase):
         self.owner_b = self.create_user("dup-owner-b")
         self.club_a = self.create_club("Dup Club A", slug="dup-club-a")
         self.club_b = self.create_club("Dup Club B", slug="dup-club-b")
-        self.create_membership(self.owner_a, self.club_a, ClubMembership.Role.OWNER)
-        self.create_membership(self.owner_b, self.club_b, ClubMembership.Role.OWNER)
+        self.create_membership(self.owner_a, self.club_a, "OWNER")
+        self.create_membership(self.owner_b, self.club_b, "OWNER")
 
     def test_same_phone_two_clubs_one_profile_two_club_players(self):
         phone = "+201044440001"
@@ -307,7 +329,7 @@ class ClubPlayerCreateIdempotentTests(PlayerAPITestCase):
     def setUp(self):
         self.owner = self.create_user("idem-owner")
         self.club = self.create_club("Idem Club", slug="idem-club")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.create_membership(self.owner, self.club, "OWNER")
         self.client.force_authenticate(user=self.owner)
 
     def test_second_create_with_same_content_reuses_existing_club_player(self):
@@ -359,7 +381,7 @@ class ClubPlayerFilterTests(PlayerAPITestCase):
     def setUp(self):
         self.owner = self.create_user("filter-owner")
         self.club = self.create_club("Filter Club", slug="filter-club")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.create_membership(self.owner, self.club, "OWNER")
         self.client.force_authenticate(user=self.owner)
 
         p1 = self.create_profile("+201066661001", full_name="Khalid Omar")
@@ -404,7 +426,7 @@ class PlayerProfileViewSetTests(PlayerAPITestCase):
     def setUp(self):
         self.owner = self.create_user("pp-owner")
         self.club = self.create_club("Profile Club", slug="profile-club")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
+        self.create_membership(self.owner, self.club, "OWNER")
         self.client.force_authenticate(user=self.owner)
 
     def test_create_new_profile_returns_201(self):

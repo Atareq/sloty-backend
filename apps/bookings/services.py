@@ -1264,11 +1264,7 @@ def actor_requires_staff_cancel_reason(access):
     role = getattr(access, "role", None)
     if role is not None:
         return role == Role.STAFF
-    return (
-        getattr(access, "is_staff", False)
-        and not getattr(access, "is_owner", False)
-        and not getattr(access, "is_manager", False)
-    )
+    return getattr(access, "is_staff", False) and not getattr(access, "is_owner", False)
 
 
 def calculate_cancellation_refund(*, booking, requested_at):

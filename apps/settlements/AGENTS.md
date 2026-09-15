@@ -24,14 +24,11 @@
   - Guarantee: Whatever transactions are shown in preview are the exact rows locked and settled by execution.
 - **Role & Actor Naming**:
   - `collected_by`: The staff member/user whose collected money is being settled.
-  - `created_by` / `settled_by`: The administrator/manager approving and executing the settlement.
+  - `created_by` / `settled_by`: The administrator or owner approving and executing the settlement.
   - Do not use `created_by` to mean the collector.
 - **Self-Approval Invariant**:
-  - Managers and staff must **never** approve their own settlement.
+  - Staff must **never** approve their own settlement.
   - Platform Admins and Club Owners are permitted to approve their own collected funds.
-- **Manager Authority Gates**:
-  - Managers require `manager_can_settle_transactions=True` on their `ClubMembership` to view unsettled summaries or approve settlements.
-  - Managers can settle only Staff and other Managers; they cannot settle Owner money.
 - **One-Time Settlement Enforcement**:
   - [`SettlementTransaction.transaction`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/settlements/models.py) is a `OneToOneField` to `Transaction`. A transaction can never be linked to more than one settlement.
 - **Direct Settled State**:
@@ -79,14 +76,14 @@ Pure financial services (apps/settlements/services.py)
 
 - Financial custody and persisted Settlements: **Club + optional Collector**, **never Court**.
 - `Settlement.authorization_config` declares only `club` (`default_scope="club"`). `Settlement.court` is an optional display/filter field, not a Spine scope.
-- Collector visibility cannot be a Spine `ResourceScope`: it depends on role plus `manager_can_settle_transactions`. `apply_collector_scope()` therefore narrows the already club-scoped queryset.
+- Collector visibility cannot be a Spine `ResourceScope`: it depends on the current Profile role and collector identity. `apply_collector_scope()` therefore narrows the already club-scoped queryset.
 - Operational Transactions remain Club + Court. A collector may have custody of collections from courts they are not assigned to.
 - URLs remain club-scoped: `/api/v1/clubs/{club_slug}/settlements/` (do not inject court into settlement URLs).
 - Settlement ViewSets use the Spine plus `apps/settlements/authorization.py`. They do not call `ClubAccessContext` querysets. Internal service wrapper `create_approved_settlement` duck-types access context methods for test compatibility, while dead pre-Spine settlement helpers (`validate_settlement_access`, `validate_preview_collected_by`, `validate_approval_collected_by`, `build_unsettled_collector_summaries`) have been removed as part of the Sprint 17 cleanup.
 
 ### Authorization Boundary (`apps/settlements/authorization.py`)
 
-Allowed here: true business invariants (self-approval bans, manager settle flags, collector gates). Forbidden: re-implementing club isolation the spine already owns.
+Allowed here: true business invariants (self-approval bans and collector gates). Forbidden: re-implementing club isolation the spine already owns.
 
 User authority is evaluated at the API/domain boundary *before* calling pure financial services:
 - `apply_collector_scope(context, queryset)`

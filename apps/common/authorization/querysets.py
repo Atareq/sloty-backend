@@ -32,7 +32,12 @@ def _is_valid_club_context(context) -> bool:
         return False
     if role == Role.OWNER:
         owner_profile = getattr(context, "owner_profile", None)
-        return bool(owner_profile and owner_profile.clubs.filter(pk=club.pk).exists())
+        return bool(
+            owner_profile
+            and any(
+                owner_club.pk == club.pk for owner_club in owner_profile.clubs.all()
+            )
+        )
     if role == Role.STAFF:
         staff_profile = getattr(context, "staff_profile", None)
         return bool(staff_profile and staff_profile.court.club_id == club.pk)

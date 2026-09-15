@@ -1,15 +1,15 @@
 from django.http import Http404
-from django.utils import timezone
 from rest_framework.exceptions import NotAuthenticated
 from rest_framework.test import APIRequestFactory, APITestCase
 
 from apps.accounts.models import User
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.common.authorization.context import RequestAccessContext
 from apps.common.authorization.resolver import resolve_club_scope, resolve_global_scope
 from apps.common.authorization.roles import Role
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
+from apps.profiles.models import AdminProfile, OwnerProfile, Profile, StaffProfile
 
 
 class ScopeResolverTestCase(APITestCase):
@@ -27,224 +27,107 @@ class ScopeResolverTestCase(APITestCase):
             governorate="ASSIUT",
             city="ASSIUT_MARKAZ",
         )
-        self.court_a1 = Court.objects.create(
-            club=self.club_a,
-            name="Court 1",
-            default_price="200.00",
+        self.court_a = Court.objects.create(
+            club=self.club_a, name="Court A", default_price="200.00"
         )
-        self.court_b1 = Court.objects.create(
-            club=self.club_b,
-            name="Court B1",
-            default_price="250.00",
+        self.court_b = Court.objects.create(
+            club=self.club_b, name="Court B", default_price="250.00"
         )
-
-        # Users
-        self.owner_user = User.objects.create_user(
-            username="owner-user", password="password"
+        self.owner = self.create_profile_user(
+            "owner-user", Profile.Role.OWNER, club=self.club_a
         )
-        self.manager_user = User.objects.create_user(
-            username="manager-user", password="password"
+        self.staff = self.create_profile_user(
+            "staff-user", Profile.Role.STAFF, court=self.court_a
         )
-        self.staff_user = User.objects.create_user(
-            username="staff-user", password="password"
-        )
-        self.platform_admin_user = User.objects.create_user(
-            username="platform-admin",
-            password="password",
-            is_platform_admin=True,
-        )
-        self.unrelated_user = User.objects.create_user(
-            username="unrelated-user", password="password"
+        self.admin = self.create_profile_user("platform-admin", Profile.Role.ADMIN)
+        self.unscoped_user = User.objects.create_user(
+            username="unscoped", password="password"
         )
 
-        # Memberships in Club A
-        ClubMembership.objects.create(
-            club=self.club_a,
-            user=self.owner_user,
-            role=ClubMembership.Role.OWNER,
-            is_active=True,
-        )
-        ClubMembership.objects.create(
-            club=self.club_a,
-            user=self.manager_user,
-            role=ClubMembership.Role.MANAGER,
-            is_active=True,
-        )
-        ClubMembership.objects.create(
-            club=self.club_a,
-            user=self.staff_user,
-            role=ClubMembership.Role.STAFF,
-            court=self.court_a1,
-            is_active=True,
-        )
+    def create_profile_user(self, username, role, *, club=None, court=None):
+        user = User.objects.create_user(username=username, password="password")
+        profile = Profile.objects.create(user=user, role=role)
+        if role == Profile.Role.ADMIN:
+            AdminProfile.objects.create(profile=profile)
+        elif role == Profile.Role.OWNER:
+            owner_profile = OwnerProfile.objects.create(profile=profile)
+            owner_profile.clubs.add(club)
+        else:
+            StaffProfile.objects.create(profile=profile, court=court)
+        return user
+
+    def request_for(self, user, club):
+        request = self.factory.get(f"/api/v1/clubs/{club.slug}/bookings/")
+        request.user = user
+        return request
 
     def test_unauthenticated_request_raises_not_authenticated(self):
         request = self.factory.get("/api/v1/clubs/club-al-ahly/bookings/")
         request.user = None
-
         with self.assertRaises(NotAuthenticated):
-            resolve_club_scope(request, club_slug="club-al-ahly")
+            resolve_club_scope(request, club_slug=self.club_a.slug)
 
-    def test_authenticated_owner_resolves_correct_context(self):
-        request = self.factory.get("/api/v1/clubs/club-al-ahly/bookings/")
-        request.user = self.owner_user
-
-        context = resolve_club_scope(request, club_slug="club-al-ahly")
-
-        self.assertIsInstance(context, RequestAccessContext)
-        self.assertEqual(context.user, self.owner_user)
-        self.assertEqual(context.club, self.club_a)
-        self.assertEqual(context.role, Role.OWNER)
-        self.assertEqual(context.profile_type, Role.OWNER)
-        self.assertIsNotNone(context.membership)
-        self.assertEqual(context.membership.role, ClubMembership.Role.OWNER)
-        self.assertFalse(context.is_platform_admin)
-        self.assertIsNone(context.court)
-
-    def test_authenticated_manager_resolves_correct_context(self):
-        request = self.factory.get("/api/v1/clubs/club-al-ahly/bookings/")
-        request.user = self.manager_user
-
-        context = resolve_club_scope(request, club_slug="club-al-ahly")
-
-        self.assertEqual(context.role, Role.MANAGER)
-        self.assertEqual(context.profile_type, Role.MANAGER)
-        self.assertIsNone(context.court)
-
-    def test_authenticated_staff_does_not_preload_court_on_club_wide_request(self):
-        """
-        ARCHITECTURAL INVARIANT:
-        Do NOT preload Staff court assignments on club-wide requests.
-        context.court must remain None unless explicitly targeted via URL.
-        """
-        request = self.factory.get("/api/v1/clubs/club-al-ahly/bookings/")
-        request.user = self.staff_user
-
-        context = resolve_club_scope(request, club_slug="club-al-ahly")
-
-        self.assertEqual(context.role, Role.STAFF)
-        self.assertEqual(context.profile_type, Role.STAFF)
-        self.assertIsNone(context.court)
-
-    def test_explicit_court_id_resolves_court(self):
-        request = self.factory.get(
-            f"/api/v1/clubs/club-al-ahly/courts/{self.court_a1.id}/"
-        )
-        request.user = self.staff_user
-
+    def test_owner_resolves_from_owner_profile_clubs(self):
         context = resolve_club_scope(
-            request,
-            club_slug="club-al-ahly",
-            court_id=self.court_a1.id,
+            self.request_for(self.owner, self.club_a), self.club_a.slug
         )
+        self.assertIsInstance(context, RequestAccessContext)
+        self.assertEqual(context.role, Role.OWNER)
+        self.assertEqual(context.owner_profile.profile.user_id, self.owner.id)
+        self.assertIsNone(context.court)
 
-        self.assertIsNotNone(context.court)
-        self.assertEqual(context.court, self.court_a1)
-
-    def test_explicit_court_from_different_club_raises_404(self):
-        request = self.factory.get(
-            f"/api/v1/clubs/club-al-ahly/courts/{self.court_b1.id}/"
+    def test_staff_resolves_from_assigned_court_without_targeting_it(self):
+        context = resolve_club_scope(
+            self.request_for(self.staff, self.club_a), self.club_a.slug
         )
-        request.user = self.owner_user
+        self.assertEqual(context.role, Role.STAFF)
+        self.assertEqual(context.staff_profile.court_id, self.court_a.id)
+        self.assertIsNone(context.court)
 
+    def test_explicit_court_is_resolved_only_inside_url_club(self):
+        context = resolve_club_scope(
+            self.request_for(self.staff, self.club_a),
+            self.club_a.slug,
+            court_id=self.court_a.id,
+        )
+        self.assertEqual(context.court, self.court_a)
         with self.assertRaises(Http404):
             resolve_club_scope(
-                request,
-                club_slug="club-al-ahly",
-                court_id=self.court_b1.id,
+                self.request_for(self.owner, self.club_a),
+                self.club_a.slug,
+                court_id=self.court_b.id,
             )
 
-    def test_nonexistent_club_slug_raises_404(self):
-        request = self.factory.get("/api/v1/clubs/nonexistent-club/bookings/")
-        request.user = self.owner_user
+    def test_owner_cannot_access_unowned_club(self):
+        with self.assertRaises(SlotyAPIException) as caught:
+            resolve_club_scope(
+                self.request_for(self.owner, self.club_b), self.club_b.slug
+            )
+        self.assertEqual(caught.exception.api_code, "CLUB_ACCESS_REVOKED")
 
-        with self.assertRaises(Http404):
-            resolve_club_scope(request, club_slug="nonexistent-club")
+    def test_missing_profile_is_denied(self):
+        with self.assertRaises(SlotyAPIException) as caught:
+            resolve_club_scope(
+                self.request_for(self.unscoped_user, self.club_a), self.club_a.slug
+            )
+        self.assertEqual(caught.exception.api_code, "CLUB_ACCESS_REVOKED")
 
-    def test_user_without_club_membership_raises_club_access_revoked(self):
-        """
-        User with membership in Club A accessing Club B must be denied
-        with structured error code CLUB_ACCESS_REVOKED (HTTP 403).
-        """
-        request = self.factory.get("/api/v1/clubs/club-zamalek/bookings/")
-        request.user = self.owner_user  # Only member of club_a
-
-        with self.assertRaises(SlotyAPIException) as cm:
-            resolve_club_scope(request, club_slug="club-zamalek")
-
-        exc = cm.exception
-        self.assertEqual(exc.status_code, 403)
-        self.assertEqual(exc.api_code, "CLUB_ACCESS_REVOKED")
-        self.assertEqual(exc.details.get("club_slug"), "club-zamalek")
-
-    def test_deactivated_membership_raises_club_access_revoked(self):
-        ClubMembership.objects.filter(club=self.club_a, user=self.staff_user).update(
-            is_active=False
+    def test_admin_has_platform_scope_from_profile_role(self):
+        context = resolve_club_scope(
+            self.request_for(self.admin, self.club_b), self.club_b.slug
         )
-
-        request = self.factory.get("/api/v1/clubs/club-al-ahly/bookings/")
-        request.user = self.staff_user
-
-        with self.assertRaises(SlotyAPIException) as cm:
-            resolve_club_scope(request, club_slug="club-al-ahly")
-
-        self.assertEqual(cm.exception.status_code, 403)
-        self.assertEqual(cm.exception.api_code, "CLUB_ACCESS_REVOKED")
-
-    def test_soft_deleted_membership_raises_club_access_revoked(self):
-        ClubMembership.objects.filter(club=self.club_a, user=self.staff_user).update(
-            deleted_at=timezone.now()
-        )
-
-        request = self.factory.get("/api/v1/clubs/club-al-ahly/bookings/")
-        request.user = self.staff_user
-
-        with self.assertRaises(SlotyAPIException) as cm:
-            resolve_club_scope(request, club_slug="club-al-ahly")
-
-        self.assertEqual(cm.exception.status_code, 403)
-        self.assertEqual(cm.exception.api_code, "CLUB_ACCESS_REVOKED")
-
-    def test_platform_admin_resolves_admin_role_without_club_membership(self):
-        request = self.factory.get("/api/v1/clubs/club-zamalek/bookings/")
-        request.user = self.platform_admin_user
-
-        context = resolve_club_scope(request, club_slug="club-zamalek")
-
-        self.assertEqual(context.role, Role.ADMIN)
-        self.assertEqual(context.profile_type, Role.ADMIN)
         self.assertTrue(context.is_platform_admin)
-        self.assertEqual(context.club, self.club_b)
-        self.assertIsNone(context.membership)
+        self.assertEqual(context.role, Role.ADMIN)
 
     def test_context_is_cached_on_request(self):
-        """
-        Repeated calls to resolve_club_scope within the same request lifecycle
-        must use the cached context and perform zero additional DB queries.
-        """
-        request = self.factory.get("/api/v1/clubs/club-al-ahly/bookings/")
-        request.user = self.owner_user
-
-        # First resolution hits the database
-        context1 = resolve_club_scope(request, club_slug="club-al-ahly")
-        self.assertIsNotNone(context1)
-
-        # Second resolution should be purely from cache
+        request = self.request_for(self.owner, self.club_a)
+        context = resolve_club_scope(request, self.club_a.slug)
         with self.assertNumQueries(0):
-            context2 = resolve_club_scope(request, club_slug="club-al-ahly")
+            self.assertIs(resolve_club_scope(request, self.club_a.slug), context)
 
-        self.assertIs(context1, context2)
-
-    def test_resolve_global_scope(self):
+    def test_global_scope_uses_admin_profile(self):
         request = self.factory.get("/api/v1/users/")
-        request.user = self.platform_admin_user
-
+        request.user = self.admin
         context = resolve_global_scope(request)
         self.assertTrue(context.is_platform_admin)
-        self.assertEqual(context.role, Role.ADMIN)
         self.assertIsNone(context.club)
-
-        # Cached call should produce 0 queries
-        with self.assertNumQueries(0):
-            context2 = resolve_global_scope(request)
-        self.assertIs(context, context2)

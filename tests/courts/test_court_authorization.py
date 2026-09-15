@@ -26,7 +26,6 @@ from django.core.exceptions import ImproperlyConfigured
 from rest_framework import status
 from rest_framework.test import APIRequestFactory
 
-from apps.clubs.models import ClubMembership
 from apps.common.authorization.contracts import load_authorization_config
 from apps.common.authorization.mixins import SlotyScopedResourceMixin
 from apps.common.authorization.querysets import scoped_queryset
@@ -51,10 +50,8 @@ class CourtAuthorizationConfigTests(CourtAPITestCase):
         self.court_a = self.create_court(self.club, "Config Court A")
         self.court_b = self.create_court(self.club, "Config Court B")
         self.other_court = self.create_court(self.other_club, "Config Other Court")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(
-            self.staff, self.club, ClubMembership.Role.STAFF, court=self.court_a
-        )
+        self.create_membership(self.owner, self.club, "OWNER")
+        self.create_membership(self.staff, self.club, "STAFF", court=self.court_a)
         self.working_hour_a = CourtWorkingHour.objects.create(
             court=self.court_a, weekday=CourtWorkingHour.Weekday.MONDAY
         )
@@ -158,18 +155,12 @@ class CourtAuthorizationAPITests(CourtAPITestCase):
     def setUp(self):
         self.platform_admin = self.create_platform_admin("auth-admin")
         self.owner = self.create_user("auth-owner")
-        self.manager = self.create_user("auth-manager")
         self.staff = self.create_user("auth-staff")
         self.club = self.create_club("Auth Club", slug="auth-club")
         self.other_club = self.create_club("Auth Other Club", slug="auth-other-club")
         self.court = self.create_court(self.club, "Auth Court")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.manager_membership = self.create_membership(
-            self.manager, self.club, ClubMembership.Role.MANAGER
-        )
-        self.create_membership(
-            self.staff, self.club, ClubMembership.Role.STAFF, court=self.court
-        )
+        self.create_membership(self.owner, self.club, "OWNER")
+        self.create_membership(self.staff, self.club, "STAFF", court=self.court)
 
     def assert_api_error(self, response, code):
         self.assertEqual(response.data["success"], False)
@@ -237,22 +228,17 @@ class CanManageWorkingHoursHelperTests(CourtAPITestCase):
     Unit coverage of the single domain invariant the centralized matrix
     cannot express: a Manager's authority to manage working hours is gated
     by a per-membership delegation flag, not by role alone.
+    Unit coverage of domain invariants for managing working hours.
     """
 
     def setUp(self):
         self.platform_admin = self.create_platform_admin("helper-admin")
         self.owner = self.create_user("helper-owner")
-        self.manager = self.create_user("helper-manager")
         self.staff = self.create_user("helper-staff")
         self.club = self.create_club("Helper Club", slug="helper-club")
         self.court = self.create_court(self.club, "Helper Court")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.manager_membership = self.create_membership(
-            self.manager, self.club, ClubMembership.Role.MANAGER
-        )
-        self.create_membership(
-            self.staff, self.club, ClubMembership.Role.STAFF, court=self.court
-        )
+        self.create_membership(self.owner, self.club, "OWNER")
+        self.create_membership(self.staff, self.club, "STAFF", court=self.court)
 
     def context_for(self, user):
         request = APIRequestFactory().get(f"/api/v1/clubs/{self.club.slug}/courts/")

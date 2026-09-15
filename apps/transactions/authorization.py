@@ -6,7 +6,7 @@ ARCHITECTURAL INVARIANTS:
    (Transaction / TransactionAttempt.authorization_config + scoped_queryset).
 2. Staff collector visibility (created_by / attempted_by) is a domain
    business rule applied in ViewSet.filter_scoped_queryset().
-3. Cancellation: Platform Admin may cancel any in-scope row; Owner, Manager,
+3. Cancellation: Platform Admin may cancel any in-scope row; Owner and
    and Staff may cancel only rows they collected (created_by).
 4. Dismiss: only the attempter may dismiss a TransactionAttempt.
 5. Create: the target Booking must be inside the actor's Spine court queryset.
@@ -73,7 +73,7 @@ def can_cancel_transaction(
     """
     Object-level cancel rule after the row is already in the authorized queryset.
 
-    Platform Admin may cancel any in-scope transaction. Owner, Manager, and
+    Platform Admin may cancel any in-scope transaction. Owner and
     Staff may cancel only transactions they collected.
     """
     if transaction is None or getattr(context, "club", None) is None:

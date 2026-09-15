@@ -14,9 +14,10 @@ from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
 from apps.bookings.models import Booking
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.players.models import ClubPlayer, PlayerProfile
+from apps.profiles.models import Profile, StaffProfile
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking
 
@@ -52,12 +53,9 @@ class BookingOfflineSafetyTests(APITestCase):
             username="offline-staff",
             password=self.password,
         )
-        self.membership = ClubMembership.objects.create(
-            club=self.club,
-            user=self.staff,
-            role=ClubMembership.Role.STAFF,
-            court=self.court,
-            is_active=True,
+        profile = Profile.objects.create(user=self.staff, role=Profile.Role.STAFF)
+        self.staff_profile = StaffProfile.objects.create(
+            profile=profile, court=self.court
         )
         self.client.force_authenticate(user=self.staff)
 
@@ -175,9 +173,8 @@ class BookingOfflineSafetyTests(APITestCase):
             "customer_phone": "+201033445566",
         }
 
-        # Staff membership is deactivated in DB prior to reconnect
-        self.membership.is_active = False
-        self.membership.save(update_fields=["is_active"])
+        # Removing the Profile scope revokes access immediately.
+        self.staff_profile.delete()
 
         # Reconnect sync attempt is rejected immediately -> 403 CLUB_ACCESS_REVOKED
         res = self.client.post(self.booking_create_url(), payload, format="json")

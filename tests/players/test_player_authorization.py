@@ -20,6 +20,7 @@ from apps.common.authorization.querysets import scoped_queryset
 from apps.common.authorization.resolver import resolve_club_scope
 from apps.common.authorization.scopes import ResourceScope
 from apps.players.models import ClubPlayer, PlayerProfile
+from apps.profiles.models import OwnerProfile, Profile, StaffProfile
 
 
 def make_user(username):
@@ -34,6 +35,30 @@ def make_club(name, slug):
 
 def make_membership(user, club, role):
     return ClubMembership.objects.create(club=club, user=user, role=role)
+    role = role.upper()
+    if role == "OWNER":
+        profile, _ = Profile.objects.get_or_create(
+            user=user, defaults={"role": Profile.Role.OWNER}
+        )
+        owner_profile, _ = OwnerProfile.objects.get_or_create(profile=profile)
+        owner_profile.clubs.add(club)
+        return owner_profile
+    elif role == "STAFF":
+        profile, _ = Profile.objects.get_or_create(
+            user=user, defaults={"role": Profile.Role.STAFF}
+        )
+        staff_court = club.courts.first()
+        if not staff_court:
+            from apps.courts.models import Court
+
+            staff_court = Court.objects.create(
+                club=club, name="Court", default_price=100
+            )
+        staff_profile, _ = StaffProfile.objects.update_or_create(
+            profile=profile, defaults={"court": staff_court}
+        )
+        return staff_profile
+    return None
 
 
 def make_profile(phone):
@@ -84,6 +109,7 @@ class ClubPlayerScopedQuerysetTests(TestCase):
         self.club_a = make_club("Scope Club A", "scope-club-a")
         self.club_b = make_club("Scope Club B", "scope-club-b")
         make_membership(self.owner, self.club_a, ClubMembership.Role.OWNER)
+        make_membership(self.owner, self.club_a, "OWNER")
 
         self.profile_1 = make_profile("+201010001111")
         self.profile_2 = make_profile("+201010002222")
@@ -115,6 +141,7 @@ class ClubPlayerScopedQuerysetTests(TestCase):
     def test_club_b_scope_excludes_club_a_players(self):
         owner_b = make_user("scope-owner-b")
         make_membership(owner_b, self.club_b, ClubMembership.Role.OWNER)
+        make_membership(owner_b, self.club_b, "OWNER")
         ctx = self._context(owner_b, self.club_b)
         qs = scoped_queryset(ctx, ClubPlayer, scope=ResourceScope.CLUB)
         ids = set(qs.values_list("id", flat=True))
@@ -129,6 +156,7 @@ class ClubPlayerScopedQuerysetTests(TestCase):
 
         owner_b = make_user("scope-owner-b2")
         make_membership(owner_b, self.club_b, ClubMembership.Role.OWNER)
+        make_membership(owner_b, self.club_b, "OWNER")
 
         ctx_a = self._context(self.owner, self.club_a)
         ctx_b = self._context(owner_b, self.club_b)

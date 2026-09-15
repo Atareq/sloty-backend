@@ -87,7 +87,7 @@ class BookingViewSet(
     """
     Authorization: club boundary + Booking.authorization_config (court scope)
     resolve the authorized queryset (Staff limited to assigned court(s);
-    Owner/Manager/Admin see all club courts). Bookings are not creator-scoped.
+    Owner/Admin see all club courts). Bookings are not creator-scoped.
     SlotyBasePermission + ROLE_PERMISSIONS["BookingViewSet"] gate actions.
     """
 

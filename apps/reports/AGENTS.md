@@ -57,7 +57,7 @@ Aggregation / JSON response
 
 | Report | Data sources | Scope | Roles | Export |
 | :--- | :--- | :--- | :--- | :--- |
-| Court Usage | Courts, Bookings, paid amounts annotated from those bookings' transactions | Club + Court (Admin/Owner/Manager see all club courts). Not creator-scoped. Not collector-scoped. No Settlement/custody rows. | Platform Admin / Owner / Manager. Staff **403**. | None (JSON only, same querysets) |
+| Court Usage | Courts, Bookings, paid amounts annotated from those bookings' transactions | Club + Court (Admin/Owner see all club courts). Not creator-scoped. Not collector-scoped. No Settlement/custody rows. | Platform Admin / Owner. Staff **403**. | None (JSON only, same querysets) |
 
 - Optional `court=` may only **narrow** the authorized court queryset. Another club's court → HTTP 403.
 - Optional `staff=` is a `Booking.created_by` report filter. The named user must have active access in this club (`REPORT_STAFF_NOT_IN_CLUB`); it is **not** Settlement collector isolation.

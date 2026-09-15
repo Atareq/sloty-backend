@@ -24,7 +24,7 @@ class AuditLogViewSet(
 ):
     """
     Authorization: club via AuditLog.authorization_config (never court).
-    WHO: Platform Admin / Owner / Manager via ROLE_PERMISSIONS["AuditLogViewSet"].
+    WHO: Platform Admin / Owner via ROLE_PERMISSIONS["AuditLogViewSet"].
     Staff are matrix-denied (HTTP 403). Out-of-club IDs are omitted from the
     scoped queryset (HTTP 404). Search and filters receive this queryset only.
     """

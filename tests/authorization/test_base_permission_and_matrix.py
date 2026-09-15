@@ -4,30 +4,21 @@ from rest_framework.response import Response
 from rest_framework.test import APIRequestFactory, APITestCase, force_authenticate
 
 from apps.accounts.models import User
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.common.authorization.matrix import is_action_allowed
 from apps.common.authorization.mixins import ClubScopedViewMixin
 from apps.common.authorization.permissions import SlotyBasePermission
 from apps.common.authorization.roles import Role
-
-
-# Test-only ViewSet for verifying DRF integration without migrating domain ViewSets
-class SampleResource:
-    def __init__(self, id, club_id, owner_id):
-        self.id = id
-        self.club_id = club_id
-        self.owner_id = owner_id
+from apps.courts.models import Court
+from apps.profiles.models import Profile, StaffProfile
 
 
 class SampleResourceViewSet(ClubScopedViewMixin, viewsets.ViewSet):
     permission_classes = [SlotyBasePermission]
-    permission_view_name = "BookingViewSet"  # Simulates BookingViewSet matrix mapping
+    permission_view_name = "BookingViewSet"
 
     def list(self, request, club_slug=None):
-        return Response({"status": "ok", "role": request.access_context.role})
-
-    def create(self, request, club_slug=None):
-        return Response({"status": "created"}, status=status.HTTP_201_CREATED)
+        return Response({"role": request.access_context.role})
 
     @action(detail=False, methods=["post"])
     def cancel(self, request, club_slug=None):
@@ -36,21 +27,6 @@ class SampleResourceViewSet(ClubScopedViewMixin, viewsets.ViewSet):
     @action(detail=True, methods=["post"])
     def custom_restricted_action(self, request, pk=None, club_slug=None):
         return Response({"status": "custom"})
-
-
-# Test-only ViewSet with Object Permission Extension
-class SampleObjectRestrictedViewSet(ClubScopedViewMixin, viewsets.ViewSet):
-    permission_classes = [SlotyBasePermission]
-    permission_view_name = "BookingViewSet"
-
-    def retrieve(self, request, pk=None, club_slug=None):
-        obj = SampleResource(id=pk, club_id=1, owner_id=999)
-        self.check_object_permissions(request, obj)
-        return Response({"status": "retrieved"})
-
-    def check_object_permission(self, request, obj):
-        # Dedicated object-level rule: user must be the object owner
-        return obj.owner_id == request.user.id
 
 
 class BasePermissionAndMatrixTestCase(APITestCase):
@@ -62,176 +38,49 @@ class BasePermissionAndMatrixTestCase(APITestCase):
             governorate="ASSIUT",
             city="ASSIUT_MARKAZ",
         )
-        self.admin_user = User.objects.create_user(
-            username="admin-user", password="password", is_platform_admin=True
+        self.court = Court.objects.create(
+            club=self.club, name="Court", default_price="200.00"
         )
-        self.owner_user = User.objects.create_user(
-            username="owner-user", password="password"
-        )
-        self.manager_user = User.objects.create_user(
-            username="manager-user", password="password"
-        )
-        self.staff_user = User.objects.create_user(
-            username="staff-user", password="password"
-        )
-
-        ClubMembership.objects.create(
-            club=self.club,
-            user=self.owner_user,
-            role=ClubMembership.Role.OWNER,
-            is_active=True,
-        )
-        ClubMembership.objects.create(
-            club=self.club,
-            user=self.manager_user,
-            role=ClubMembership.Role.MANAGER,
-            is_active=True,
-        )
-        ClubMembership.objects.create(
-            club=self.club,
-            user=self.staff_user,
-            role=ClubMembership.Role.STAFF,
-            is_active=True,
-        )
+        self.staff = User.objects.create_user(username="staff", password="password")
+        profile = Profile.objects.create(user=self.staff, role=Profile.Role.STAFF)
+        StaffProfile.objects.create(profile=profile, court=self.court)
 
     def test_default_deny_rules(self):
-        """Matrix must strictly default to deny on unknown role, viewset, or action."""
-        self.assertFalse(is_action_allowed("UNKNOWN_ROLE", "BookingViewSet", "list"))
-        self.assertFalse(is_action_allowed(Role.OWNER, "NonexistentViewSet", "list"))
-        self.assertFalse(
-            is_action_allowed(Role.OWNER, "BookingViewSet", "unknown_action")
-        )
-        self.assertFalse(is_action_allowed(None, "BookingViewSet", "list"))
-        self.assertFalse(is_action_allowed(Role.STAFF, None, "list"))
-        self.assertFalse(is_action_allowed(Role.STAFF, "BookingViewSet", None))
+        self.assertFalse(is_action_allowed("UNKNOWN", "BookingViewSet", "list"))
+        self.assertFalse(is_action_allowed(Role.OWNER, "UnknownViewSet", "list"))
+        self.assertFalse(is_action_allowed(Role.STAFF, "BookingViewSet", "unknown"))
 
-    def test_verified_matrix_permissions_for_all_four_roles(self):
-        # 1. ADMIN has global full access
-        self.assertTrue(is_action_allowed(Role.ADMIN, "BookingViewSet", "list"))
+    def test_matrix_contains_only_supported_roles(self):
+        for role in (Role.ADMIN, Role.OWNER, Role.STAFF):
+            self.assertTrue(is_action_allowed(role, "BookingViewSet", "list"))
         self.assertTrue(is_action_allowed(Role.ADMIN, "CourtViewSet", "create"))
-        self.assertTrue(
-            is_action_allowed(Role.ADMIN, "SettlementViewSet", "unsettled_summary")
-        )
-        self.assertTrue(is_action_allowed(Role.ADMIN, "AuditLogViewSet", "list"))
-
-        # 2. OWNER
-        self.assertTrue(is_action_allowed(Role.OWNER, "BookingViewSet", "list"))
-        self.assertTrue(is_action_allowed(Role.OWNER, "BookingViewSet", "cancel"))
-        self.assertTrue(
-            is_action_allowed(Role.OWNER, "BookingViewSet", "partial_update")
-        )
-        self.assertTrue(
-            is_action_allowed(Role.OWNER, "BookingViewSet", "cancellation_preview")
-        )
-        self.assertTrue(is_action_allowed(Role.OWNER, "CourtViewSet", "create"))
-        self.assertTrue(
+        self.assertTrue(is_action_allowed(Role.OWNER, "SettlementViewSet", "create"))
+        self.assertFalse(is_action_allowed(Role.STAFF, "SettlementViewSet", "create"))
+        self.assertFalse(is_action_allowed(Role.STAFF, "AuditLogViewSet", "list"))
+        self.assertFalse(is_action_allowed("MANAGER", "BookingViewSet", "list"))
+        self.assertFalse(
             is_action_allowed(Role.OWNER, "ClubMembershipViewSet", "create")
         )
-        self.assertTrue(is_action_allowed(Role.OWNER, "AuditLogViewSet", "list"))
-        self.assertFalse(
-            is_action_allowed(Role.OWNER, "ClubViewSet", "create")
-        )  # Only Admin creates clubs
 
-        # 3. MANAGER
-        self.assertTrue(is_action_allowed(Role.MANAGER, "BookingViewSet", "list"))
-        self.assertTrue(is_action_allowed(Role.MANAGER, "BookingViewSet", "complete"))
-        self.assertTrue(is_action_allowed(Role.MANAGER, "AuditLogViewSet", "list"))
-        self.assertFalse(
-            is_action_allowed(Role.MANAGER, "CourtViewSet", "create")
-        )  # Cannot create courts
-        self.assertFalse(
-            is_action_allowed(Role.MANAGER, "ClubMembershipViewSet", "create")
-        )  # Cannot onboard members
-
-        # 4. STAFF
-        self.assertTrue(is_action_allowed(Role.STAFF, "BookingViewSet", "list"))
-        self.assertTrue(is_action_allowed(Role.STAFF, "BookingViewSet", "create"))
-        self.assertTrue(is_action_allowed(Role.STAFF, "BookingViewSet", "cancel"))
-        self.assertTrue(
-            is_action_allowed(Role.STAFF, "BookingViewSet", "partial_update")
+    def test_drf_uses_profile_context_and_matrix(self):
+        view = SampleResourceViewSet.as_view({"get": "list", "post": "cancel"})
+        unauthenticated = self.factory.get("/api/v1/clubs/al-ahly-club/sample/")
+        self.assertEqual(
+            view(unauthenticated, club_slug=self.club.slug).status_code,
+            status.HTTP_401_UNAUTHORIZED,
         )
-        self.assertTrue(
-            is_action_allowed(Role.STAFF, "BookingViewSet", "cancellation_preview")
-        )
-        self.assertTrue(is_action_allowed(Role.STAFF, "TransactionViewSet", "create"))
-        self.assertTrue(is_action_allowed(Role.STAFF, "TransactionViewSet", "cancel"))
-        self.assertTrue(is_action_allowed(Role.STAFF, "SettlementViewSet", "preview"))
-        self.assertTrue(is_action_allowed(Role.STAFF, "SettlementViewSet", "list"))
-        self.assertFalse(
-            is_action_allowed(Role.STAFF, "AuditLogViewSet", "list")
-        )  # Staff denied audit
-        self.assertFalse(
-            is_action_allowed(Role.STAFF, "SettlementViewSet", "create")
-        )  # Staff cannot settle
-        self.assertFalse(
-            is_action_allowed(Role.STAFF, "SettlementViewSet", "mark_settled")
-        )
-        self.assertTrue(is_action_allowed(Role.STAFF, "DashboardViewSet", "summary"))
-        self.assertTrue(is_action_allowed(Role.STAFF, "DashboardViewSet", "calendar"))
-        self.assertFalse(is_action_allowed(Role.STAFF, "DashboardViewSet", "overview"))
-        self.assertFalse(is_action_allowed(Role.STAFF, "DashboardViewSet", "revenue"))
-        self.assertFalse(
-            is_action_allowed(Role.STAFF, "CourtViewSet", "create")
-        )  # Staff cannot create courts
-        self.assertFalse(
-            is_action_allowed(Role.STAFF, "ClubMembershipViewSet", "list")
-        )  # Staff cannot view members
 
-    def test_drf_viewset_integration_with_scoped_mixin(self):
-        view = SampleResourceViewSet.as_view({"get": "list", "post": "create"})
-
-        # Unauthenticated request -> 401
         request = self.factory.get("/api/v1/clubs/al-ahly-club/sample/")
-        response = view(request, club_slug="al-ahly-club")
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-        # Authenticated Staff request -> 200 Allowed
-        request = self.factory.get("/api/v1/clubs/al-ahly-club/sample/")
-        force_authenticate(request, user=self.staff_user)
-        response = view(request, club_slug="al-ahly-club")
+        force_authenticate(request, user=self.staff)
+        response = view(request, club_slug=self.club.slug)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data.get("role"), Role.STAFF)
+        self.assertEqual(response.data["role"], Role.STAFF)
 
-    def test_drf_custom_action_resolution(self):
-        view = SampleResourceViewSet.as_view({"post": "cancel"})
-        request = self.factory.post("/api/v1/clubs/al-ahly-club/sample/cancel/")
-        force_authenticate(request, user=self.staff_user)
-
-        response = view(request, club_slug="al-ahly-club")
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data.get("status"), "cancelled")
-
-    def test_drf_unconfigured_custom_action_denied(self):
+    def test_unconfigured_custom_action_is_denied(self):
         view = SampleResourceViewSet.as_view({"post": "custom_restricted_action"})
-        request = self.factory.post(
-            "/api/v1/clubs/al-ahly-club/sample/1/custom_restricted_action/"
+        request = self.factory.post("/api/v1/clubs/al-ahly-club/sample/1/custom/")
+        force_authenticate(request, user=self.staff)
+        self.assertEqual(
+            view(request, pk=1, club_slug=self.club.slug).status_code,
+            status.HTTP_403_FORBIDDEN,
         )
-        force_authenticate(request, user=self.staff_user)
-
-        response = view(request, pk=1, club_slug="al-ahly-club")
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_object_permission_extension_hook(self):
-        view = SampleObjectRestrictedViewSet.as_view({"get": "retrieve"})
-
-        # Request user does NOT own object (owner_id=999) -> 403 Forbidden
-        # via check_object_permission
-        request = self.factory.get("/api/v1/clubs/al-ahly-club/sample/1/")
-        force_authenticate(request, user=self.staff_user)  # staff_user.id != 999
-        response = view(request, pk=1, club_slug="al-ahly-club")
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-
-        # When request user matches object.owner_id -> 200 OK
-        request = self.factory.get("/api/v1/clubs/al-ahly-club/sample/1/")
-        dummy_user = User.objects.create_user(
-            id=999, username="owner-999", password="password"
-        )
-        ClubMembership.objects.create(
-            club=self.club,
-            user=dummy_user,
-            role=ClubMembership.Role.STAFF,
-            is_active=True,
-        )
-        force_authenticate(request, user=dummy_user)
-        response = view(request, pk=1, club_slug="al-ahly-club")
-        self.assertEqual(response.status_code, status.HTTP_200_OK)

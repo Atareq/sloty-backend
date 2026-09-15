@@ -15,7 +15,7 @@ class CanAccessUsers(BasePermission):
     - Platform super admins have full CRUD access.
     - Club Owners have read-only access (GET/HEAD/OPTIONS) within their club
       staff scope.
-    - All other users (Managers, Staff, standard users, anonymous) are denied.
+    - All other users (Staff, standard users, anonymous) are denied.
     """
 
     def has_permission(self, request, view) -> bool:

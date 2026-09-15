@@ -22,12 +22,19 @@ def get_active_collector_roles(club, user: User) -> Set[str]:
         return set()
     if profile.role == Role.ADMIN:
         return {Role.ADMIN}
+    owner_profile = getattr(profile, "owner_profile", None)
     if (
         profile.role == Role.OWNER
-        and profile.owner_profile.clubs.filter(pk=club.pk).exists()
+        and owner_profile
+        and owner_profile.clubs.filter(pk=club.pk).exists()
     ):
         return {Role.OWNER}
-    if profile.role == Role.STAFF and profile.staff_profile.court.club_id == club.pk:
+    staff_profile = getattr(profile, "staff_profile", None)
+    if (
+        profile.role == Role.STAFF
+        and staff_profile
+        and staff_profile.court.club_id == club.pk
+    ):
         return {Role.STAFF}
     return set()
 

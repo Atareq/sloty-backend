@@ -10,19 +10,19 @@ Per root [`AGENTS.md` §5.1](file:///home/tarek/Desktop/sloty/sloty-backend/AGEN
 
 ```text
 User                          ← this app (authentication identity)
- ├── ClubMembership            ← apps/clubs (club operational actor)
+ ├── Profile                   ← apps/profiles (application role authority)
  └── PlayerProfile → ClubPlayer ← apps/players Phase 1 (customer identity)
 ```
 
 - `User` is credentials + platform authority only.
 - Do **not** add club roles, court assignments, player/booking, or financial fields to `User`.
-- Do **not** invent `StaffProfile` / `OwnerProfile` / `ManagerProfile` here — `ClubMembership` is the club actor.
+- `Profile`, `OwnerProfile`, `StaffProfile`, and `AdminProfile` belong to `apps/profiles/`; accounts must read them rather than duplicate role fields.
 - Customer identity (`PlayerProfile` / `ClubPlayer`) belongs in `apps/players/` (Phase 1), not in accounts.
 
 ## Domain Invariants
 
-- **Identity Only**: The `User` model represents identity and global platform authority only. It must never store club, court, or business roles (such as `OWNER`, `MANAGER`, or `STAFF`).
-- **No Orphan Business Users**: Active non-platform users must not be created via generic user endpoints. Club business users must be created through club-scoped membership onboarding (`apps/clubs/services.py`) so `User` and `ClubMembership` are persisted atomically.
+- **Identity Only**: The `User` model represents authentication identity only. It must never store club, court, or application-role data; `Profile.role` is authoritative.
+- **Profile Boundary**: Profile extensions define application scope: OwnerProfile → clubs, StaffProfile → court, AdminProfile → platform-wide role marker.
 - **Creator Tracking**: `User.created_by` stores the user account creator, not club membership creators.
 
 ## Important Models & Fields
@@ -69,8 +69,7 @@ Frontend must never treat “JWT contains `club_id`” as proof of access.
 
 ### Sync Heartbeat (Sole Authoritative Writer)
 
-- `POST /api/v1/me/sync-heartbeat/` (`SyncHeartbeatAPIView`): Authenticated-only, no request payload. Updates `last_sync_at` (server `timezone.now()`, completely ignoring any client-supplied timestamp) on **all** of the authenticated user's active, access-granting `ClubMembership` rows (`ClubMembership.objects.granting_access().filter(user=request.user)`), and returns `{"last_sync_at": ...}`.
-- **Sole Authoritative Writer Invariant**: This endpoint is the **only** writer to `ClubMembership.last_sync_at`. Neither the Authorization Spine, legacy access mixins, normal API traffic, login, refresh, `/me`, nor scope resolution update it.
+- `POST /api/v1/me/sync-heartbeat/` (`SyncHeartbeatAPIView`): authenticated-only, no request payload, and retained as a compatibility acknowledgement returning a server timestamp. It does not write authorization or presence state.
 - **Offboarding Presence**: Deactivated or soft-deleted memberships are never updated by heartbeat, preserving their final known connection time for auditing. Users with zero active memberships receive a safe `200 OK` without database mutation.
 
 ### Platform User Management
@@ -88,7 +87,7 @@ Frontend must never treat “JWT contains `club_id`” as proof of access.
 
 ## Cross-App Dependencies
 
-- Imports [`ClubMembership`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/models.py) to resolve active memberships for `/api/v1/me/` and scoped owner permissions.
+- Reads [`Profile`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/profiles/models.py) for `/api/v1/me/`, token claims, and scoped owner permissions.
 - Does not own `PlayerProfile` / `ClubPlayer` (Phase 1 → `apps/players/`).
 - `PlayerProfile` / `ClubPlayer` live in `apps/players/`. See [`apps/players/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/AGENTS.md) and [`docs/architecture/security-architecture-v1.md §11`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md) for the customer identity boundary and phase migration notes.
 - `PlayerProfile` / `ClubPlayer` customer identity lives in `apps/players/`. See [`apps/players/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/AGENTS.md), [`docs/architecture/security-architecture-v1.md §11`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md), and [`ADR-001`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-001-player-identity-and-booking-link.md).
@@ -101,5 +100,5 @@ Frontend must never treat “JWT contains `club_id`” as proof of access.
   - `test_account_api.py`: `/api/v1/me/` and `/api/v1/users/` permissions and serialization.
   - `test_sync_heartbeat_api.py`: `/api/v1/me/sync-heartbeat/` contract, backend-authoritative timestamp, multi-membership fan-out, user isolation, and the regression guard that ordinary API traffic (e.g. Courts) never updates `last_sync_at` implicitly.
   - `test_sync_heartbeat_api.py`: Complete test coverage of the heartbeat contract: unauthenticated rejection, server-timestamp authority (ignores client clocks), multi-membership fan-out, user isolation, ordinary API traffic immunity, login/refresh/me immunity, deactivated/soft-deleted membership exclusion, zero-membership safe response, and owner offboarding visibility.
-  - `test_account_membership_lifecycle.py`: End-to-end lifecycle integration tests verifying account vs. membership lifecycle decoupling, password change token revocation (`PASSWORD_CHANGED`), deactivated user rejection (`USER_INACTIVE`), deactivated membership immediate revocation (`CLUB_ACCESS_REVOKED`), reactivation access restoration, soft-deleted membership protection (`MEMBERSHIP_DELETED_CANNOT_RECREATE`), live role changes taking immediate effect on permissions and court scoping, manager pricing delegation, manager custody offboarding guards (`MEMBERSHIP_CURRENT_CUSTODY_NOT_SETTLED`), and customer identity independence.
+  - Profile architecture tests verify current role authority, Profile extension scope, retired-manager deactivation, and profile-backed seed data. Account authentication tests retain password-change and inactive-user coverage.
   - `test_seed_demo_data.py`: Multi-club demo seed data creation.

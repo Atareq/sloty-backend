@@ -42,7 +42,7 @@
   - `USER_INACTIVE`: Authenticated user is inactive.
   - `USER_DELETED`: User record no longer exists.
   - `PASSWORD_CHANGED`: JWT password-hash claim no longer matches the current user password hash; clients must authenticate again.
-  - `CLUB_ACCESS_REVOKED`: User is authenticated but active membership in selected club was lost.
+  - `CLUB_ACCESS_REVOKED`: User is authenticated but has no current Profile scope for the selected club.
 
 ### 3. Egyptian Phone Number Search ([`apps/common/search.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/search.py))
 - Provides `phone_search_variants()` and `customer_phone_search_q()` to handle standard Egyptian phone formatting (`010...`, `+2010...`, spaced digits) consistently across booking and transaction search filters.
@@ -58,8 +58,8 @@
 > [`docs/architecture/security-architecture-v1.md`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md)
 > Do not duplicate that document here. This section is the **implementation contract** for code under `apps/common/authorization/`. Mismatches with the target doc are transitional — code/tests win for active behavior.
 
-- **RequestAccessContext**: Fact container (`user`, `role`, `club`, `membership`, explicitly targeted `court`, `is_platform_admin`). Zero permissions logic and no loaded Court object for club-wide requests. Forward-compat `profile` / `profile_type` currently alias membership/role — not separate Staff/Owner profile tables.
-- **Scope Resolver**: `resolve_club_scope(request, club_slug, court_id=None)` enforces URL club authority, returns cached context on `request.access_context`, raises `CLUB_ACCESS_REVOKED` (403) on revoked/missing membership.
+- **RequestAccessContext**: Fact container (`user`, `profile`, `role`, `club`, `owner_profile`, `staff_profile`, explicitly targeted `court`, `is_platform_admin`). It contains no permission decisions and does not load a Court for club-wide requests.
+- **Scope Resolver**: `resolve_club_scope(request, club_slug, court_id=None)` enforces URL club authority, derives scope from current Profile extensions, caches on `request.access_context`, and raises `CLUB_ACCESS_REVOKED` (403) for missing or invalid scope.
 - **Role Matrix & Permission**: `SlotyBasePermission` evaluates centralized `ROLE_PERMISSIONS[role][viewset][action]` with strict default deny. Exposes clean `has_object_permission()` extension hook.
 - **ClubScopedViewMixin**: ViewSet mixin attaching context during `perform_authentication` before permission checks.
 
@@ -68,7 +68,7 @@
 | Allowed | Forbidden |
 | :--- | :--- |
 | True business invariants the matrix cannot express | Re-implementing club/court “WHERE” scoping |
-| e.g. `manager_can_change_pricing`, Staff `created_by` visibility, settlement self-approval / collector gates | e.g. a bookings module whose only job is “staff may access assigned court” |
+| e.g. Staff `created_by` visibility or settlement self-approval / collector gates | e.g. a bookings module whose only job is “staff may access assigned court” |
 
 **Rule:** Spine owns **WHERE and WHO**. Domain authorization owns **special business conditions** only.
 
@@ -86,7 +86,7 @@ The v2 foundation secures model-backed querysets without modifying DRF classes a
 
 - `ResourceScope.NONE` (`"none"`): explicit fail-closed scope; returns `.none()`.
 - `ResourceScope.CLUB` (`"club"`): filters by the validated URL club.
-- `ResourceScope.COURT` (`"court"`): applies the club filter first, then an explicitly targeted court or the staff member's active court assignment. Owners, managers, and platform admins remain bounded to all court-backed rows inside the selected club when no court is explicitly targeted.
+- `ResourceScope.COURT` (`"court"`): applies the club filter first, then an explicitly targeted court or the staff member's assigned court. Owners and platform admins remain bounded to all court-backed rows inside the selected club when no court is explicitly targeted.
 - Future keys are allowed as strings. A future scope requires a declared model path and a same-named fact (or `<scope>_ids`) on the resolved context; absence returns `.none()`.
 
 #### Participating Model Contract
@@ -137,8 +137,8 @@ Rules:
 - Compose it before DRF's class: `class ExampleViewSet(SlotyScopedResourceMixin, ModelViewSet): ...`. DRF `ModelViewSet` itself remains untouched — unscoped ViewSets may still use plain `ModelViewSet`.
 - ViewSets may add relations with `authorization_select_related`, `authorization_prefetch_related`, or their getter hooks. They must not remove mandatory model relations.
 - Domain filtering belongs in `filter_scoped_queryset(queryset)` or standard DRF filter backends. Both receive the already-authorized queryset and may only narrow it.
-- Domain migrations remain separate, deliberate tasks. The legacy `ClubAccessContext` and `ClubScopedAccessMixin` stay in place for backward compatibility. **Courts**, **Bookings**, **Transactions**, **Settlements**, **Dashboard**, **Audit**, **Reports**, and **Clubs** (`ClubMembershipViewSet`, `ClubUserListViewSet`) are migrated onto this foundation. Dashboard and Reports are read models: `ClubScopedViewMixin` + `SlotyBasePermission` with source-domain `scoped_queryset` aggregations — not `SlotyScopedResourceMixin`. Audit is a club-only resource (`AuditLog.authorization_config` `default_scope="club"`); Staff are matrix-denied; court/collector scopes from Bookings/Transactions/Settlements are not applied to audit rows. Clubs memberships use `SlotyScopedResourceMixin` (`authorization_model = ClubMembership`); global `ClubViewSet` remains unscoped.
-- **Not a presence/activity tracker**: The Spine (`RequestAccessContext`, `ClubScopedViewMixin`, `SlotyScopedResourceMixin`) intentionally has no request-level side effects beyond authorization/scoping. `ClubMembership.last_sync_at` (offline/PWA sync bookkeeping) is updated only by the dedicated `POST /api/v1/me/sync-heartbeat/` endpoint (`apps/accounts/`), never implicitly by any Spine mixin. Do not add such side effects when migrating further domains.
+- Profile migration is complete: Courts, Bookings, Transactions, Settlements, Dashboard, Audit, Reports, Players, and Clubs consume Profile-backed `RequestAccessContext`. Dashboard and Reports are read models using `ClubScopedViewMixin` plus source-domain `scoped_queryset` aggregations. Audit is club-only and matrix-denied to Staff; court/collector scope is not applied to audit rows. Global `ClubViewSet` remains URL-unscoped but Profile-filtered.
+- **Not a presence/activity tracker**: The Spine (`RequestAccessContext`, `ClubScopedViewMixin`, `SlotyScopedResourceMixin`) has no request-level side effects beyond authorization/scoping. The heartbeat endpoint is a compatibility acknowledgement only. Do not add presence tracking to authorization.
 
 ## Testing
 

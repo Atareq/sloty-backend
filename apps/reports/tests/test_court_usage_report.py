@@ -11,8 +11,9 @@ from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
 from apps.bookings.models import Booking
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
+from apps.profiles.models import AdminProfile, OwnerProfile, Profile, StaffProfile
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking
 
@@ -22,9 +23,8 @@ class CourtUsageReportAPITestCase(APITestCase):
     password = "test-pass-123"
 
     def setUp(self):
-        self.admin = self.create_user("report-admin", is_platform_admin=True)
+        self.admin = self.create_user("report-admin")
         self.owner = self.create_user("report-owner")
-        self.manager = self.create_user("report-manager")
         self.staff = self.create_user("report-staff")
         self.no_membership = self.create_user("report-outsider")
         self.other_staff = self.create_user("other-report-staff")
@@ -40,19 +40,11 @@ class CourtUsageReportAPITestCase(APITestCase):
         self.create_working_hours(
             self.cross_court, opens_at=time(8), closes_at=time(12)
         )
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
-        self.create_membership(
-            self.staff,
-            self.club,
-            ClubMembership.Role.STAFF,
-            court=self.court,
-        )
-        self.create_membership(
-            self.other_staff,
-            self.other_club,
-            ClubMembership.Role.STAFF,
-            court=self.cross_court,
+        self.create_profile_scope(self.admin, Profile.Role.ADMIN)
+        self.create_profile_scope(self.owner, Profile.Role.OWNER, club=self.club)
+        self.create_profile_scope(self.staff, Profile.Role.STAFF, court=self.court)
+        self.create_profile_scope(
+            self.other_staff, Profile.Role.STAFF, court=self.cross_court
         )
         self.confirmed = self.create_booking(
             self.court,
@@ -75,7 +67,7 @@ class CourtUsageReportAPITestCase(APITestCase):
             status=Booking.Status.NO_SHOW,
             start_time=self.time_at(18),
             end_time=self.time_at(19),
-            created_by=self.manager,
+            created_by=self.owner,
             total_price=Decimal("500.00"),
         )
         self.hold = self.create_booking(
@@ -146,13 +138,16 @@ class CourtUsageReportAPITestCase(APITestCase):
             slot_duration_minutes=60,
         )
 
-    def create_membership(self, user, club, role, court=None):
-        return ClubMembership.objects.create(
-            user=user,
-            club=club,
-            role=role,
-            court=court,
-        )
+    def create_profile_scope(self, user, role, *, club=None, court=None):
+        profile = Profile.objects.create(user=user, role=role)
+        if role == Profile.Role.ADMIN:
+            AdminProfile.objects.create(profile=profile)
+        elif role == Profile.Role.OWNER:
+            owner_profile = OwnerProfile.objects.create(profile=profile)
+            owner_profile.clubs.add(club)
+        elif role == Profile.Role.STAFF:
+            StaffProfile.objects.create(profile=profile, court=court)
+        return profile
 
     def create_working_hours(self, court, opens_at, closes_at):
         for weekday in CourtWorkingHour.Weekday.values:
@@ -217,7 +212,7 @@ class CourtUsageReportTests(CourtUsageReportAPITestCase):
         response = self.client.get(self.url(), self.params())
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
-        for user in (self.admin, self.owner, self.manager):
+        for user in (self.admin, self.owner):
             self.client.force_authenticate(user=user)
             response = self.client.get(self.url(), self.params())
             self.assertEqual(response.status_code, status.HTTP_200_OK)
