@@ -36,7 +36,7 @@ from apps.settlements.views import SettlementViewSet
 from tests.profile_factories import grant_owner_club, grant_staff_court
 from tests.settlements.test_settlement_api import SettlementAPITestCase
 
-SETTLEMENT_MANAGER_ACTIONS = (
+SETTLEMENT_OWNER_ACTIONS = (
     "list",
     "retrieve",
     "create",
@@ -127,7 +127,7 @@ class SettlementViewSetSpineCompositionTests(SettlementAPITestCase):
 
     def test_matrix_matches_approved_settlement_actions(self):
         for role in (Role.ADMIN, Role.OWNER):
-            for action in SETTLEMENT_MANAGER_ACTIONS:
+            for action in SETTLEMENT_OWNER_ACTIONS:
                 with self.subTest(role=role, action=action):
                     self.assertTrue(
                         is_action_allowed(role, "SettlementViewSet", action)

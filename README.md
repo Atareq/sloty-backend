@@ -274,6 +274,7 @@ Useful booking-attempt filters are `court`, `attempted_by`, `outcome`,
 `resolution`, `requested_source`, `status` (`ACCEPTED`, `REJECTED`, or
 `DISMISSED`), `date`, `date_from`, and `date_to`. Staff see only their own
 attempts on their assigned court. Owners, managers, and platform admins see the
+attempts on their assigned court. Owners and platform admins see the
 selected club scope. Dismissal is staff resolution of an unsuccessful attempt,
 not Booking cancellation, and does not change Booking, Transaction, Settlement,
 availability, or Current Custody state.
@@ -332,9 +333,12 @@ Staff transaction lists are collector-scoped ("my collections"): Staff see
 only transactions they recorded (`created_by` is the current user) on their
 assigned court. Query parameters cannot expand that to another collector.
 Owners, managers, and platform admins keep club/court-wide lists.
+Owners and platform admins keep club/court-wide lists.
 
 Platform admins may cancel any eligible transaction in the selected club. Owners,
 managers, and staff may cancel only transactions they created and can access;
+Platform admins may cancel any eligible transaction in the selected club. Owners
+and staff may cancel only transactions they created and can access;
 staff remain limited to their assigned court and to their own collections.
 Already cancelled or settled transactions and transactions attached to terminal
 bookings cannot be cancelled.
@@ -361,6 +365,7 @@ Useful transaction-attempt filters are `booking`, `court`, `attempted_by`,
 (`ACCEPTED`, `REJECTED`, `DISMISSED`), `date`, `date_from`, and `date_to`.
 Attempt date filters use `occurred_at`. Staff see only their own attempts on
 their assigned court. Owners, managers, and platform admins see the selected
+their assigned court. Owners and platform admins see the selected
 club scope. Dismissal is staff resolution of an unsuccessful attempt, not
 transaction cancellation, refund, reversal, settlement, or booking payment.
 
@@ -385,6 +390,7 @@ Lifecycle request bodies:
 ```
 
 `cancel` accepts an optional reason for platform admins, owners, and managers.
+`cancel` accepts an optional reason for platform admins and owners.
 Court staff must provide a non-empty cancellation reason.
 
 ```json
@@ -452,6 +458,7 @@ cancel unless that job is actually running.
 - `POST /api/v1/clubs/{club_slug}/settlements/{id}/mark-settled/`
 
 Settlement is user-based. The owner/admin/allowed manager selects a collector
+Settlement is user-based. The owner or platform admin selects a collector
 from the club users list, previews that user's open balance, then approves a
 settlement for all currently unsettled valid transactions recorded by that user
 in the selected club.
@@ -464,6 +471,8 @@ this endpoint. Managers need `manager_can_settle_transactions=true`, do not see
 OWNER money, and cannot approve their own row. Optional `collected_by` and
 `court` follow preview access rules. POST create remains the receive-money
 mutation. GET list remains settlement history.
+this endpoint. Optional `collected_by` and `court` follow preview access rules.
+POST create remains the receive-money mutation. GET list remains settlement history.
 
 Current Custody is all-time state: every authorized, non-cancelled signed
 Transaction with no settlement line. It is not restricted by Transaction age,
@@ -566,6 +575,8 @@ Booking, Transaction, or Settlement lookup is needed.
 
 Platform admins, owners, and managers can view audit logs for the selected
 club. Staff cannot access audit logs in Sprint 7.
+Platform admins and owners can view audit logs for the selected
+club. Staff cannot access audit logs.
 
 Useful audit log filters:
 
@@ -601,11 +612,13 @@ statuses.
 Calendar returns frontend-friendly booking items with payment summary fields.
 Staff can use availability and calendar only for their assigned court. Platform
 admins, owners, and managers can access all selected-club courts.
+admins and owners can access all selected-club courts.
 
 Summary returns compact operational booking counts, scoped court metadata, and
 financial totals for the selected club and date/range. Platform admins and
 owners see all selected-club courts. Managers see all selected-club courts under
 the current club-level manager architecture. Staff can access summary for their
+owners see all selected-club courts. Staff can access summary for their
 assigned court only and receive operational counts with
 `financial_visible=false`; financial fields are returned as `null`.
 
@@ -661,6 +674,7 @@ Summary response shape:
 
 Overview, revenue, and court-utilization endpoints are financial dashboard
 summaries. Platform admins, owners, and managers can access them. Staff cannot.
+summaries. Platform admins and owners can access them. Staff cannot.
 
 Useful Sprint 8 query parameters:
 
@@ -744,12 +758,17 @@ Main users:
 - `owner_a`, `manager_a`, `staff_a`
 - `owner_b`, `manager_b`, `staff_b`
 - `owner_c`, `manager_c`, `staff_c`
+- `owner_a`, `staff_a`
+- `owner_b`, `staff_b`
+- `owner_c`, `staff_c`
 
 Main clubs:
 
 - `demo-football-club`: happy-path testing; managers can settle and change
   pricing.
 - `demo-restricted-club`: restricted manager settlement and pricing flags.
+- `demo-football-club`: happy-path multi-court club.
+- `demo-restricted-club`: single-court club.
 - `demo-other-club`: cross-club scoping checks.
 
 Token examples:
