@@ -1,5 +1,11 @@
 # ADR-002: Booking Identity Linkage and Authorization Migration Strategy
 
+> Operational identity references below describe the previous migration phases.
+> The September 16 Profile inheritance baseline supersedes that identity and
+> compatibility layer. Current authorization resolves enabled Profile.role,
+> OwnerProfile.clubs, or StaffProfile.club with StaffCourtAccess. Booking's
+> customer identity and business rules remain as documented here.
+
 **Status:** Accepted
 **Date:** 2026-09-13
 **Deciders:** Principal Backend Architect, Domain Architect

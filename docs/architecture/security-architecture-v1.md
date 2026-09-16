@@ -1,3 +1,17 @@
+> **Current Profile schema (September 2026):** User has one Profile through a
+> OneToOne relation. OwnerProfile, StaffProfile, and AdminProfile inherit directly
+> from the concrete Profile using Django multi-table inheritance. Profile owns
+> role, is_enabled, timestamps, clean, and save. Staff belong to one Club and
+> receive court access through StaffCourtAccess. Owners use clubs M2M. Admin
+> authorization reads the enabled Profile.role. No separate admin flag or
+> membership compatibility layer participates in runtime authorization.
+>
+> Older migration-phase notes below describing membership identity, Manager,
+> heartbeat, compatibility contexts, or profile aliases are historical and
+> superseded by this baseline and `apps/profiles/AGENTS.md`. They are not
+> implementation instructions. The development migration history was rebuilt
+> from the final models and requires database recreation.
+
 # Sloty Security Architecture v1
 
 **Status:** Official long-term security architecture reference
@@ -47,7 +61,7 @@ This reference (direction) + scoped AGENTS.md (domain rules)
 ### Implemented today
 
 - `User` authentication identity (`apps/accounts`)
-- `ClubMembership` club operational relationship (`apps/clubs`)
+- `Profile` parent/canonical application identity with `OwnerProfile` / `StaffProfile` / `AdminProfile` children (`apps/profiles`). `Profile.role` is the only application-role authority. Club scope is `OwnerProfile.clubs` or `StaffProfile.club` with `StaffCourtAccess`.
 - JWT access + refresh authentication
 - Authorization Spine foundation (`apps/common/authorization/`)
   - `RequestAccessContext`
@@ -55,7 +69,7 @@ This reference (direction) + scoped AGENTS.md (domain rules)
   - `SlotyBasePermission` + role matrix
   - `ClubScopedViewMixin`
   - v2 resource query: `authorization_config`, `scoped_queryset`, `SlotyScopedResourceMixin`
-- Explicit sync heartbeat (`POST /api/v1/me/sync-heartbeat/`) — not part of authorization
+- No heartbeat/presence API. `POST /api/v1/me/sync-heartbeat/` is removed. `ClubMembership`, `ClubAccessContext`, `ClubScopedAccessMixin`, Manager, and `User.is_platform_admin` are retired from runtime.
 - Domain migrations:
   - **Courts** ✅ — Spine v2 (`authorization_config` + `SlotyScopedResourceMixin`)
   - **Transactions** ✅ — Spine v2 (`authorization_config` + `SlotyScopedResourceMixin`) plus domain collector/cancel/dismiss rules (`apps/transactions/authorization.py`)
@@ -78,12 +92,10 @@ This reference (direction) + scoped AGENTS.md (domain rules)
 
 ### Not yet migrated / not yet created
 
-- Removal of legacy `ClubAccessContext` / `ClubScopedAccessMixin` (retained for backward compatibility with external test utilities)
-- Password change endpoint (planned)
-- Removal of legacy `ClubAccessContext` (retained for backward compatibility with external test utilities in `tests/test_postgresql_concurrency.py`, `tests/clubs/`, `tests/transactions/`, `tests/settlements/`)
 - Password reset (future; not scheduled)
 - Password reset via SMS/email (future product phase; not scheduled)
-- Fully deprecate legacy `ClubAccessContext` test fixtures once external test utilities migrate to `RequestAccessContext`.
+
+Historical sprint bullets in this document may still mention `ClubMembership`, heartbeat, or `ClubAccessContext`. Those names describe past work. Active runtime and tests use `Profile` + Authorization Spine only.
 
 ---
 

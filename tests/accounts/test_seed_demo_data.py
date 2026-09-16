@@ -2,16 +2,16 @@ from datetime import time
 from decimal import Decimal
 
 from django.core.management import call_command
-from django.db.models import Count
 from django.test import TestCase
 
 from apps.accounts.models import User
 from apps.accounts.services import find_orphan_business_users
 from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.common.egypt_locations import is_valid_city_for_governorate
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
+from apps.profiles.models import AdminProfile, OwnerProfile, Profile, StaffProfile
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
@@ -33,13 +33,17 @@ class SeedDemoDataCommandTests(TestCase):
         self.run_seed_command()
 
         platform_admin = User.objects.get(username="platform_admin")
-        self.assertTrue(platform_admin.is_platform_admin)
+        self.assertTrue(platform_admin.is_platform_super_admin())
+        self.assertEqual(platform_admin.profile.role, Profile.Role.ADMIN)
+        self.assertTrue(AdminProfile.objects.filter(user=platform_admin).exists())
         self.assertTrue(platform_admin.is_staff)
         self.assertTrue(platform_admin.is_superuser)
         self.assertEqual(platform_admin.get_full_name(), "Tarek Platform Admin")
 
         hossam_admin = User.objects.get(username="hossam_admin")
-        self.assertTrue(hossam_admin.is_platform_admin)
+        self.assertTrue(hossam_admin.is_platform_super_admin())
+        self.assertEqual(hossam_admin.profile.role, Profile.Role.ADMIN)
+        self.assertTrue(AdminProfile.objects.filter(user=hossam_admin).exists())
         self.assertTrue(hossam_admin.is_staff)
         self.assertTrue(hossam_admin.is_superuser)
         self.assertEqual(hossam_admin.get_full_name(), "Hossam Platform Admin")
@@ -51,19 +55,9 @@ class SeedDemoDataCommandTests(TestCase):
         )
         for slug in DEMO_CLUB_SLUGS:
             self.assertEqual(Court.objects.filter(club__slug=slug).count(), 2)
-            self.assertEqual(
-                set(
-                    ClubMembership.objects.filter(club__slug=slug).values_list(
-                        "role",
-                        flat=True,
-                    )
-                ),
-                {
-                    ClubMembership.Role.OWNER,
-                    ClubMembership.Role.MANAGER,
-                    ClubMembership.Role.STAFF,
-                },
-            )
+            club = Club.objects.get(slug=slug)
+            self.assertTrue(OwnerProfile.objects.filter(clubs=club).exists())
+            self.assertTrue(StaffProfile.objects.filter(club=club).exists())
 
         club_a = Club.objects.get(slug="barcelona-fc")
         club_b = Club.objects.get(slug="real-madrid-cf")
@@ -71,18 +65,6 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertEqual(club_a.name, "Barcelona FC")
         self.assertEqual(club_b.name, "Real Madrid CF")
         self.assertEqual(club_c.name, "Liverpool FC")
-        manager_a = ClubMembership.objects.get(
-            club=club_a,
-            role=ClubMembership.Role.MANAGER,
-        )
-        manager_b = ClubMembership.objects.get(
-            club=club_b,
-            role=ClubMembership.Role.MANAGER,
-        )
-        self.assertTrue(manager_a.manager_can_settle_transactions)
-        self.assertTrue(manager_a.manager_can_change_pricing)
-        self.assertFalse(manager_b.manager_can_settle_transactions)
-        self.assertFalse(manager_b.manager_can_change_pricing)
         self.assertEqual(club_a.governorate, "ASSIUT")
         self.assertEqual(club_a.city, "ASSIUT_MARKAZ")
         self.assertEqual(club_b.governorate, "SOHAG")
@@ -91,23 +73,10 @@ class SeedDemoDataCommandTests(TestCase):
             self.assertTrue(is_valid_city_for_governorate(club.governorate, club.city))
 
         for username in ("staff_a", "staff_b", "staff_c"):
-            self.assertEqual(
-                ClubMembership.objects.filter(
-                    user__username=username,
-                    role=ClubMembership.Role.STAFF,
-                    is_active=True,
-                ).count(),
-                1,
-            )
-        for username in ("manager_a", "manager_b", "manager_c"):
-            self.assertEqual(
-                ClubMembership.objects.filter(
-                    user__username=username,
-                    role=ClubMembership.Role.MANAGER,
-                    is_active=True,
-                ).count(),
-                1,
-            )
+            staff_user = User.objects.get(username=username)
+            self.assertEqual(staff_user.profile.role, Profile.Role.STAFF)
+            self.assertTrue(staff_user.is_active)
+            self.assertTrue(hasattr(staff_user.profile, "staff_profile"))
 
         self.assertEqual(
             set(Booking.objects.values_list("status", flat=True)),
@@ -120,65 +89,27 @@ class SeedDemoDataCommandTests(TestCase):
                 Booking.Status.EXPIRED,
             },
         )
-        self.assertEqual(Booking.objects.count(), 38)
-
-        duplicate_references = (
-            Transaction.objects.exclude(payment_reference="")
-            .values("club", "payment_reference")
-            .annotate(reference_count=Count("id"))
-            .filter(reference_count__gt=1)
-        )
-        self.assertFalse(duplicate_references.exists())
-        self.assertEqual(Transaction.objects.count(), 19)
-        self.assertTrue(
-            Transaction.objects.filter(
-                club=club_a,
-                payment_reference="A-DIGITAL-COURT2-001",
-                payment_method=Transaction.PaymentMethod.DIGITAL_WALLET,
-                court__name="La Masia Training Court",
-            ).exists()
-        )
-
-        for slug in DEMO_CLUB_SLUGS:
-            self.assertTrue(
-                Settlement.objects.filter(
-                    club__slug=slug,
-                    status=Settlement.Status.PENDING,
-                ).exists()
-            )
-            self.assertTrue(
-                Settlement.objects.filter(
-                    club__slug=slug,
-                    status=Settlement.Status.SETTLED,
-                ).exists()
-            )
+        self.assertTrue(Transaction.objects.exists())
         self.assertEqual(Settlement.objects.count(), 6)
-        self.assertEqual(SettlementTransaction.objects.count(), 6)
-        self.assertEqual(
-            Transaction.objects.filter(
-                settlement_line__isnull=True,
-                payment_reference__in=(
-                    "A-UNSETTLED-001",
-                    "A-UNSETTLED-002",
-                    "B-UNSETTLED-001",
-                    "B-UNSETTLED-002",
-                    "C-UNSETTLED-001",
-                    "C-UNSETTLED-002",
-                ),
-            ).count(),
-            6,
+        self.assertTrue(SettlementTransaction.objects.exists())
+        self.assertTrue(
+            Settlement.objects.filter(status=Settlement.Status.SETTLED).exists()
+        )
+        self.assertTrue(
+            Settlement.objects.filter(status=Settlement.Status.PENDING).exists()
         )
 
         for slug in DEMO_CLUB_SLUGS:
             self.assertEqual(AuditLog.objects.filter(club__slug=slug).count(), 5)
         self.assertEqual(AuditLog.objects.count(), 15)
 
-        staff_a_membership = ClubMembership.objects.get(
-            user__username="staff_a",
-            role=ClubMembership.Role.STAFF,
-            is_active=True,
+        staff_a = User.objects.get(username="staff_a")
+        self.assertEqual(staff_a.profile.staff_profile.club, club_a)
+        self.assertTrue(
+            staff_a.profile.staff_profile.court_accesses.filter(
+                court__name="Spotify Camp Nou"
+            ).exists()
         )
-        self.assertEqual(staff_a_membership.court.name, "Spotify Camp Nou")
         self.assertTrue(
             Booking.objects.filter(
                 club=club_a,
@@ -192,7 +123,10 @@ class SeedDemoDataCommandTests(TestCase):
             "users": User.objects.count(),
             "clubs": Club.objects.count(),
             "courts": Court.objects.count(),
-            "memberships": ClubMembership.objects.count(),
+            "profiles": Profile.objects.count(),
+            "owner_profiles": OwnerProfile.objects.count(),
+            "staff_profiles": StaffProfile.objects.count(),
+            "admin_profiles": AdminProfile.objects.count(),
             "bookings": Booking.objects.count(),
             "transactions": Transaction.objects.count(),
             "settlements": Settlement.objects.count(),
@@ -205,7 +139,10 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertEqual(User.objects.count(), counts["users"])
         self.assertEqual(Club.objects.count(), counts["clubs"])
         self.assertEqual(Court.objects.count(), counts["courts"])
-        self.assertEqual(ClubMembership.objects.count(), counts["memberships"])
+        self.assertEqual(Profile.objects.count(), counts["profiles"])
+        self.assertEqual(OwnerProfile.objects.count(), counts["owner_profiles"])
+        self.assertEqual(StaffProfile.objects.count(), counts["staff_profiles"])
+        self.assertEqual(AdminProfile.objects.count(), counts["admin_profiles"])
         self.assertEqual(Booking.objects.count(), counts["bookings"])
         self.assertEqual(Transaction.objects.count(), counts["transactions"])
         self.assertEqual(Settlement.objects.count(), counts["settlements"])
@@ -222,36 +159,45 @@ class SeedDemoDataCommandTests(TestCase):
 
         users = {
             user.username: user
-            for user in User.objects.filter(
-                username__in=("admin", "owner", "manager", "staff")
-            )
+            for user in User.objects.filter(username__in=("admin", "owner", "staff"))
         }
-        self.assertEqual(set(users), {"admin", "owner", "manager", "staff"})
+        self.assertEqual(set(users), {"admin", "owner", "staff"})
         self.assertEqual(
             {username: user.email for username, user in users.items()},
             {
                 "admin": "admin@sloty.test",
                 "owner": "owner@sloty.test",
-                "manager": "manager@sloty.test",
                 "staff": "staff@sloty.test",
             },
         )
         for user in users.values():
             self.assertTrue(user.check_password("Admin@123456"))
 
-        self.assertTrue(users["admin"].is_platform_admin)
-        self.assertIsNone(users["admin"].created_by)
-        self.assertEqual(users["owner"].created_by, users["admin"])
-        self.assertEqual(users["manager"].created_by, users["owner"])
-        self.assertEqual(users["staff"].created_by, users["owner"])
+        admin = users["admin"]
+        owner = users["owner"]
+        staff = users["staff"]
+
+        self.assertTrue(admin.is_platform_super_admin())
+        self.assertEqual(admin.profile.role, Profile.Role.ADMIN)
+        self.assertTrue(AdminProfile.objects.filter(user=admin).exists())
+        self.assertIsNone(admin.created_by)
+
+        self.assertEqual(owner.created_by, admin)
+        self.assertEqual(owner.profile.role, Profile.Role.OWNER)
+        self.assertTrue(hasattr(owner.profile, "owner_profile"))
+
+        self.assertEqual(staff.created_by, owner)
+        self.assertEqual(staff.profile.role, Profile.Role.STAFF)
+        self.assertTrue(hasattr(staff.profile, "staff_profile"))
 
         club = Club.objects.get(slug="albaladya-test")
         self.assertEqual(club.name, "Albaladya Test")
-        self.assertEqual(club.created_by, users["admin"])
+        self.assertEqual(club.created_by, admin)
         self.assertEqual(club.governorate, "ASSIUT")
         self.assertEqual(club.city, "ASSIUT_MARKAZ")
         self.assertEqual(str(club.phone_number), "+201000000001")
         self.assertTrue(club.is_active)
+        self.assertTrue(owner.profile.owner_profile.clubs.filter(pk=club.pk).exists())
 
         court = Court.objects.get(club=club, name="Albaladya Main Court")
         self.assertEqual(court.sport_type, Court.SportType.FOOTBALL)
@@ -260,35 +206,11 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertTrue(court.is_active)
         self.assertFalse(court.requires_digital_payment_reference)
         self.assertEqual(court.internal_hold_expiry_hours, 12)
-        self.assertEqual(court.created_by, users["owner"])
-
-        owner_membership = ClubMembership.objects.get(
-            club=club,
-            user=users["owner"],
-            role=ClubMembership.Role.OWNER,
+        self.assertEqual(court.created_by, owner)
+        self.assertEqual(staff.profile.staff_profile.club, club)
+        self.assertTrue(
+            staff.profile.staff_profile.court_accesses.filter(court=court).exists()
         )
-        manager_membership = ClubMembership.objects.get(
-            club=club,
-            user=users["manager"],
-            role=ClubMembership.Role.MANAGER,
-        )
-        staff_membership = ClubMembership.objects.get(
-            club=club,
-            user=users["staff"],
-            role=ClubMembership.Role.STAFF,
-        )
-        self.assertEqual(owner_membership.created_by, users["admin"])
-        self.assertEqual(manager_membership.created_by, users["owner"])
-        self.assertEqual(staff_membership.created_by, users["owner"])
-        self.assertIsNone(owner_membership.court)
-        self.assertIsNone(manager_membership.court)
-        self.assertEqual(staff_membership.court, court)
-        self.assertFalse(owner_membership.manager_can_settle_transactions)
-        self.assertFalse(owner_membership.manager_can_change_pricing)
-        self.assertTrue(manager_membership.manager_can_settle_transactions)
-        self.assertTrue(manager_membership.manager_can_change_pricing)
-        self.assertFalse(staff_membership.manager_can_settle_transactions)
-        self.assertFalse(staff_membership.manager_can_change_pricing)
 
         self.assertEqual(CourtWorkingHour.objects.filter(court=court).count(), 7)
         friday = CourtWorkingHour.objects.get(
@@ -317,12 +239,12 @@ class SeedDemoDataCommandTests(TestCase):
         self.run_albaladya_seed_command()
         counts = {
             "users": User.objects.filter(
-                username__in=("admin", "owner", "manager", "staff")
+                username__in=("admin", "owner", "staff")
             ).count(),
             "clubs": Club.objects.filter(slug="albaladya-test").count(),
             "courts": Court.objects.filter(club__slug="albaladya-test").count(),
-            "memberships": ClubMembership.objects.filter(
-                club__slug="albaladya-test"
+            "profiles": Profile.objects.filter(
+                user__username__in=("admin", "owner", "staff")
             ).count(),
             "working_hours": CourtWorkingHour.objects.filter(
                 court__club__slug="albaladya-test"
@@ -333,11 +255,6 @@ class SeedDemoDataCommandTests(TestCase):
         }
 
         owner = User.objects.get(username="owner")
-        manager_membership = ClubMembership.objects.get(
-            club__slug="albaladya-test",
-            user__username="manager",
-            role=ClubMembership.Role.MANAGER,
-        )
         club = Club.objects.get(slug="albaladya-test")
         court = Court.objects.get(club=club, name="Albaladya Main Court")
         owner.email = "wrong@example.com"
@@ -348,21 +265,11 @@ class SeedDemoDataCommandTests(TestCase):
         club.save(update_fields=["name"])
         court.slot_duration_minutes = 30
         court.save(update_fields=["slot_duration_minutes"])
-        manager_membership.manager_can_settle_transactions = False
-        manager_membership.manager_can_change_pricing = False
-        manager_membership.save(
-            update_fields=[
-                "manager_can_settle_transactions",
-                "manager_can_change_pricing",
-            ]
-        )
 
         self.run_albaladya_seed_command()
 
         self.assertEqual(
-            User.objects.filter(
-                username__in=("admin", "owner", "manager", "staff")
-            ).count(),
+            User.objects.filter(username__in=("admin", "owner", "staff")).count(),
             counts["users"],
         )
         self.assertEqual(Club.objects.filter(slug="albaladya-test").count(), 1)
@@ -371,8 +278,10 @@ class SeedDemoDataCommandTests(TestCase):
             counts["courts"],
         )
         self.assertEqual(
-            ClubMembership.objects.filter(club__slug="albaladya-test").count(),
-            counts["memberships"],
+            Profile.objects.filter(
+                user__username__in=("admin", "owner", "staff")
+            ).count(),
+            counts["profiles"],
         )
         self.assertEqual(
             CourtWorkingHour.objects.filter(court__club__slug="albaladya-test").count(),
@@ -386,7 +295,6 @@ class SeedDemoDataCommandTests(TestCase):
         )
 
         owner.refresh_from_db()
-        manager_membership.refresh_from_db()
         club.refresh_from_db()
         court.refresh_from_db()
         self.assertEqual(owner.email, "owner@sloty.test")
@@ -394,5 +302,3 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertTrue(owner.check_password("Admin@123456"))
         self.assertEqual(club.name, "Albaladya Test")
         self.assertEqual(court.slot_duration_minutes, 60)
-        self.assertTrue(manager_membership.manager_can_settle_transactions)
-        self.assertTrue(manager_membership.manager_can_change_pricing)

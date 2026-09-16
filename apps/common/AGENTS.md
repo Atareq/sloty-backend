@@ -58,8 +58,8 @@
 > [`docs/architecture/security-architecture-v1.md`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md)
 > Do not duplicate that document here. This section is the **implementation contract** for code under `apps/common/authorization/`. Mismatches with the target doc are transitional — code/tests win for active behavior.
 
-- **RequestAccessContext**: Fact container (`user`, `profile`, `role`, `club`, `owner_profile`, `staff_profile`, explicitly targeted `court`, `is_platform_admin`). It contains no permission decisions and does not load a Court for club-wide requests.
-- **Scope Resolver**: `resolve_club_scope(request, club_slug, court_id=None)` enforces URL club authority, derives scope from current Profile extensions, caches on `request.access_context`, and raises `CLUB_ACCESS_REVOKED` (403) for missing or invalid scope.
+- **RequestAccessContext**: Fact container (`user`, `profile`, `role`, `club`, `owner_profile`, `staff_profile`, explicitly targeted `court`, assigned `court_ids`). It contains no permission decisions and does not load a Court for club-wide requests.
+- **Scope Resolver**: `resolve_club_scope(request, club_slug, court_id=None)` enforces URL club authority, derives scope from the enabled concrete Profile and its inherited children, caches on `request.access_context`, and raises `CLUB_ACCESS_REVOKED` (403) for missing or invalid scope.
 - **Role Matrix & Permission**: `SlotyBasePermission` evaluates centralized `ROLE_PERMISSIONS[role][viewset][action]` with strict default deny. Exposes clean `has_object_permission()` extension hook.
 - **ClubScopedViewMixin**: ViewSet mixin attaching context during `perform_authentication` before permission checks.
 
@@ -138,7 +138,7 @@ Rules:
 - ViewSets may add relations with `authorization_select_related`, `authorization_prefetch_related`, or their getter hooks. They must not remove mandatory model relations.
 - Domain filtering belongs in `filter_scoped_queryset(queryset)` or standard DRF filter backends. Both receive the already-authorized queryset and may only narrow it.
 - Profile migration is complete: Courts, Bookings, Transactions, Settlements, Dashboard, Audit, Reports, Players, and Clubs consume Profile-backed `RequestAccessContext`. Dashboard and Reports are read models using `ClubScopedViewMixin` plus source-domain `scoped_queryset` aggregations. Audit is club-only and matrix-denied to Staff; court/collector scope is not applied to audit rows. Global `ClubViewSet` remains URL-unscoped but Profile-filtered.
-- **Not a presence/activity tracker**: The Spine (`RequestAccessContext`, `ClubScopedViewMixin`, `SlotyScopedResourceMixin`) has no request-level side effects beyond authorization/scoping. The heartbeat endpoint is a compatibility acknowledgement only. Do not add presence tracking to authorization.
+- **Not a presence/activity tracker**: The Spine has no request-level side effects beyond authorization/scoping. There is no heartbeat endpoint.
 
 ## Testing
 

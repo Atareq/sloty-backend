@@ -1,43 +1,46 @@
 from django.contrib import admin
 
-from apps.profiles.models import AdminProfile, OwnerProfile, Profile, StaffProfile
+from apps.profiles.models import (
+    AdminProfile,
+    OwnerProfile,
+    Profile,
+    StaffCourtAccess,
+    StaffProfile,
+)
 
 
-class OwnerProfileInline(admin.StackedInline):
-    model = OwnerProfile
-    extra = 0
-
-
-class StaffProfileInline(admin.StackedInline):
-    model = StaffProfile
-    extra = 0
-
-
-class AdminProfileInline(admin.StackedInline):
-    model = AdminProfile
+class StaffCourtAccessInline(admin.TabularInline):
+    model = StaffCourtAccess
     extra = 0
 
 
 @admin.register(Profile)
 class ProfileAdmin(admin.ModelAdmin):
-    list_display = ("user", "role")
+    list_display = ("user", "role", "is_enabled")
     list_select_related = ("user",)
-    inlines = (OwnerProfileInline, StaffProfileInline, AdminProfileInline)
 
 
 @admin.register(OwnerProfile)
 class OwnerProfileAdmin(admin.ModelAdmin):
-    list_display = ("profile",)
+    list_display = ("user", "role", "is_enabled")
+    list_select_related = ("user",)
     filter_horizontal = ("clubs",)
 
 
 @admin.register(StaffProfile)
 class StaffProfileAdmin(admin.ModelAdmin):
-    list_display = ("profile", "court")
-    list_select_related = ("profile__user", "court")
+    list_display = ("user", "club", "is_enabled")
+    list_select_related = ("user", "club")
+    inlines = (StaffCourtAccessInline,)
+
+
+@admin.register(StaffCourtAccess)
+class StaffCourtAccessAdmin(admin.ModelAdmin):
+    list_display = ("staff_profile", "court")
+    list_select_related = ("staff_profile__user", "court")
 
 
 @admin.register(AdminProfile)
 class AdminProfileAdmin(admin.ModelAdmin):
-    list_display = ("profile",)
-    list_select_related = ("profile__user",)
+    list_display = ("user", "role", "is_enabled")
+    list_select_related = ("user",)

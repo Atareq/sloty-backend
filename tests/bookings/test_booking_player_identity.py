@@ -24,7 +24,6 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.accounts.models import User
 from apps.bookings.models import Booking
 from apps.bookings.services import create_booking, validate_booking_club_player
 from apps.clubs.models import Club
@@ -33,24 +32,15 @@ from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePer
 from apps.players.models import ClubPlayer, PlayerProfile
 from apps.players.services import create_club_player_version
 from apps.transactions.models import Transaction
+from tests.profile_factories import ProfileIdentityMixin
 
 
-class BookingPlayerIdentityTestCase(APITestCase):
+class BookingPlayerIdentityTestCase(ProfileIdentityMixin, APITestCase):
     password = "test-pass-123"
-
-    def create_platform_admin(self, username="identity-admin") -> User:
-        return User.objects.create_user(
-            username=username,
-            password=self.password,
-            is_platform_admin=True,
-        )
 
     def create_club(self, name: str, slug: str) -> Club:
         return Club.objects.create(
-            name=name,
-            slug=slug,
-            governorate="ASSIUT",
-            city="ASSIUT_MARKAZ",
+            name=name, slug=slug, governorate="ASSIUT", city="ASSIUT_MARKAZ"
         )
 
     def create_court(self, club: Club, name: str) -> Court:
@@ -71,24 +61,17 @@ class BookingPlayerIdentityTestCase(APITestCase):
         return court
 
     def time_at(self, hour: int, minute: int = 0):
-        # 2026-05-20 is a Wednesday (weekday=2) to match create_court()'s
-        # working hours fixture above.
         return timezone.datetime(
-            2026,
-            5,
-            20,
-            hour,
-            minute,
-            tzinfo=timezone.get_current_timezone(),
+            2026, 5, 20, hour, minute, tzinfo=timezone.get_current_timezone()
         )
 
 
 class SamePhoneSameClubTests(BookingPlayerIdentityTestCase):
+
     def test_same_phone_same_club_reuses_single_club_player(self):
         club = self.create_club("Identity Club A", "identity-club-a")
         court = self.create_court(club, "Court 1")
         admin = self.create_platform_admin()
-
         booking_one = create_booking(
             created_by=admin,
             court=court,
@@ -105,7 +88,6 @@ class SamePhoneSameClubTests(BookingPlayerIdentityTestCase):
             customer_name="Ahmed Ali",
             customer_phone="+201012345678",
         )
-
         self.assertEqual(PlayerProfile.objects.count(), 1)
         self.assertEqual(ClubPlayer.objects.count(), 1)
         self.assertEqual(Booking.objects.count(), 2)
@@ -113,19 +95,18 @@ class SamePhoneSameClubTests(BookingPlayerIdentityTestCase):
         self.assertEqual(booking_one.club_player_id, booking_two.club_player_id)
         self.assertEqual(booking_one.club_player.club_id, club.id)
         self.assertEqual(
-            str(booking_one.club_player.player_profile.phone_number),
-            "+201012345678",
+            str(booking_one.club_player.player_profile.phone_number), "+201012345678"
         )
 
 
 class SamePhoneDifferentClubsTests(BookingPlayerIdentityTestCase):
+
     def test_same_phone_different_clubs_creates_separate_club_players(self):
         club_a = self.create_club("Identity Club A2", "identity-club-a2")
         club_b = self.create_club("Identity Club B2", "identity-club-b2")
         court_a = self.create_court(club_a, "Court A")
         court_b = self.create_court(club_b, "Court B")
         admin = self.create_platform_admin()
-
         booking_a = create_booking(
             created_by=admin,
             court=court_a,
@@ -142,7 +123,6 @@ class SamePhoneDifferentClubsTests(BookingPlayerIdentityTestCase):
             customer_name="Mo Salah",
             customer_phone="+201099999999",
         )
-
         self.assertEqual(PlayerProfile.objects.count(), 1)
         self.assertEqual(ClubPlayer.objects.count(), 2)
         self.assertNotEqual(booking_a.club_player_id, booking_b.club_player_id)
@@ -152,23 +132,20 @@ class SamePhoneDifferentClubsTests(BookingPlayerIdentityTestCase):
         )
         self.assertEqual(booking_a.club_player.club_id, club_a.id)
         self.assertEqual(booking_b.club_player.club_id, club_b.id)
-        # Each club's naming/label of the same player stays independent —
-        # the global PlayerProfile.full_name is only set on first creation.
         self.assertEqual(booking_a.club_player.display_name, "Mohamed Salah")
         self.assertEqual(booking_b.club_player.display_name, "Mo Salah")
 
 
 class ClubIsolationTests(BookingPlayerIdentityTestCase):
+
     def test_booking_model_clean_rejects_cross_club_club_player(self):
         club_a = self.create_club("Isolation Club A", "isolation-club-a")
         club_b = self.create_club("Isolation Club B", "isolation-club-b")
         court_a = self.create_court(club_a, "Court A")
         profile = PlayerProfile.objects.create(phone_number="+201055555555")
         other_club_player = ClubPlayer.objects.create(
-            club=club_b,
-            player_profile=profile,
+            club=club_b, player_profile=profile
         )
-
         booking = Booking(
             club=club_a,
             court=court_a,
@@ -177,7 +154,6 @@ class ClubIsolationTests(BookingPlayerIdentityTestCase):
             end_time=self.time_at(11),
             total_price=Decimal("300.00"),
         )
-
         with self.assertRaises(DjangoValidationError) as ctx:
             booking.full_clean()
         self.assertIn("club_player", ctx.exception.message_dict)
@@ -187,10 +163,8 @@ class ClubIsolationTests(BookingPlayerIdentityTestCase):
         club_b = self.create_club("Isolation Club B2", "isolation-club-b2")
         profile = PlayerProfile.objects.create(phone_number="+201066666666")
         other_club_player = ClubPlayer.objects.create(
-            club=club_b,
-            player_profile=profile,
+            club=club_b, player_profile=profile
         )
-
         with self.assertRaises(SlotyAPIException) as ctx:
             validate_booking_club_player(club=club_a, club_player=other_club_player)
         self.assertEqual(ctx.exception.api_code, "BOOKING_CLUB_PLAYER_MISMATCH")
@@ -200,11 +174,8 @@ class ClubIsolationTests(BookingPlayerIdentityTestCase):
         club_b = self.create_club("Isolation Club B3", "isolation-club-b3")
         court_a = self.create_court(club_a, "Court A3")
         admin = self.create_platform_admin()
-
-        # A ClubPlayer already exists in Club B for this phone number.
         profile = PlayerProfile.objects.create(phone_number="+201044444444")
         club_b_player = ClubPlayer.objects.create(club=club_b, player_profile=profile)
-
         booking = create_booking(
             created_by=admin,
             court=court_a,
@@ -213,19 +184,18 @@ class ClubIsolationTests(BookingPlayerIdentityTestCase):
             customer_name="Same Phone Other Club",
             customer_phone="+201044444444",
         )
-
         self.assertNotEqual(booking.club_player_id, club_b_player.id)
         self.assertEqual(booking.club_player.club_id, club_a.id)
         self.assertEqual(booking.club_player.player_profile_id, profile.id)
 
 
 class BookingCreationCompatibilityTests(BookingPlayerIdentityTestCase):
+
     def test_booking_creation_api_does_not_require_or_expose_player_ids(self):
         club = self.create_club("Compat Club", "compat-club")
         court = self.create_court(club, "Compat Court")
         admin = self.create_platform_admin()
         self.client.force_authenticate(user=admin)
-
         payload = {
             "court": court.id,
             "customer_name": "Walk-in Customer",
@@ -238,19 +208,15 @@ class BookingCreationCompatibilityTests(BookingPlayerIdentityTestCase):
             payload,
             format="json",
         )
-
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertNotIn("club_player", response.data)
         self.assertNotIn("player_profile", response.data)
-
         booking = Booking.objects.get(id=response.data["id"])
         self.assertIsNotNone(booking.club_player_id)
         self.assertEqual(booking.club_player.club_id, club.id)
         self.assertEqual(
-            str(booking.club_player.player_profile.phone_number),
-            "+201077777777",
+            str(booking.club_player.player_profile.phone_number), "+201077777777"
         )
-        # Historical snapshot fields remain the response's identity contract.
         self.assertEqual(response.data["customer_name"], "Walk-in Customer")
         self.assertEqual(response.data["customer_phone"], "+201077777777")
 
@@ -262,13 +228,10 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
     Existing bookings keep the version they were created with.
     """
 
-    def test_existing_booking_keeps_referencing_its_original_club_player_version(
-        self,
-    ):
+    def test_existing_booking_keeps_referencing_its_original_club_player_version(self):
         club = self.create_club("Versioning Club", "versioning-club")
         court = self.create_court(club, "Court 1")
         admin = self.create_platform_admin()
-
         booking = create_booking(
             created_by=admin,
             court=court,
@@ -279,11 +242,9 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
         )
         original_club_player_id = booking.club_player_id
         original = booking.club_player
-
         new_club_player = create_club_player_version(
             original, display_name="Ahmed Salah", player_number=10
         )
-
         booking.refresh_from_db()
         self.assertEqual(booking.club_player_id, original_club_player_id)
         self.assertNotEqual(booking.club_player_id, new_club_player.id)
@@ -296,7 +257,6 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
         club = self.create_club("Versioning Club 2", "versioning-club-2")
         court = self.create_court(club, "Court 1")
         admin = self.create_platform_admin()
-
         old_booking = create_booking(
             created_by=admin,
             court=court,
@@ -308,7 +268,6 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
         v2 = create_club_player_version(
             old_booking.club_player, display_name="Ahmed Salah", player_number=10
         )
-
         new_booking = create_booking(
             created_by=admin,
             court=court,
@@ -317,7 +276,6 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
             customer_name="Ahmed Ali",
             customer_phone="+201088889999",
         )
-
         self.assertEqual(new_booking.club_player_id, v2.id)
         self.assertNotEqual(new_booking.club_player_id, old_booking.club_player_id)
         old_booking.refresh_from_db()
@@ -331,7 +289,6 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
         club = self.create_club("Versioning Club 3", "versioning-club-3")
         court = self.create_court(club, "Court 1")
         admin = self.create_platform_admin()
-
         first_booking = create_booking(
             created_by=admin,
             court=court,
@@ -344,7 +301,6 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
         create_club_player_version(
             first_booking.club_player, display_name="Ahmed Salah", player_number=10
         )
-
         historical_booking = create_booking(
             created_by=admin,
             court=court,
@@ -354,7 +310,6 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
             customer_phone="+201088887777",
             club_player_id=v1_id,
         )
-
         self.assertEqual(historical_booking.club_player_id, v1_id)
         self.assertFalse(historical_booking.club_player.is_current_version)
         self.assertEqual(historical_booking.club_player.display_name, "Ahmed Ali")
@@ -375,7 +330,6 @@ class RecurringBookingIdentityPropagationTests(BookingPlayerIdentityTestCase):
         court = self.create_court(club, "Court 1")
         admin = self.create_platform_admin()
         self.client.force_authenticate(user=admin)
-
         anchor = create_booking(
             created_by=admin,
             court=court,
@@ -386,9 +340,6 @@ class RecurringBookingIdentityPropagationTests(BookingPlayerIdentityTestCase):
             source=Booking.Source.RECURRING,
         )
         self.assertIsNotNone(anchor.club_player_id)
-
-        # Bring the anchor to CONFIRMED via full payment, matching the real
-        # lifecycle precondition for complete_booking().
         anchor.status = Booking.Status.CONFIRMED
         anchor.save(update_fields=["status"])
         Transaction.objects.create(
@@ -400,7 +351,6 @@ class RecurringBookingIdentityPropagationTests(BookingPlayerIdentityTestCase):
             payment_method=Transaction.PaymentMethod.CASH,
             created_by=admin,
         )
-
         response = self.client.post(
             reverse(
                 "club-booking-complete",
@@ -409,11 +359,9 @@ class RecurringBookingIdentityPropagationTests(BookingPlayerIdentityTestCase):
             {"continue_recurring": True},
             format="json",
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         anchor.refresh_from_db()
         next_booking = anchor.next_recurring_booking
-
         self.assertIsNotNone(next_booking)
         self.assertIsNotNone(next_booking.club_player_id)
         self.assertEqual(next_booking.club_player_id, anchor.club_player_id)
@@ -431,7 +379,6 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
         court = self.create_court(club, "Consumer Court")
         admin = self.create_platform_admin("consumer-admin")
         self.client.force_authenticate(user=admin)
-
         booking = create_booking(
             created_by=admin,
             court=court,
@@ -442,18 +389,15 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
         )
         v1 = booking.club_player
         create_club_player_version(v1, display_name="Ahmed Salah", player_number=10)
-
         response = self.client.get(
             reverse(
-                "club-booking-detail",
-                kwargs={"club_slug": club.slug, "pk": booking.pk},
+                "club-booking-detail", kwargs={"club_slug": club.slug, "pk": booking.pk}
             )
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["customer_name"], "Ahmed Ali")
         self.assertEqual(response.data["customer_phone"], "+201088880001")
         self.assertNotIn("club_player", response.data)
-
         search = self.client.get(
             reverse("club-booking-list", kwargs={"club_slug": club.slug}),
             {"search": "Ahmed Ali"},
@@ -499,8 +443,7 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
             customer_phone="+201088880011",
         )
         self.assertNotEqual(
-            first.club_player.player_profile_id,
-            second.club_player.player_profile_id,
+            first.club_player.player_profile_id, second.club_player.player_profile_id
         )
         self.assertEqual(PlayerProfile.objects.count(), 2)
 
@@ -520,8 +463,7 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
         original_id = booking.club_player_id
         response = self.client.patch(
             reverse(
-                "club-booking-detail",
-                kwargs={"club_slug": club.slug, "pk": booking.pk},
+                "club-booking-detail", kwargs={"club_slug": club.slug, "pk": booking.pk}
             ),
             {
                 "customer_name": "Should Not Apply",
@@ -535,8 +477,7 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
         self.assertEqual(booking.club_player_id, original_id)
         self.assertEqual(booking.club_player.display_name, "Locked Identity")
         self.assertEqual(
-            str(booking.club_player.player_profile.phone_number),
-            "+201088880012",
+            str(booking.club_player.player_profile.phone_number), "+201088880012"
         )
         self.assertEqual(booking.notes, "Only notes change")
         self.assertEqual(response.data["customer_name"], "Locked Identity")
@@ -565,8 +506,7 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
         )
         self.assertNotEqual(first.id, second.id)
         self.assertNotEqual(
-            first.club_player.player_profile_id,
-            second.club_player.player_profile_id,
+            first.club_player.player_profile_id, second.club_player.player_profile_id
         )
         replay = create_booking(
             created_by=admin,

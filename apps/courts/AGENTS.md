@@ -6,6 +6,7 @@
 
 ## Domain Invariants
 
+- **Staff Assignments**: `StaffCourtAccess` can only connect a staff profile to courts in its club. Court saves reject a club change that would invalidate existing assignments; assignment saves lock the staff and court rows before validating.
 - **Pricing Periods as Price Authority**:
   - `Court.default_price` is legacy migration data and must never be used for slot generation, new booking creation, or rescheduling price calculation.
   - Pricing is defined exclusively by child `CourtWorkingHourPricePeriod` rows tied to `CourtWorkingHour`.
@@ -59,7 +60,7 @@
 - **Model metadata** (`authorization_config`, per `apps/common/authorization/contracts.py`):
   - `Court.authorization_config`: `scopes = {"club": {"path": "club"}, "court": {"path": "self"}}` (Court is itself the court-scope boundary entity — reserved `"self"` path), `default_scope = "court"`, `select_related = ("club",)`.
   - `CourtWorkingHour.authorization_config`: `scopes = {"club": {"path": "court__club"}, "court": {"path": "court"}}`, `default_scope = "court"`, `select_related = ("court", "court__club")`, `prefetch_related = ("pricing_periods",)`.
-- **ViewSets**: `CourtViewSet`, `CourtWorkingHourViewSet` (deprecated legacy endpoint), and `CourtWeeklyWorkingHoursViewSet` use `SlotyScopedResourceMixin` + `authorization_scope = ResourceScope.COURT` + `SlotyBasePermission`. `ROLE_PERMISSIONS` gates writes to Platform Admin and Owner; Staff list/retrieve is limited to their Profile-assigned court by generic `scoped_queryset()`.
+- **ViewSets**: `CourtViewSet`, `CourtWorkingHourViewSet` (deprecated legacy endpoint), and `CourtWeeklyWorkingHoursViewSet` use `SlotyScopedResourceMixin` + `authorization_scope = ResourceScope.COURT` + `SlotyBasePermission`. `ROLE_PERMISSIONS` gates writes to Platform Admin and Owner; Staff list/retrieve is limited to their assigned courts by generic `scoped_queryset()`.
 - **Domain invariant helper** (`apps/courts/authorization.py::can_manage_working_hours`): confirms that only Platform Admin and Owner may replace weekly working hours. It does not implement scope or a second role system.
 - **Serializers do not authorize**: serializers validate/transform data only; Profile-based authorization lives in the resolver, matrix, and helper layer.
 - **Operational resource, not financial custody**: Court is an operational scope (`Club → Court`) used for booking/working-hours access. It is never a financial custody boundary — settlement/transaction custody is `Club + Collector (user)` only (see root `AGENTS.md` §5).

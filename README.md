@@ -90,16 +90,15 @@ and test authenticated requests by providing a bearer token.
 
 - `POST /api/v1/auth/token/` obtains JWT access and refresh tokens.
 - `POST /api/v1/auth/token/refresh/` refreshes an access token.
-- `GET /api/v1/me/` returns the authenticated user's identity, platform admin
-  flag, account creator, and active club memberships for frontend club
-  selection. Membership rows include read-only `last_sync_at`, the last
-  successful authenticated API contact for that selected club membership.
+- `GET /api/v1/me/` returns the authenticated user's identity, `profile_role`,
+  and account creator. Club scope is resolved from Profile extensions, not
+  membership rows.
 - `GET /api/v1/users/` manages base user accounts for platform admin users.
 - `POST /api/v1/users/` creates platform admin users only.
 
 Login is global and does not require a club slug. After login, clients call
-`/api/v1/me/`, choose one of the returned membership clubs, then call the
-club-scoped endpoints with that club's slug.
+`/api/v1/me/` and then club-scoped endpoints with a club slug the current
+Profile can access.
 
 Expired access tokens return stable API code `SESSION_EXPIRED`. A stale token
 for an inactive user returns `USER_INACTIVE`; a stale token for a deleted user
@@ -123,8 +122,8 @@ These claims are derived at token issue time and are not stored on `User`:
 }
 ```
 
-Business APIs still verify active club access from the database through
-`ClubAccessContext`; clients must not treat JWT club/court claims as authority.
+Business APIs verify club access from the current Profile through the
+Authorization Spine; clients must not treat JWT club/court claims as authority.
 
 `/api/v1/me/` always includes `account_created_by`. The value is a nested
 `{"id": ..., "name": ...}` object from `User.created_by`, or `null` for
@@ -132,32 +131,12 @@ historical/system-created accounts.
 
 ## Club User Onboarding
 
-Platform admins can be created through `/api/v1/users/`. Club users must be
-created through `/api/v1/clubs/{club_slug}/memberships/`, which creates the
-`User` and active `ClubMembership` together in one transaction.
+Platform admins can be created through `/api/v1/users/`, which always creates
+an `ADMIN` Profile. Club owners and staff are Profile extensions
+(`OwnerProfile.clubs`, `StaffProfile.club` + `StaffCourtAccess`). There is no membership-management
+API and no Manager role.
 
-OWNER, MANAGER, and STAFF roles live on `ClubMembership`, not `User`. STAFF
-memberships require a court. OWNER and MANAGER memberships are club-level and
-must not include a court.
-
-## Club Users Endpoint
-
-- `GET /api/v1/clubs/{club_slug}/users/`
-
-This read-only endpoint returns users through their `ClubMembership` rows,
-including identity fields, role, court assignment, and membership active state.
-It does not create or update users.
-
-Useful filters:
-
-- `role`
-- `court`
-- `is_active`
-- `search`
-
-Platform admins and club owners can list all memberships in the selected club.
-Managers can list active MANAGER and STAFF employees. Staff cannot list club
-users.
+OWNER, STAFF, and ADMIN live on `Profile.role`. STAFF requires an assigned court.
 
 ## Egypt Locations and Club Address Fields
 
@@ -175,17 +154,6 @@ requests.
 ## Sprint 2 Setup Endpoints
 
 - `/api/v1/clubs/`
-- `/api/v1/clubs/{club_slug}/memberships/`
-- `DELETE /api/v1/clubs/{club_slug}/memberships/{id}/` soft-deletes a
-  membership. This is permanent removal from the current club membership
-  experience and is distinct from `PATCH {"is_active": false}` (temporary
-  deactivation that can be reversed). Soft-deleted memberships cannot be
-  reactivated, disappear from current membership/user lists, and grant no
-  club access. Recreating the same club, user, role, and court after delete
-  is rejected. The user account and historical operational records remain.
-  Deactivating or deleting an operational STAFF membership is rejected with
-  `MEMBERSHIP_CURRENT_CUSTODY_NOT_SETTLED` while that user's canonical Current
-  Custody in the selected club is non-zero.
 - `/api/v1/clubs/{club_slug}/courts/`
 - `GET /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
 - `PUT /api/v1/clubs/{club_slug}/courts/{court_id}/working-hours/`
@@ -541,10 +509,8 @@ included again. API approval creates settlements directly as `SETTLED` with
 Mark-settled remains for legacy `PENDING` settlements and rejects already
 `SETTLED` settlements.
 
-Platform admins and owners can manage settlements. Managers can manage
-settlements only when their club membership has
-`manager_can_settle_transactions=True`. Staff cannot access settlement
-endpoints in Sprint 6.
+Platform admins and owners can manage settlements. Staff can preview their
+own custody but cannot create settlements.
 
 Useful settlement list filters:
 
@@ -841,3 +807,12 @@ Run all pre-commit hooks manually:
 ```bash
 pre-commit run --all-files
 ```
+
+### Development schema baseline
+
+The Profile inheritance refactor resets the pre-release migration history.
+Recreate the local development database before running `python manage.py migrate`;
+existing databases from the discarded history cannot be upgraded in place.
+First-party model apps each have one `0001_initial.py`. Recreate reused test
+databases once with `pytest -n 4 --reuse-db --create-db`, then use the standard
+`pytest -n 4 --reuse-db`.

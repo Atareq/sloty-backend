@@ -17,7 +17,7 @@ from apps.bookings.models import Booking
 from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.players.models import ClubPlayer, PlayerProfile
-from apps.profiles.models import Profile, StaffProfile
+from apps.profiles.models import Profile, StaffCourtAccess, StaffProfile
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking
 
@@ -53,9 +53,11 @@ class BookingOfflineSafetyTests(APITestCase):
             username="offline-staff",
             password=self.password,
         )
-        profile = Profile.objects.create(user=self.staff, role=Profile.Role.STAFF)
         self.staff_profile = StaffProfile.objects.create(
-            profile=profile, court=self.court
+            user=self.staff, role=Profile.Role.STAFF, club=self.club
+        )
+        StaffCourtAccess.objects.create(
+            staff_profile=self.staff_profile, court=self.court
         )
         self.client.force_authenticate(user=self.staff)
 

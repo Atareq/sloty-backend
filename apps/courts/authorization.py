@@ -34,6 +34,6 @@ def can_manage_working_hours(context, court) -> bool:
     - Platform Admin and Owner may always manage working hours.
     - Staff may never manage working hours (also denied by the matrix).
     """
-    if context.is_platform_admin or context.role == Role.OWNER:
+    if context.role in {Role.ADMIN, Role.OWNER}:
         return True
     return False

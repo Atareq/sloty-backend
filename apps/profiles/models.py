@@ -1,10 +1,12 @@
 from django.conf import settings
-from django.core.exceptions import ObjectDoesNotExist, ValidationError
-from django.db import models
+from django.core.exceptions import ValidationError
+from django.db import models, transaction
+
+from apps.courts.models import Court
 
 
 class Profile(models.Model):
-    """Application identity and the single runtime role authority."""
+    """Concrete parent and sole application-role authority for an account."""
 
     class Role(models.TextChoices):
         OWNER = "OWNER", "Owner"
@@ -17,110 +19,104 @@ class Profile(models.Model):
         related_name="profile",
     )
     role = models.CharField(max_length=16, choices=Role.choices, db_index=True)
+    is_enabled = models.BooleanField(default=True, db_index=True)
     created = models.DateTimeField(auto_now_add=True)
     modified = models.DateTimeField(auto_now=True)
 
-    class Meta:
-        indexes = [models.Index(fields=["role"])]
-
-    def __str__(self) -> str:
+    def __str__(self):
         return f"{self.user} ({self.role})"
 
     def clean(self):
         super().clean()
-        if not self.pk:
-            return
-        extension_roles = (
-            ("owner_profile", self.Role.OWNER),
-            ("staff_profile", self.Role.STAFF),
-            ("admin_profile", self.Role.ADMIN),
-        )
-        for relation, expected_role in extension_roles:
-            try:
-                getattr(self, relation)
-            except ObjectDoesNotExist:
-                continue
-            if self.role != expected_role:
+        for child, role in (
+            (OwnerProfile, self.Role.OWNER),
+            (StaffProfile, self.Role.STAFF),
+            (AdminProfile, self.Role.ADMIN),
+        ):
+            # Type checks validate the schema; authorization reads role only.
+            if isinstance(self, child) or (
+                self.pk and child.objects.filter(pk=self.pk).exists()
+            ):
+                if self.role != role:
+                    raise ValidationError(
+                        {"role": f"{child.__name__} requires role {role}."}
+                    )
+        if isinstance(self, StaffProfile) and self.pk and self.club_id:
+            if self.court_accesses.exclude(court__club_id=self.club_id).exists():
                 raise ValidationError(
-                    {"role": f"{relation} requires role {expected_role}."}
+                    {"club": "Assigned courts must belong to the staff member's club."}
                 )
 
     def save(self, *args, **kwargs):
-        self.full_clean()
-        return super().save(*args, **kwargs)
+        with transaction.atomic():
+            if self.pk:
+                Profile.objects.select_for_update().filter(pk=self.pk).first()
+            self.full_clean()
+            return super().save(*args, **kwargs)
 
 
-class OwnerProfile(models.Model):
-    """Owner-specific extension; club ownership is intentionally many-to-many."""
-
-    profile = models.OneToOneField(
-        Profile,
-        on_delete=models.CASCADE,
-        related_name="owner_profile",
-    )
+class OwnerProfile(Profile):
     clubs = models.ManyToManyField("clubs.Club", related_name="owner_profiles")
 
-    def clean(self):
-        super().clean()
-        if self.profile_id and self.profile.role != Profile.Role.OWNER:
-            raise ValidationError(
-                {"profile": "OwnerProfile requires an OWNER profile."}
-            )
-
-    def __str__(self) -> str:
-        return f"OwnerProfile({self.profile.user})"
-
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        return super().save(*args, **kwargs)
+    class Meta:
+        default_related_name = "owner_profile"
 
 
-class StaffProfile(models.Model):
-    """Staff-specific extension; a staff profile is assigned to one court."""
+class StaffProfile(Profile):
+    club = models.ForeignKey(
+        "clubs.Club", on_delete=models.CASCADE, related_name="staff_profiles"
+    )
 
-    profile = models.OneToOneField(
-        Profile,
-        on_delete=models.CASCADE,
-        related_name="staff_profile",
+    authorization_config = {
+        "scopes": {"club": {"path": "club"}},
+        "default_scope": "club",
+        "select_related": ("user", "club"),
+        "prefetch_related": ("court_accesses__court",),
+    }
+
+    class Meta:
+        default_related_name = "staff_profile"
+
+
+class AdminProfile(Profile):
+    class Meta:
+        default_related_name = "admin_profile"
+
+
+class StaffCourtAccess(models.Model):
+    staff_profile = models.ForeignKey(
+        StaffProfile, on_delete=models.CASCADE, related_name="court_accesses"
     )
     court = models.ForeignKey(
-        "courts.Court",
-        on_delete=models.CASCADE,
-        related_name="staff_profiles",
+        "courts.Court", on_delete=models.CASCADE, related_name="staff_court_accesses"
     )
+    created = models.DateTimeField(auto_now_add=True)
 
-    def clean(self):
-        super().clean()
-        if self.profile_id and self.profile.role != Profile.Role.STAFF:
-            raise ValidationError({"profile": "StaffProfile requires a STAFF profile."})
-
-    def __str__(self) -> str:
-        return f"StaffProfile({self.profile.user}, court={self.court_id})"
-
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        return super().save(*args, **kwargs)
-
-
-class AdminProfile(models.Model):
-    """Admin-specific extension. Platform-wide authority remains Profile.role."""
-
-    profile = models.OneToOneField(
-        Profile,
-        on_delete=models.CASCADE,
-        related_name="admin_profile",
-    )
-
-    def clean(self):
-        super().clean()
-        if self.profile_id and self.profile.role != Profile.Role.ADMIN:
-            raise ValidationError(
-                {"profile": "AdminProfile requires an ADMIN profile."}
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["staff_profile", "court"], name="unique_staff_court_access"
             )
+        ]
 
-    def __str__(self) -> str:
-        return f"AdminProfile({self.profile.user})"
+    def __str__(self):
+        return f"StaffCourtAccess({self.staff_profile_id}, court={self.court_id})"
+
+    def clean(self):
+        super().clean()
+        if self.staff_profile_id and self.court_id:
+            if self.court.club_id != self.staff_profile.club_id:
+                raise ValidationError(
+                    {"court": "Assigned court must belong to the staff member's club."}
+                )
 
     def save(self, *args, **kwargs):
-        self.full_clean()
-        return super().save(*args, **kwargs)
+        with transaction.atomic():
+            if self.staff_profile_id:
+                self.staff_profile = StaffProfile.objects.select_for_update().get(
+                    pk=self.staff_profile_id
+                )
+            if self.court_id:
+                self.court = Court.objects.select_for_update().get(pk=self.court_id)
+            self.full_clean()
+            return super().save(*args, **kwargs)

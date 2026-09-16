@@ -2,7 +2,7 @@
 Players views.
 
 ClubPlayerViewSet — club-scoped list/create/retrieve via Authorization Spine v2.
-PlayerProfileViewSet — club-membership-gated access to global profiles,
+PlayerProfileViewSet — club-scope-gated access to global profiles,
     list restricted to profiles linked to the current club, including that
     club's ClubPlayer versions and the recommended (last-used) version.
 """
@@ -145,7 +145,7 @@ class PlayerProfileViewSet(
     GenericViewSet,
 ):
     """
-    Club-membership-gated access to global PlayerProfile records.
+    Profile-scope-gated access to global PlayerProfile records.
 
     List/retrieve include this club's ClubPlayer versions and the
     recommended (last-used, else current) version id so staff can search

@@ -4,10 +4,10 @@ Regression tests for Audit Authorization Spine Migration (Sprint 9).
 Validates:
 1. AuditLog.authorization_config is club-only (never court, never collector).
 2. AuditLogViewSet composes SlotyScopedResourceMixin + SlotyBasePermission.
-3. Matrix: Admin / Owner / Manager list+retrieve; Staff denied.
+3. Matrix: Admin / Owner list+retrieve; Staff denied.
 4. Club isolation (cross-club 403 / out-of-club ID 404).
-5. Audit is not court-scoped: Owner/Manager see all club courts plus
-   null-court membership events. Staff remain 403, not court-filtered.
+5. Audit is not court-scoped: Owner see all club courts plus
+   null-court settlement events. Staff remain 403, not court-filtered.
 6. Audit is not actor-scoped or collector-scoped.
 7. Search / filters / pagination cannot broaden the authorized queryset.
 8. No custom actions or exports exist.
@@ -23,7 +23,6 @@ from rest_framework.test import APIRequestFactory
 
 from apps.audit.models import AuditLog
 from apps.audit.views import AuditLogViewSet
-from apps.clubs.models import ClubMembership
 from apps.common.authorization.contracts import load_authorization_config
 from apps.common.authorization.matrix import is_action_allowed
 from apps.common.authorization.mixins import SlotyScopedResourceMixin
@@ -33,12 +32,14 @@ from apps.common.authorization.resolver import resolve_club_scope
 from apps.common.authorization.roles import Role
 from apps.common.authorization.scopes import ResourceScope
 from tests.audit.test_audit_api import AuditAPITestCase
+from tests.profile_factories import grant_owner_club, grant_staff_court
 
 AUDIT_ALLOWED_ACTIONS = ("list", "retrieve")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class AuditAuthorizationConfigTests(AuditAPITestCase):
+
     def setUp(self):
         self.owner = self.create_user("audit-config-owner")
         self.staff = self.create_user("audit-config-staff")
@@ -51,22 +52,20 @@ class AuditAuthorizationConfigTests(AuditAPITestCase):
         self.other_court = self.create_court(
             self.other_club, "Audit Config Other Court"
         )
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(
-            self.staff, self.club, ClubMembership.Role.STAFF, court=self.court_a
-        )
+        grant_owner_club(self.owner, self.club)
+        grant_staff_court(self.staff, self.court_a)
         self.court_a_log = self.create_audit_log(
             self.club, court=self.court_a, actor=self.owner, entity_id=1
         )
         self.court_b_log = self.create_audit_log(
             self.club, court=self.court_b, actor=self.staff, entity_id=2
         )
-        self.membership_log = self.create_audit_log(
+        self.closing_log = self.create_audit_log(
             self.club,
             court=None,
             actor=self.owner,
-            action=AuditLog.Action.MEMBERSHIP_DELETED,
-            entity_type="ClubMembership",
+            action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
+            entity_type="Settlement",
             entity_id=99,
         )
         self.other_log = self.create_audit_log(
@@ -80,7 +79,6 @@ class AuditAuthorizationConfigTests(AuditAPITestCase):
 
     def test_audit_config_declares_club_scope_only(self):
         config = load_authorization_config(AuditLog)
-
         self.assertEqual(config.default_scope, ResourceScope.CLUB.value)
         self.assertEqual(config.scopes[ResourceScope.CLUB.value].path, "club")
         self.assertNotIn(ResourceScope.COURT.value, config.scopes)
@@ -92,7 +90,7 @@ class AuditAuthorizationConfigTests(AuditAPITestCase):
         )
         ids = set(queryset.values_list("id", flat=True))
         self.assertSetEqual(
-            ids, {self.court_a_log.id, self.court_b_log.id, self.membership_log.id}
+            ids, {self.court_a_log.id, self.court_b_log.id, self.closing_log.id}
         )
         self.assertNotIn(self.other_log.id, ids)
 
@@ -103,7 +101,7 @@ class AuditAuthorizationConfigTests(AuditAPITestCase):
         ids = set(queryset.values_list("id", flat=True))
         self.assertIn(self.court_a_log.id, ids)
         self.assertIn(self.court_b_log.id, ids)
-        self.assertIn(self.membership_log.id, ids)
+        self.assertIn(self.closing_log.id, ids)
 
     def test_missing_audit_configuration_never_falls_back(self):
         original = AuditLog.authorization_config
@@ -111,15 +109,14 @@ class AuditAuthorizationConfigTests(AuditAPITestCase):
         try:
             with self.assertRaises(ImproperlyConfigured):
                 scoped_queryset(
-                    self.context_for(self.owner),
-                    AuditLog,
-                    scope=ResourceScope.CLUB,
+                    self.context_for(self.owner), AuditLog, scope=ResourceScope.CLUB
                 )
         finally:
             AuditLog.authorization_config = original
 
 
 class AuditViewSetSpineCompositionTests(AuditAPITestCase):
+
     def test_audit_viewset_does_not_override_get_queryset(self):
         self.assertIs(
             AuditLogViewSet.get_queryset, SlotyScopedResourceMixin.get_queryset
@@ -131,7 +128,7 @@ class AuditViewSetSpineCompositionTests(AuditAPITestCase):
         self.assertEqual(AuditLogViewSet.permission_classes, (SlotyBasePermission,))
 
     def test_matrix_matches_approved_audit_actions(self):
-        for role in (Role.ADMIN, Role.OWNER, Role.MANAGER):
+        for role in (Role.ADMIN, Role.OWNER):
             for action in AUDIT_ALLOWED_ACTIONS:
                 with self.subTest(role=role, action=action):
                     self.assertTrue(is_action_allowed(role, "AuditLogViewSet", action))
@@ -141,39 +138,22 @@ class AuditViewSetSpineCompositionTests(AuditAPITestCase):
         self.assertFalse(is_action_allowed(Role.OWNER, "AuditLogViewSet", "destroy"))
         self.assertFalse(is_action_allowed(Role.OWNER, "AuditLogViewSet", "export"))
 
-    def test_audit_views_do_not_use_legacy_access_mixin(self):
-        view_source = (REPO_ROOT / "apps" / "audit" / "views.py").read_text()
-        self.assertNotIn("ClubScopedAccessMixin", view_source)
-        self.assertNotIn("ClubAccessContext", view_source)
-        self.assertNotIn("CanViewClubAuditLogs", view_source)
-        self.assertFalse((REPO_ROOT / "apps" / "audit" / "authorization.py").exists())
-        self.assertFalse((REPO_ROOT / "apps" / "audit" / "permissions.py").exists())
-
 
 class AuditAuthorizationSpineTests(AuditAPITestCase):
+
     def setUp(self):
         self.club = self.create_club("Spine Audit Club", "spine-audit")
         self.other_club = self.create_club("Other Audit Club", "other-audit")
-
         self.court_a = self.create_court(self.club, "Court A")
         self.court_b = self.create_court(self.club, "Court B")
         self.other_court = self.create_court(self.other_club, "Other Club Court")
-
         self.platform_admin = self.create_platform_admin("spine-audit-admin")
         self.owner = self.create_user("spine-audit-owner")
-        self.manager = self.create_user("spine-audit-manager")
         self.staff = self.create_user("spine-audit-staff")
         self.other_club_owner = self.create_user("spine-audit-other-owner")
-
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
-        self.create_membership(
-            self.staff, self.club, ClubMembership.Role.STAFF, court=self.court_a
-        )
-        self.create_membership(
-            self.other_club_owner, self.other_club, ClubMembership.Role.OWNER
-        )
-
+        grant_owner_club(self.owner, self.club)
+        grant_staff_court(self.staff, self.court_a)
+        grant_owner_club(self.other_club_owner, self.other_club)
         self.court_a_log = self.create_audit_log(
             self.club,
             court=self.court_a,
@@ -194,17 +174,17 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         self.settlement_log = self.create_audit_log(
             self.club,
             court=None,
-            actor=self.manager,
+            actor=self.platform_admin,
             action=AuditLog.Action.SETTLEMENT_CREATED,
             entity_type="Settlement",
             entity_id=13,
         )
-        self.membership_log = self.create_audit_log(
+        self.closing_log = self.create_audit_log(
             self.club,
             court=None,
             actor=self.owner,
-            action=AuditLog.Action.MEMBERSHIP_DELETED,
-            entity_type="ClubMembership",
+            action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
+            entity_type="Settlement",
             entity_id=14,
         )
         self.other_log = self.create_audit_log(
@@ -248,18 +228,9 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
             self.court_a_log.id,
             self.court_b_log.id,
             self.settlement_log.id,
-            self.membership_log.id,
+            self.closing_log.id,
             self.club_booking_log.id,
         }
-
-    def test_platform_admin_owner_and_manager_see_all_club_events(self):
-        expected = self.club_ids()
-        for user in (self.platform_admin, self.owner, self.manager):
-            self.client.force_authenticate(user=user)
-            response = self.client.get(self.audit_list_url(self.club))
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-            self.assertSetEqual(self.list_ids(response), expected)
-            self.assertNotIn(self.other_log.id, self.list_ids(response))
 
     def test_staff_are_forbidden_including_own_actions(self):
         self.client.force_authenticate(user=self.staff)
@@ -289,8 +260,7 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
     def test_court_filter_cannot_escape_club_scope(self):
         self.client.force_authenticate(user=self.owner)
         response = self.client.get(
-            self.audit_list_url(self.club),
-            {"court": self.other_court.id},
+            self.audit_list_url(self.club), {"court": self.other_court.id}
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(self.list_ids(response), set())
@@ -299,8 +269,7 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
     def test_actor_filter_cannot_escape_club_scope(self):
         self.client.force_authenticate(user=self.owner)
         response = self.client.get(
-            self.audit_list_url(self.club),
-            {"actor": self.other_club_owner.id},
+            self.audit_list_url(self.club), {"actor": self.other_club_owner.id}
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(self.list_ids(response), set())
@@ -312,17 +281,15 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         self.assertIn(self.court_a_log.id, ids)
         self.assertIn(self.court_b_log.id, ids)
         self.assertIn(self.settlement_log.id, ids)
-        self.assertIn(self.membership_log.id, ids)
+        self.assertIn(self.closing_log.id, ids)
 
     def test_search_cannot_discover_other_club_events(self):
         self.client.force_authenticate(user=self.owner)
         other_phone = self.client.get(
-            self.audit_list_url(self.club),
-            {"search": "01099999999"},
+            self.audit_list_url(self.club), {"search": "01099999999"}
         )
         own_phone = self.client.get(
-            self.audit_list_url(self.club),
-            {"search": "01012345678"},
+            self.audit_list_url(self.club), {"search": "01012345678"}
         )
         self.assertEqual(other_phone.status_code, status.HTTP_200_OK)
         self.assertEqual(self.list_ids(other_phone), set())
@@ -333,8 +300,7 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
     def test_staff_search_is_still_forbidden(self):
         self.client.force_authenticate(user=self.staff)
         response = self.client.get(
-            self.audit_list_url(self.club),
-            {"search": "01012345678"},
+            self.audit_list_url(self.club), {"search": "01012345678"}
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -350,10 +316,7 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         ]
         extra_own = [
             self.create_audit_log(
-                self.club,
-                court=self.court_b,
-                actor=self.owner,
-                entity_id=300 + index,
+                self.club, court=self.court_b, actor=self.owner, entity_id=300 + index
             )
             for index in range(16)
         ]
@@ -402,12 +365,3 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         self.assertEqual(self.court_a_log.after_data, original["after_data"])
         self.assertEqual(self.court_a_log.metadata, original["metadata"])
         self.assertEqual(self.court_a_log.created, original["created"])
-
-    def test_audit_list_does_not_update_last_sync_at(self):
-        membership = ClubMembership.objects.get(user=self.owner, club=self.club)
-        self.assertIsNone(membership.last_sync_at)
-        self.client.force_authenticate(user=self.owner)
-        response = self.client.get(self.audit_list_url(self.club))
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        membership.refresh_from_db()
-        self.assertIsNone(membership.last_sync_at)

@@ -15,7 +15,7 @@ club_player_detail = ClubPlayerViewSet.as_view(
     }
 )
 
-# PlayerProfile — club-membership-gated global profile access
+# PlayerProfile — club-scope-gated global profile access
 player_profile_list = PlayerProfileViewSet.as_view(
     {
         "get": "list",
@@ -40,7 +40,7 @@ urlpatterns = [
         club_player_detail,
         name="club-player-detail",
     ),
-    # Global player profiles (club-membership-gated; list is club-linked only)
+    # Global player profiles (Profile-scope-gated; list is club-linked only)
     path(
         "clubs/<slug:club_slug>/player-profiles/",
         player_profile_list,

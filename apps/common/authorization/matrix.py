@@ -45,7 +45,6 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
             "partial_update",
             "destroy",
         },
-        "ClubUserListViewSet": {"list"},
         "CourtViewSet": {
             "list",
             "retrieve",
@@ -86,10 +85,18 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         "CourtUsageReportViewSet": {"list", "retrieve"},
         "PlayerProfileViewSet": {"list", "retrieve", "create"},
         "ClubPlayerViewSet": {"list", "retrieve", "create"},
+        "StaffViewSet": {
+            "list",
+            "retrieve",
+            "create",
+            "update",
+            "partial_update",
+            "destroy",
+            "courts",
+        },
     },
     Role.OWNER: {
         "ClubViewSet": {"list", "retrieve", "update", "partial_update"},
-        "ClubUserListViewSet": {"list"},
         "CourtViewSet": {
             "list",
             "retrieve",
@@ -130,6 +137,15 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         "CourtUsageReportViewSet": {"list", "retrieve"},
         "PlayerProfileViewSet": {"list", "retrieve", "create"},
         "ClubPlayerViewSet": {"list", "retrieve", "create"},
+        "StaffViewSet": {
+            "list",
+            "retrieve",
+            "create",
+            "update",
+            "partial_update",
+            "destroy",
+            "courts",
+        },
     },
     Role.STAFF: {
         "ClubViewSet": {"list", "retrieve"},

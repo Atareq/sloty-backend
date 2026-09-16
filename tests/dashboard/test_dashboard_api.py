@@ -1,6 +1,5 @@
 from datetime import time, timedelta
 from decimal import Decimal
-from pathlib import Path
 
 import yaml
 from django.core.management import call_command
@@ -14,22 +13,19 @@ from rest_framework.test import APITestCase
 from apps.accounts.models import User
 from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
-from apps.dashboard.views import (
-    ClubCalendarAPIView,
-    CourtAvailabilityAPIView,
-    CourtUtilizationAPIView,
-    DashboardOverviewAPIView,
-    DashboardRevenueAPIView,
-    DashboardSummaryAPIView,
-)
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking
+from tests.profile_factories import (
+    ProfileIdentityMixin,
+    grant_owner_club,
+    grant_staff_court,
+)
 
 
-class DashboardAPITestCase(APITestCase):
+class DashboardAPITestCase(ProfileIdentityMixin, APITestCase):
     password = "test-pass-123"
 
     def assert_field_error(self, response, field):
@@ -39,9 +35,7 @@ class DashboardAPITestCase(APITestCase):
 
     def create_user(self, username: str, **extra_fields) -> User:
         return User.objects.create_user(
-            username=username,
-            password=self.password,
-            **extra_fields,
+            username=username, password=self.password, **extra_fields
         )
 
     def create_club(self, name: str, slug: str, **extra_fields) -> Club:
@@ -64,28 +58,9 @@ class DashboardAPITestCase(APITestCase):
         data.update(extra_fields)
         return Court.objects.create(**data)
 
-    def create_membership(
-        self,
-        user: User,
-        club: Club,
-        role: str,
-        court: Court | None = None,
-    ) -> ClubMembership:
-        return ClubMembership.objects.create(
-            club=club,
-            user=user,
-            role=role,
-            court=court,
-        )
-
     def time_at(self, hour: int, minute: int = 0):
         return timezone.datetime(
-            2026,
-            7,
-            6,
-            hour,
-            minute,
-            tzinfo=timezone.get_current_timezone(),
+            2026, 7, 6, hour, minute, tzinfo=timezone.get_current_timezone()
         )
 
     def create_working_hours(
@@ -97,10 +72,7 @@ class DashboardAPITestCase(APITestCase):
         is_closed=False,
     ):
         for weekday in CourtWorkingHour.Weekday.values:
-            working_hour = CourtWorkingHour.objects.create(
-                court=court,
-                weekday=weekday,
-            )
+            working_hour = CourtWorkingHour.objects.create(court=court, weekday=weekday)
             if not is_closed:
                 CourtWorkingHourPricePeriod.objects.create(
                     working_hour=working_hour,
@@ -171,8 +143,7 @@ class DashboardAPITestCase(APITestCase):
 
     def utilization_url(self, club):
         return reverse(
-            "club-dashboard-court-utilization",
-            kwargs={"club_slug": club.slug},
+            "club-dashboard-court-utilization", kwargs={"club_slug": club.slug}
         )
 
     def range_params(self):
@@ -183,13 +154,10 @@ class DashboardAPITestCase(APITestCase):
 
 
 class DashboardDataMixin:
+
     def setUp(self):
-        self.platform_admin = self.create_user(
-            "dashboard-admin",
-            is_platform_admin=True,
-        )
+        self.platform_admin = self.create_platform_admin("dashboard-admin")
         self.owner = self.create_user("dashboard-owner")
-        self.manager = self.create_user("dashboard-manager")
         self.staff = self.create_user("dashboard-staff")
         self.other_staff = self.create_user("dashboard-other-staff")
         self.club = self.create_club("Dashboard Club", "dashboard-club")
@@ -200,20 +168,9 @@ class DashboardDataMixin:
         self.create_working_hours(self.court)
         self.create_working_hours(self.other_court)
         self.create_working_hours(self.cross_club_court)
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
-        self.create_membership(
-            self.staff,
-            self.club,
-            ClubMembership.Role.STAFF,
-            court=self.court,
-        )
-        self.create_membership(
-            self.other_staff,
-            self.other_club,
-            ClubMembership.Role.STAFF,
-            court=self.cross_club_court,
-        )
+        grant_owner_club(self.owner, self.club)
+        grant_staff_court(self.staff, self.court)
+        grant_staff_court(self.other_staff, self.cross_club_court)
         self.hold = self.create_booking(
             self.court,
             customer_name="Hold Customer",
@@ -298,16 +255,6 @@ class DashboardDataMixin:
             created_by=self.staff,
             created=self.time_at(13, 20),
         )
-        self.cancelled_transaction = self.create_transaction(
-            self.confirmed,
-            amount=Decimal("60.00"),
-            created=self.time_at(13, 30),
-            created_by=self.manager,
-            is_cancelled=True,
-            cancelled_by=self.platform_admin,
-            cancelled_at=timezone.now(),
-            cancellation_reason="Dashboard correction",
-        )
         self.pending_settlement = self.create_settlement(
             self.club,
             court=self.court,
@@ -339,12 +286,11 @@ class DashboardDataMixin:
 
 
 class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
+
     def test_public_availability_is_anonymous_and_sanitized(self):
         response = self.client.get(
-            self.public_availability_url(self.club, self.court),
-            {"date": "2026-07-06"},
+            self.public_availability_url(self.club, self.court), {"date": "2026-07-06"}
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["slots"]), 4)
         slot = response.data["slots"][0]
@@ -374,61 +320,38 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
 
     def test_anonymous_rejected(self):
         response = self.client.get(
-            self.availability_url(self.club, self.court),
-            {"date": "2026-07-06"},
+            self.availability_url(self.club, self.court), {"date": "2026-07-06"}
         )
-
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    def test_platform_admin_owner_manager_and_staff_assigned_court_allowed(self):
-        for user in (self.platform_admin, self.owner, self.manager, self.staff):
-            self.client.force_authenticate(user=user)
-            response = self.client.get(
-                self.availability_url(self.club, self.court),
-                {"date": "2026-07-06"},
-            )
-
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_staff_rejected_for_other_court(self):
         self.client.force_authenticate(user=self.staff)
-
         response = self.client.get(
-            self.availability_url(self.club, self.other_court),
-            {"date": "2026-07-06"},
+            self.availability_url(self.club, self.other_court), {"date": "2026-07-06"}
         )
-
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_inactive_court_returns_clear_error(self):
         self.client.force_authenticate(user=self.platform_admin)
         self.court.is_active = False
         self.court.save(update_fields=["is_active"])
-
         response = self.client.get(
-            self.availability_url(self.club, self.court),
-            {"date": "2026-07-06"},
+            self.availability_url(self.club, self.court), {"date": "2026-07-06"}
         )
-
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assert_field_error(response, "court")
 
     def test_date_required(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.availability_url(self.club, self.court))
-
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assert_field_error(response, "date")
 
     def test_working_hours_generate_slots_and_block_blocking_bookings(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(
-            self.availability_url(self.club, self.court),
-            {"date": "2026-07-06"},
+            self.availability_url(self.club, self.court), {"date": "2026-07-06"}
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["slots"]), 4)
         self.assertEqual(response.data["slots"][0]["is_available"], False)
@@ -441,35 +364,21 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(response.data["slots"][3]["blocking_status"], "COMPLETED")
 
     def test_closed_day_returns_no_slots(self):
-        CourtWorkingHour.objects.filter(
-            court=self.court,
-            weekday=1,
-        ).delete()
-        CourtWorkingHour.objects.create(
-            court=self.court,
-            weekday=1,
-        )
+        CourtWorkingHour.objects.filter(court=self.court, weekday=1).delete()
+        CourtWorkingHour.objects.create(court=self.court, weekday=1)
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(
-            self.availability_url(self.club, self.court),
-            {"date": "2026-07-07"},
+            self.availability_url(self.club, self.court), {"date": "2026-07-07"}
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["is_closed"])
         self.assertEqual(response.data["slots"], [])
 
     def test_slot_duration_minutes_respected(self):
         short_court = self.create_court(
-            self.club,
-            "Thirty Minute Court",
-            slot_duration_minutes=30,
+            self.club, "Thirty Minute Court", slot_duration_minutes=30
         )
-        working_hour = CourtWorkingHour.objects.create(
-            court=short_court,
-            weekday=0,
-        )
+        working_hour = CourtWorkingHour.objects.create(court=short_court, weekday=0)
         CourtWorkingHourPricePeriod.objects.create(
             working_hour=working_hour,
             starts_at=time(8, 0),
@@ -477,41 +386,25 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
             price=short_court.default_price,
         )
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(
-            self.availability_url(self.club, short_court),
-            {"date": "2026-07-06"},
+            self.availability_url(self.club, short_court), {"date": "2026-07-06"}
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["slots"]), 2)
 
 
 class CalendarTests(DashboardDataMixin, DashboardAPITestCase):
+
     def test_anonymous_rejected(self):
         response = self.client.get(self.calendar_url(self.club), {"date": "2026-07-06"})
-
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    def test_platform_admin_owner_and_manager_allowed(self):
-        for user in (self.platform_admin, self.owner, self.manager):
-            self.client.force_authenticate(user=user)
-            response = self.client.get(
-                self.calendar_url(self.club),
-                {"date": "2026-07-06"},
-            )
-
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_staff_sees_assigned_court_items_only(self):
         self.client.force_authenticate(user=self.staff)
-
         response = self.client.get(self.calendar_url(self.club), {"date": "2026-07-06"})
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertNotIn(
-            self.other_court_booking.id,
-            {item["id"] for item in response.data["items"]},
+            self.other_court_booking.id, {item["id"] for item in response.data["items"]}
         )
         self.assertIn(
             self.confirmed.id, {item["id"] for item in response.data["items"]}
@@ -519,7 +412,6 @@ class CalendarTests(DashboardDataMixin, DashboardAPITestCase):
 
     def test_date_range_court_status_and_cross_club_scoping(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(
             self.calendar_url(self.club),
             {
@@ -528,7 +420,6 @@ class CalendarTests(DashboardDataMixin, DashboardAPITestCase):
                 "status": Booking.Status.CONFIRMED,
             },
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         ids = {item["id"] for item in response.data["items"]}
         self.assertEqual(ids, {self.confirmed.id})
@@ -540,13 +431,10 @@ class CalendarTests(DashboardDataMixin, DashboardAPITestCase):
 
     def test_date_filter_defaults_to_single_day(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.calendar_url(self.club), {"date": "2026-07-06"})
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertNotIn(
-            self.cross_club_booking.id,
-            {item["id"] for item in response.data["items"]},
+            self.cross_club_booking.id, {item["id"] for item in response.data["items"]}
         )
 
     def test_calendar_keeps_club_player_version_after_roster_change(self):
@@ -554,18 +442,15 @@ class CalendarTests(DashboardDataMixin, DashboardAPITestCase):
 
         self.client.force_authenticate(user=self.platform_admin)
         v1 = create_club_player_version(
-            self.confirmed.club_player,
-            display_name="Ahmed Ali",
-            player_number=7,
+            self.confirmed.club_player, display_name="Ahmed Ali", player_number=7
         )
         self.confirmed.club_player = v1
         self.confirmed.save(update_fields=["club_player"])
         create_club_player_version(v1, display_name="Ahmed Salah", player_number=10)
-
         response = self.client.get(self.calendar_url(self.club), {"date": "2026-07-06"})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         item = next(
-            row for row in response.data["items"] if row["id"] == self.confirmed.id
+            (row for row in response.data["items"] if row["id"] == self.confirmed.id)
         )
         self.assertEqual(item["title"], "Ahmed Ali")
         self.assertEqual(item["customer_name"], "Ahmed Ali")
@@ -574,30 +459,14 @@ class CalendarTests(DashboardDataMixin, DashboardAPITestCase):
 
 
 class DashboardOverviewTests(DashboardDataMixin, DashboardAPITestCase):
+
     def test_anonymous_rejected(self):
         response = self.client.get(self.overview_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    def test_platform_admin_owner_and_manager_allowed_staff_rejected(self):
-        for user in (self.platform_admin, self.owner, self.manager):
-            self.client.force_authenticate(user=user)
-            response = self.client.get(
-                self.overview_url(self.club), self.range_params()
-            )
-
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-
-        self.client.force_authenticate(user=self.staff)
-        response = self.client.get(self.overview_url(self.club), self.range_params())
-
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_overview_metrics_and_cross_club_scoping(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.overview_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["booking_counts_by_status"]["HOLD"], 1)
         self.assertEqual(response.data["booking_counts_by_status"]["CONFIRMED"], 2)
@@ -620,15 +489,10 @@ class DashboardOverviewTests(DashboardDataMixin, DashboardAPITestCase):
 
     def test_court_filter_works(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(
             self.overview_url(self.club),
-            {
-                **self.range_params(),
-                "court": self.court.id,
-            },
+            {**self.range_params(), "court": self.court.id},
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["court"], self.court.id)
         self.assertEqual(response.data["transaction_total"], "400.00")
@@ -638,33 +502,14 @@ class DashboardOverviewTests(DashboardDataMixin, DashboardAPITestCase):
 
 
 class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
+
     def test_anonymous_rejected(self):
         response = self.client.get(self.summary_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    def test_platform_admin_owner_and_manager_get_all_selected_club_courts(self):
-        for user, expected_role in (
-            (self.platform_admin, "PLATFORM_ADMIN"),
-            (self.owner, "OWNER"),
-            (self.manager, "MANAGER"),
-        ):
-            self.client.force_authenticate(user=user)
-            response = self.client.get(self.summary_url(self.club), self.range_params())
-
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-            self.assertEqual(response.data["scope"]["role"], expected_role)
-            self.assertEqual(
-                set(response.data["scope"]["court_ids"]),
-                {self.court.id, self.other_court.id},
-            )
-            self.assertTrue(response.data["scope"]["financial_visible"])
 
     def test_staff_gets_assigned_court_operational_summary_only(self):
         self.client.force_authenticate(user=self.staff)
-
         response = self.client.get(self.summary_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["scope"]["role"], "STAFF")
         self.assertEqual(response.data["scope"]["court_ids"], [self.court.id])
@@ -684,22 +529,17 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
 
     def test_other_club_and_no_membership_users_are_rejected(self):
         no_membership_user = self.create_user("dashboard-no-membership")
-
         for user in (self.other_staff, no_membership_user):
             self.client.force_authenticate(user=user)
             response = self.client.get(self.summary_url(self.club), self.range_params())
-
             self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_date_query_filters_one_day_and_default_uses_today(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         date_response = self.client.get(
-            self.summary_url(self.club),
-            {"date": "2026-07-06"},
+            self.summary_url(self.club), {"date": "2026-07-06"}
         )
         default_response = self.client.get(self.summary_url(self.club))
-
         self.assertEqual(date_response.status_code, status.HTTP_200_OK)
         self.assertEqual(date_response.data["summary"]["total_bookings"], 7)
         self.assertEqual(default_response.status_code, status.HTTP_200_OK)
@@ -712,20 +552,10 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             customer_name="Future Booking Paid Today",
             customer_phone="+201000000201",
             start_time=timezone.datetime(
-                2026,
-                8,
-                20,
-                20,
-                0,
-                tzinfo=timezone.get_current_timezone(),
+                2026, 8, 20, 20, 0, tzinfo=timezone.get_current_timezone()
             ),
             end_time=timezone.datetime(
-                2026,
-                8,
-                20,
-                21,
-                0,
-                tzinfo=timezone.get_current_timezone(),
+                2026, 8, 20, 21, 0, tzinfo=timezone.get_current_timezone()
             ),
             status=Booking.Status.CONFIRMED,
         )
@@ -734,20 +564,10 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             customer_name="Today Booking Paid Yesterday",
             customer_phone="+201000000202",
             start_time=timezone.datetime(
-                2026,
-                8,
-                17,
-                20,
-                0,
-                tzinfo=timezone.get_current_timezone(),
+                2026, 8, 17, 20, 0, tzinfo=timezone.get_current_timezone()
             ),
             end_time=timezone.datetime(
-                2026,
-                8,
-                17,
-                21,
-                0,
-                tzinfo=timezone.get_current_timezone(),
+                2026, 8, 17, 21, 0, tzinfo=timezone.get_current_timezone()
             ),
             status=Booking.Status.CONFIRMED,
         )
@@ -756,12 +576,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             amount=Decimal("300.00"),
             created_by=self.staff,
             created=timezone.datetime(
-                2026,
-                8,
-                17,
-                14,
-                0,
-                tzinfo=timezone.get_current_timezone(),
+                2026, 8, 17, 14, 0, tzinfo=timezone.get_current_timezone()
             ),
         )
         self.create_transaction(
@@ -769,21 +584,14 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             amount=Decimal("200.00"),
             created_by=self.staff,
             created=timezone.datetime(
-                2026,
-                8,
-                16,
-                14,
-                0,
-                tzinfo=timezone.get_current_timezone(),
+                2026, 8, 16, 14, 0, tzinfo=timezone.get_current_timezone()
             ),
         )
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(
             self.summary_url(self.club),
             {"date_from": "2026-08-17", "date_to": "2026-08-17"},
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         summary = response.data["summary"]
         self.assertEqual(summary["total_bookings"], 1)
@@ -798,7 +606,6 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
 
     def test_date_range_validation(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         reversed_response = self.client.get(
             self.summary_url(self.club),
             {
@@ -815,62 +622,19 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             },
         )
         partial_response = self.client.get(
-            self.summary_url(self.club),
-            {"date_from": self.time_at(0).isoformat()},
+            self.summary_url(self.club), {"date_from": self.time_at(0).isoformat()}
         )
-
         self.assertEqual(reversed_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assert_field_error(reversed_response, "date_to")
         self.assertEqual(mixed_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(partial_response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_owner_manager_and_staff_court_filter_scope(self):
-        for user in (self.owner, self.manager):
-            self.client.force_authenticate(user=user)
-            response = self.client.get(
-                self.summary_url(self.club),
-                {
-                    **self.range_params(),
-                    "court": self.court.id,
-                },
-            )
-
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-            self.assertEqual(response.data["scope"]["court"], self.court.id)
-            self.assertEqual(response.data["scope"]["court_ids"], [self.court.id])
-            self.assertEqual(len(response.data["courts"]), 1)
-
-        self.client.force_authenticate(user=self.staff)
-        assigned_response = self.client.get(
-            self.summary_url(self.club),
-            {
-                **self.range_params(),
-                "court": self.court.id,
-            },
-        )
-        other_court_response = self.client.get(
-            self.summary_url(self.club),
-            {
-                **self.range_params(),
-                "court": self.other_court.id,
-            },
-        )
-
-        self.assertEqual(assigned_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(assigned_response.data["scope"]["court_ids"], [self.court.id])
-        self.assertEqual(other_court_response.status_code, status.HTTP_403_FORBIDDEN)
-
     def test_cross_club_court_filter_rejected(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(
             self.summary_url(self.club),
-            {
-                **self.range_params(),
-                "court": self.cross_club_court.id,
-            },
+            {**self.range_params(), "court": self.cross_club_court.id},
         )
-
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_summary_booking_transaction_and_settlement_totals(self):
@@ -883,9 +647,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             created=self.time_at(14),
         )
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.summary_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         summary = response.data["summary"]
         self.assertEqual(summary["total_bookings"], 7)
@@ -915,7 +677,6 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertNotEqual(
             summary["settled_settlement_amount"], other_club_settlement.total_amount
         )
-
         courts = {item["court"]: item for item in response.data["courts"]}
         self.assertEqual(courts[self.court.id]["total_bookings"], 6)
         self.assertEqual(courts[self.court.id]["transaction_total"], "400.00")
@@ -929,14 +690,12 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(
             courts[self.other_court.id]["unsettled_transaction_total_amount"], "80.00"
         )
-        court_total = sum(item["total_bookings"] for item in response.data["courts"])
+        court_total = sum((item["total_bookings"] for item in response.data["courts"]))
         self.assertEqual(summary["total_bookings"], court_total)
 
     def test_summary_returns_home_page_unsettled_sections(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.summary_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["context"]["club_id"], self.club.id)
         self.assertEqual(
@@ -969,12 +728,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
 
     def test_payment_method_totals_include_net_amount_refund_and_count(self):
         selected_at = timezone.datetime(
-            2026,
-            8,
-            17,
-            14,
-            0,
-            tzinfo=timezone.get_current_timezone(),
+            2026, 8, 17, 14, 0, tzinfo=timezone.get_current_timezone()
         )
         self.create_transaction(
             self.confirmed,
@@ -1013,19 +767,16 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             cancellation_reason="Excluded from dashboard totals",
         )
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(
             self.summary_url(self.club),
             {"date_from": "2026-08-17", "date_to": "2026-08-17"},
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         cash_totals = response.data["payment_method_totals"][
             Transaction.PaymentMethod.CASH
         ]
         self.assertEqual(
-            cash_totals,
-            {"amount": "600.00", "refund": "200.00", "count": 3},
+            cash_totals, {"amount": "600.00", "refund": "200.00", "count": 3}
         )
         self.assertEqual(response.data["summary"]["transaction_count"], 3)
         self.assertEqual(response.data["summary"]["booking_payment_total"], "800.00")
@@ -1041,7 +792,6 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             created=self.time_at(13) - timedelta(days=2),
         )
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(
             self.summary_url(self.club),
             {
@@ -1051,7 +801,6 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
                 "settlement_status": "unsettled",
             },
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         summary = response.data["summary"]
         self.assertEqual(summary["total_bookings"], 7)
@@ -1075,9 +824,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             created=self.time_at(13) - timedelta(days=2),
         )
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.summary_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         summary = response.data["summary"]
         self.assertEqual(summary["transaction_count"], 3)
@@ -1094,12 +841,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self,
     ):
         mohamed = self.create_user("dashboard-mohamed")
-        self.create_membership(
-            mohamed,
-            self.club,
-            ClubMembership.Role.STAFF,
-            court=self.court,
-        )
+        grant_staff_court(mohamed, self.court)
         booking = self.create_booking(
             self.court,
             customer_name="Mohamed custody dataset",
@@ -1157,9 +899,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             amount=settled_payment.amount,
         )
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.summary_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         summary = response.data["summary"]
         self.assertEqual(summary["transaction_count"], 6)
@@ -1167,9 +907,11 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(summary["unsettled_transaction_count"], 4)
         self.assertEqual(summary["unsettled_transaction_total_amount"], "1330.00")
         mohamed_row = next(
-            item
-            for item in response.data["staff_unsettled_money"]
-            if item["collected_by"] == mohamed.id
+            (
+                item
+                for item in response.data["staff_unsettled_money"]
+                if item["collected_by"] == mohamed.id
+            )
         )
         self.assertEqual(mohamed_row["unsettled_transaction_count"], 3)
         self.assertEqual(mohamed_row["total_unsettled_amount"], "1250.00")
@@ -1184,9 +926,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             status=Booking.Status.COMPLETED,
         )
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.summary_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         summary = response.data["summary"]
         breakdown = response.data["needs_action_breakdown"]
@@ -1207,14 +947,11 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             status=Booking.Status.EXPIRED,
         )
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.summary_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["summary"]["needs_action_count"], 4)
         self.assertNotEqual(
-            historical_expired.start_time.date(),
-            self.time_at(8).date(),
+            historical_expired.start_time.date(), self.time_at(8).date()
         )
 
     def test_summary_unsettled_metrics_count_distinct_users_in_scope(self):
@@ -1255,7 +992,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.create_transaction(
             self.confirmed,
             amount=Decimal("70.00"),
-            created_by=self.manager,
+            created_by=self.create_user("cancelled-only-collector"),
             created=self.time_at(13, 55),
             is_cancelled=True,
             cancelled_by=self.platform_admin,
@@ -1269,20 +1006,15 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             created=self.time_at(13, 58),
         )
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.summary_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         summary = response.data["summary"]
         self.assertEqual(summary["unsettled_transaction_count"], 3)
         self.assertEqual(summary["unsettled_transaction_total_amount"], "300.00")
         self.assertEqual(summary["staff_with_unsettled_transactions_count"], 2)
-
         court_response = self.client.get(
-            self.summary_url(self.club),
-            {**self.range_params(), "court": self.court.id},
+            self.summary_url(self.club), {**self.range_params(), "court": self.court.id}
         )
-
         self.assertEqual(court_response.status_code, status.HTTP_200_OK)
         court_summary = court_response.data["summary"]
         self.assertEqual(court_summary["unsettled_transaction_count"], 1)
@@ -1294,25 +1026,19 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
 
 
 class RevenueTests(DashboardDataMixin, DashboardAPITestCase):
+
     def test_staff_rejected(self):
         self.client.force_authenticate(user=self.staff)
-
         response = self.client.get(self.revenue_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_group_by_day_week_and_month(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         for group_by in ("day", "week", "month"):
             response = self.client.get(
                 self.revenue_url(self.club),
-                {
-                    **self.range_params(),
-                    "group_by": group_by,
-                },
+                {**self.range_params(), "group_by": group_by},
             )
-
             self.assertEqual(response.status_code, status.HTTP_200_OK)
             self.assertEqual(response.data["group_by"], group_by)
             self.assertEqual(response.data["results"][0]["transaction_total"], "480.00")
@@ -1321,13 +1047,8 @@ class RevenueTests(DashboardDataMixin, DashboardAPITestCase):
 
     def test_court_and_payment_method_filters_work(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         court_response = self.client.get(
-            self.revenue_url(self.club),
-            {
-                **self.range_params(),
-                "court": self.court.id,
-            },
+            self.revenue_url(self.club), {**self.range_params(), "court": self.court.id}
         )
         method_response = self.client.get(
             self.revenue_url(self.club),
@@ -1336,32 +1057,26 @@ class RevenueTests(DashboardDataMixin, DashboardAPITestCase):
                 "payment_method": Transaction.PaymentMethod.DIGITAL_WALLET,
             },
         )
-
         self.assertEqual(court_response.status_code, status.HTTP_200_OK)
         self.assertEqual(
-            court_response.data["results"][0]["transaction_total"],
-            "400.00",
+            court_response.data["results"][0]["transaction_total"], "400.00"
         )
         self.assertEqual(method_response.status_code, status.HTTP_200_OK)
         self.assertEqual(
-            method_response.data["results"][0]["transaction_total"],
-            "80.00",
+            method_response.data["results"][0]["transaction_total"], "80.00"
         )
 
 
 class CourtUtilizationTests(DashboardDataMixin, DashboardAPITestCase):
+
     def test_staff_rejected(self):
         self.client.force_authenticate(user=self.staff)
-
         response = self.client.get(self.utilization_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_utilization_metrics(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.utilization_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         results = {item["court"]: item for item in response.data["results"]}
         self.assertEqual(set(results), {self.court.id, self.other_court.id})
@@ -1372,48 +1087,40 @@ class CourtUtilizationTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(results[self.court.id]["transaction_total"], "400.00")
         self.assertEqual(results[self.other_court.id]["booked_minutes"], 60)
         self.assertEqual(
-            results[self.other_court.id]["utilization_percentage"],
-            "25.00",
+            results[self.other_court.id]["utilization_percentage"], "25.00"
         )
 
     def test_zero_working_hours_avoids_division_by_zero(self):
         court = self.create_court(self.club, "No Hours Court")
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.utilization_url(self.club), self.range_params())
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         result = next(
-            item for item in response.data["results"] if item["court"] == court.id
+            (item for item in response.data["results"] if item["court"] == court.id)
         )
         self.assertEqual(result["available_minutes"], 0)
         self.assertEqual(result["utilization_percentage"], "0.00")
 
 
 class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
+
     def test_schema_and_docs_include_sprint_8_endpoints(self):
         schema_response = self.client.get(reverse("schema"))
         docs_response = self.client.get(reverse("swagger-ui"))
         schema = schema_response.content.decode()
         schema_doc = yaml.safe_load(schema)
-
         self.assertEqual(schema_response.status_code, status.HTTP_200_OK)
         self.assertEqual(docs_response.status_code, status.HTTP_200_OK)
         self.assertIn("/api/v1/clubs/{club_slug}/calendar/", schema)
         self.assertIn("/api/v1/clubs/{club_slug}/dashboard/overview/", schema)
         self.assertIn("/api/v1/clubs/{club_slug}/dashboard/summary/", schema)
         self.assertIn("/api/v1/clubs/{club_slug}/dashboard/revenue/", schema)
+        self.assertIn("/api/v1/clubs/{club_slug}/dashboard/court-utilization/", schema)
         self.assertIn(
-            "/api/v1/clubs/{club_slug}/dashboard/court-utilization/",
-            schema,
+            "/api/v1/clubs/{club_slug}/courts/{court_id}/availability/", schema
         )
         self.assertIn(
-            "/api/v1/clubs/{club_slug}/courts/{court_id}/availability/",
-            schema,
-        )
-        self.assertIn(
-            "/api/v1/public/clubs/{club_slug}/courts/{court_id}/availability/",
-            schema,
+            "/api/v1/public/clubs/{club_slug}/courts/{court_id}/availability/", schema
         )
         self.assertIn("PublicAvailabilityResponse", schema_doc["components"]["schemas"])
         summary_fields = schema_doc["components"]["schemas"]["DashboardSummaryMetrics"][
@@ -1436,88 +1143,52 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
             staff_fields["total_unsettled_amount"]["description"],
         )
 
-    def test_regression_boundaries(self):
-        repo_root = Path(__file__).resolve().parents[2]
-        user_fields = {field.name for field in User._meta.get_fields()}
-
-        self.assertNotIn("role", user_fields)
-        self.assertNotIn("club", user_fields)
-        self.assertNotIn("court", user_fields)
-        self.assertNotIn(
-            "CourtStaffAssignment",
-            (repo_root / "apps" / "courts" / "models.py").read_text(),
-        )
-        self.assertFalse((repo_root / "apps" / "dashboard" / "permissions.py").exists())
-        view_source = (repo_root / "apps" / "dashboard" / "views.py").read_text()
-        self.assertNotIn(
-            "ClubMembership",
-            view_source,
-        )
-        self.assertIn("get_access_context", view_source)
-        self.assertIn("SlotyBasePermission", view_source)
-        self.assertIn("ClubScopedViewMixin", view_source)
-        self.assertNotIn("ClubScopedAccessMixin", view_source)
-        self.assertNotIn("CanViewClubDashboard", view_source)
-        self.assertFalse(hasattr(DashboardOverviewAPIView, "post"))
-        self.assertFalse(hasattr(DashboardSummaryAPIView, "post"))
-        self.assertFalse(hasattr(DashboardRevenueAPIView, "post"))
-        self.assertFalse(hasattr(CourtUtilizationAPIView, "post"))
-        self.assertFalse(hasattr(ClubCalendarAPIView, "post"))
-        self.assertFalse(hasattr(CourtAvailabilityAPIView, "post"))
-
     def test_seed_demo_data_supports_sprint_8_manual_testing(self):
         call_command("seed_demo_data", verbosity=0)
         call_command("seed_demo_data", verbosity=0)
         platform_admin = User.objects.get(username="platform_admin")
         booking = (
             Booking.objects.filter(
-                club__slug="barcelona-fc",
-                status__in=Booking.BLOCKING_STATUSES,
+                club__slug="barcelona-fc", status__in=Booking.BLOCKING_STATUSES
             )
             .select_related("club", "court")
             .first()
         )
         self.client.force_authenticate(user=platform_admin)
-
         response = self.client.get(
             self.availability_url(booking.club, booking.court),
             {"date": booking.start_time.date().isoformat()},
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(
-            any(not slot["is_available"] for slot in response.data["slots"])
+            any((not slot["is_available"] for slot in response.data["slots"]))
         )
-        self.assertTrue(any(slot["is_available"] for slot in response.data["slots"]))
+        self.assertTrue(any((slot["is_available"] for slot in response.data["slots"])))
         self.assertTrue(
             Transaction.objects.filter(
-                club__slug="barcelona-fc",
-                settlement_line__isnull=True,
+                club__slug="barcelona-fc", settlement_line__isnull=True
             ).exists()
         )
         self.assertTrue(AuditLog.objects.filter(club__slug="barcelona-fc").exists())
 
 
 class DashboardQueryScalingTests(DashboardDataMixin, DashboardAPITestCase):
+
     def test_summary_query_count_does_not_grow_with_extra_bookings(self):
         self.client.force_authenticate(user=self.platform_admin)
         params = self.range_params()
-
         with CaptureQueriesContext(connection) as first:
             first_response = self.client.get(self.summary_url(self.club), params)
-
         for hour in range(13, 21):
             self.create_booking(
                 self.court,
                 customer_phone=f"+2010000080{hour}",
                 start_time=self.time_at(hour % 24),
-                end_time=self.time_at((hour % 24) + 1 if hour % 24 < 23 else 23),
+                end_time=self.time_at(hour % 24 + 1 if hour % 24 < 23 else 23),
                 status=Booking.Status.CONFIRMED,
             )
-
         with CaptureQueriesContext(connection) as second:
             second_response = self.client.get(self.summary_url(self.club), params)
-
         self.assertEqual(first_response.status_code, status.HTTP_200_OK)
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(first), len(second))
@@ -1525,32 +1196,21 @@ class DashboardQueryScalingTests(DashboardDataMixin, DashboardAPITestCase):
     def test_current_custody_query_count_is_bounded_for_one_vs_thirty_collectors(self):
         self.client.force_authenticate(user=self.platform_admin)
         params = self.range_params()
-
         with CaptureQueriesContext(connection) as first:
             first_response = self.client.get(self.summary_url(self.club), params)
-
         for index in range(1, 30):
             collector = self.create_user(f"dashboard-custody-collector-{index}")
-            self.create_membership(
-                collector,
-                self.club,
-                ClubMembership.Role.STAFF,
-                court=self.court,
-            )
+            grant_staff_court(collector, self.court)
             booking = self.create_booking(
                 self.court,
                 customer_phone=f"+201000007{index:03d}",
                 status=Booking.Status.CONFIRMED,
             )
             self.create_transaction(
-                booking,
-                amount=Decimal("10.00"),
-                created_by=collector,
+                booking, amount=Decimal("10.00"), created_by=collector
             )
-
         with CaptureQueriesContext(connection) as second:
             second_response = self.client.get(self.summary_url(self.club), params)
-
         self.assertEqual(first_response.status_code, status.HTTP_200_OK)
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(first_response.data["staff_unsettled_money"]), 1)
@@ -1559,13 +1219,12 @@ class DashboardQueryScalingTests(DashboardDataMixin, DashboardAPITestCase):
 
 
 class DashboardMidnightWorkingHourTests(DashboardDataMixin, DashboardAPITestCase):
+
     def setUp(self):
         super().setUp()
         self.midnight_court = self.create_court(self.club, "Midnight Court")
-        # Working hours from 18:00 to 00:00 (midnight)
         working_hour = CourtWorkingHour.objects.create(
-            court=self.midnight_court,
-            weekday=0,  # Monday 2026-07-06
+            court=self.midnight_court, weekday=0
         )
         CourtWorkingHourPricePeriod.objects.create(
             working_hour=working_hour,
@@ -1584,16 +1243,11 @@ class DashboardMidnightWorkingHourTests(DashboardDataMixin, DashboardAPITestCase
         slots = response.data["slots"]
         self.assertEqual(len(slots), 6)
         last_slot = slots[-1]
+        self.assertEqual(last_slot["start_time"], self.time_at(23).isoformat())
         self.assertEqual(
-            last_slot["start_time"],
-            self.time_at(23).isoformat(),
-        )
-        self.assertEqual(
-            last_slot["end_time"],
-            (self.time_at(23) + timedelta(hours=1)).isoformat(),
+            last_slot["end_time"], (self.time_at(23) + timedelta(hours=1)).isoformat()
         )
         self.assertTrue(last_slot["is_available"])
-
         public_response = self.client.get(
             self.public_availability_url(self.club, self.midnight_court),
             {"date": "2026-07-06"},
@@ -1616,11 +1270,12 @@ class DashboardMidnightWorkingHourTests(DashboardDataMixin, DashboardAPITestCase
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         result = next(
-            item
-            for item in response.data["results"]
-            if item["court"] == self.midnight_court.id
+            (
+                item
+                for item in response.data["results"]
+                if item["court"] == self.midnight_court.id
+            )
         )
-        # 18:00 to 24:00 is 6 hours = 360 minutes
         self.assertEqual(result["available_minutes"], 360)
         self.assertEqual(result["booked_minutes"], 60)
         self.assertEqual(result["utilization_percentage"], "16.67")

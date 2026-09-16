@@ -68,6 +68,10 @@ class ApiFoundationUrlTests(APITestCase):
 
         self.assertIs(match.func.view_class, PasswordChangeAPIView)
 
+    def test_heartbeat_url_is_removed(self):
+        with self.assertRaises(Resolver404):
+            resolve("/api/v1/me/sync-heartbeat/")
+
     def test_old_unversioned_api_routes_are_not_kept(self):
         with self.assertRaises(Resolver404):
             resolve("/api/schema/")

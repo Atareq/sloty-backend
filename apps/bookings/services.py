@@ -1259,12 +1259,7 @@ def validate_allowed_status(*, booking, allowed_statuses, action_label):
 
 
 def actor_requires_staff_cancel_reason(access):
-    if getattr(access, "is_platform_admin", False):
-        return False
-    role = getattr(access, "role", None)
-    if role is not None:
-        return role == Role.STAFF
-    return getattr(access, "is_staff", False) and not getattr(access, "is_owner", False)
+    return access.role == Role.STAFF
 
 
 def calculate_cancellation_refund(*, booking, requested_at):

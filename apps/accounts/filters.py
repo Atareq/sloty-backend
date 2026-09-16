@@ -48,6 +48,7 @@ class UserFilter(django_filters.FilterSet):
             return queryset
         return queryset.filter(
             profile__role=value,
+            profile__is_enabled=True,
         ).distinct()
 
     def filter_club(self, queryset, name, value):
@@ -56,10 +57,10 @@ class UserFilter(django_filters.FilterSet):
             return queryset
         if cleaned.isdigit():
             club_q = Q(profile__owner_profile__clubs__id=int(cleaned)) | Q(
-                profile__staff_profile__court__club_id=int(cleaned)
+                profile__staff_profile__club_id=int(cleaned)
             )
         else:
             club_q = Q(profile__owner_profile__clubs__slug=cleaned) | Q(
-                profile__staff_profile__court__club__slug=cleaned
+                profile__staff_profile__club__slug=cleaned
             )
-        return queryset.filter(club_q).distinct()
+        return queryset.filter(club_q, profile__is_enabled=True).distinct()

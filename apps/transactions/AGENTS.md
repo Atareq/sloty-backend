@@ -62,7 +62,7 @@
 - **Staff create:** any booking on an assigned court (not creator-scoped).
 - **Cancel:** Platform Admin may cancel any in-scope transaction. Owner and Staff may cancel only their own collections. Out-of-scope rows are HTTP 404; in-scope rows the actor may not cancel are HTTP 403.
 - **TransactionAttempt:** Club + Court, then Staff `attempted_by=request.user`. Dismiss is attempter-only for every role.
-- Transaction ViewSets use the Spine only. They do not call `ClubAccessContext`.
+- Transaction ViewSets use the Spine only. They do not use a second club-access abstraction.
 
 ## Cross-App Dependencies
 

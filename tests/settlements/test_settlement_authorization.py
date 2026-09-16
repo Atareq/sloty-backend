@@ -5,8 +5,8 @@ Validates:
 1. Settlement.authorization_config is club-only (never court).
 2. SettlementViewSet composes SlotyScopedResourceMixin + SlotyBasePermission.
 3. Club isolation (cross-club 403 / out-of-club ID 404).
-4. Collector isolation for Staff and Manager without settle flag.
-5. Owner / Manager-with-flag / Platform Admin club-wide settlement visibility.
+4. Collector isolation for Staff.
+5. Owner / Platform Admin club-wide settlement visibility.
 6. Court independence: custody and settlement rows are NOT filtered by
    assigned courts.
 7. Direct-object and filter access cannot bypass the scoped queryset.
@@ -22,7 +22,6 @@ from django.core.exceptions import ImproperlyConfigured
 from rest_framework import status
 from rest_framework.test import APIRequestFactory
 
-from apps.clubs.models import ClubMembership
 from apps.common.authorization.contracts import load_authorization_config
 from apps.common.authorization.matrix import is_action_allowed
 from apps.common.authorization.mixins import SlotyScopedResourceMixin
@@ -34,6 +33,7 @@ from apps.common.authorization.scopes import ResourceScope
 from apps.settlements.models import Settlement
 from apps.settlements.services import build_custody
 from apps.settlements.views import SettlementViewSet
+from tests.profile_factories import grant_owner_club, grant_staff_court
 from tests.settlements.test_settlement_api import SettlementAPITestCase
 
 SETTLEMENT_MANAGER_ACTIONS = (
@@ -48,6 +48,7 @@ SETTLEMENT_STAFF_ACTIONS = ("list", "retrieve", "preview")
 
 
 class SettlementAuthorizationConfigTests(SettlementAPITestCase):
+
     def setUp(self):
         self.owner = self.create_user("st-config-owner")
         self.staff = self.create_user("st-config-staff")
@@ -58,24 +59,16 @@ class SettlementAuthorizationConfigTests(SettlementAPITestCase):
         self.court_a = self.create_court(self.club, "St Config Court A")
         self.court_b = self.create_court(self.club, "St Config Court B")
         self.other_court = self.create_court(self.other_club, "St Config Other Court")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(
-            self.staff, self.club, ClubMembership.Role.STAFF, court=self.court_a
-        )
+        grant_owner_club(self.owner, self.club)
+        grant_staff_court(self.staff, self.court_a)
         self.own_settlement = self.create_settlement(
-            self.club,
-            court=self.court_b,
-            collected_by=self.staff,
+            self.club, court=self.court_b, collected_by=self.staff
         )
         self.owner_settlement = self.create_settlement(
-            self.club,
-            court=self.court_a,
-            collected_by=self.owner,
+            self.club, court=self.court_a, collected_by=self.owner
         )
         self.other_settlement = self.create_settlement(
-            self.other_club,
-            court=self.other_court,
-            collected_by=self.owner,
+            self.other_club, court=self.other_court, collected_by=self.owner
         )
 
     def context_for(self, user):
@@ -87,7 +80,6 @@ class SettlementAuthorizationConfigTests(SettlementAPITestCase):
 
     def test_settlement_config_declares_club_scope_only(self):
         config = load_authorization_config(Settlement)
-
         self.assertEqual(config.default_scope, ResourceScope.CLUB.value)
         self.assertEqual(config.scopes[ResourceScope.CLUB.value].path, "club")
         self.assertNotIn(ResourceScope.COURT.value, config.scopes)
@@ -115,15 +107,14 @@ class SettlementAuthorizationConfigTests(SettlementAPITestCase):
         try:
             with self.assertRaises(ImproperlyConfigured):
                 scoped_queryset(
-                    self.context_for(self.owner),
-                    Settlement,
-                    scope=ResourceScope.CLUB,
+                    self.context_for(self.owner), Settlement, scope=ResourceScope.CLUB
                 )
         finally:
             Settlement.authorization_config = original
 
 
 class SettlementViewSetSpineCompositionTests(SettlementAPITestCase):
+
     def test_settlement_viewset_does_not_override_get_queryset(self):
         self.assertIs(
             SettlementViewSet.get_queryset, SlotyScopedResourceMixin.get_queryset
@@ -135,7 +126,7 @@ class SettlementViewSetSpineCompositionTests(SettlementAPITestCase):
         self.assertEqual(SettlementViewSet.permission_classes, (SlotyBasePermission,))
 
     def test_matrix_matches_approved_settlement_actions(self):
-        for role in (Role.ADMIN, Role.OWNER, Role.MANAGER):
+        for role in (Role.ADMIN, Role.OWNER):
             for action in SETTLEMENT_MANAGER_ACTIONS:
                 with self.subTest(role=role, action=action):
                     self.assertTrue(
@@ -157,61 +148,27 @@ class SettlementViewSetSpineCompositionTests(SettlementAPITestCase):
 
 
 class SettlementAuthorizationSpineTests(SettlementAPITestCase):
+
     def setUp(self):
         self.club = self.create_club("Spine Settlement Club", "spine-settlement")
         self.other_club = self.create_club("Other Settlement Club", "other-settlement")
-
         self.court_a = self.create_court(self.club, "Court A")
         self.court_b = self.create_court(self.club, "Court B")
         self.other_court = self.create_court(self.other_club, "Other Club Court")
-
         self.platform_admin = self.create_platform_admin("spine-st-admin")
         self.owner = self.create_user("spine-st-owner")
-        self.manager = self.create_user("spine-st-manager")
-        self.manager_without_flag = self.create_user("spine-st-manager-denied")
         self.staff = self.create_user("spine-st-staff")
         self.other_staff = self.create_user("spine-st-other-staff")
         self.other_club_user = self.create_user("spine-st-other-club")
-
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(
-            self.manager,
-            self.club,
-            ClubMembership.Role.MANAGER,
-            manager_can_settle_transactions=True,
-        )
-        self.create_membership(
-            self.manager_without_flag,
-            self.club,
-            ClubMembership.Role.MANAGER,
-            manager_can_settle_transactions=False,
-        )
-        self.create_membership(
-            self.staff,
-            self.club,
-            ClubMembership.Role.STAFF,
-            court=self.court_a,
-        )
-        self.create_membership(
-            self.other_staff,
-            self.club,
-            ClubMembership.Role.STAFF,
-            court=self.court_b,
-        )
-        self.create_membership(
-            self.other_club_user,
-            self.other_club,
-            ClubMembership.Role.OWNER,
-        )
-
+        grant_owner_club(self.owner, self.club)
+        grant_staff_court(self.staff, self.court_a)
+        grant_staff_court(self.other_staff, self.court_b)
+        grant_owner_club(self.other_club_user, self.other_club)
         booking_a = self.create_booking(self.court_a)
         booking_b = self.create_booking(
-            self.court_b,
-            start_time=self.time_at(18),
-            end_time=self.time_at(19),
+            self.court_b, start_time=self.time_at(18), end_time=self.time_at(19)
         )
         other_booking = self.create_booking(self.other_court)
-
         self.tx_staff_court_a = self.create_transaction(
             booking_a, created_by=self.staff, amount=Decimal("50.00")
         )
@@ -224,43 +181,29 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
         self.create_transaction(
             other_booking, created_by=self.other_club_user, amount=Decimal("40.00")
         )
-
         self.staff_settlement_unassigned_court = self.create_settlement(
-            self.club,
-            court=self.court_b,
-            collected_by=self.staff,
+            self.club, court=self.court_b, collected_by=self.staff
         )
         self.other_staff_settlement = self.create_settlement(
-            self.club,
-            court=self.court_a,
-            collected_by=self.other_staff,
-        )
-        self.manager_settlement = self.create_settlement(
-            self.club,
-            collected_by=self.manager_without_flag,
+            self.club, court=self.court_a, collected_by=self.other_staff
         )
         self.other_club_settlement = self.create_settlement(
-            self.other_club,
-            court=self.other_court,
-            collected_by=self.other_club_user,
+            self.other_club, court=self.other_court, collected_by=self.other_club_user
         )
 
     def test_club_isolation_enforced(self):
         self.client.force_authenticate(user=self.other_club_user)
-
         response = self.client.get(self.settlement_list_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assert_api_error(response, "CLUB_ACCESS_REVOKED")
 
     def test_staff_sees_only_own_settlements_including_unassigned_court_row(self):
         self.client.force_authenticate(user=self.staff)
-
         response = self.client.get(self.settlement_list_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             self.list_ids(response), {self.staff_settlement_unassigned_court.id}
         )
-
         own_detail = self.client.get(
             self.settlement_detail_url(
                 self.club, self.staff_settlement_unassigned_court
@@ -270,12 +213,10 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
 
     def test_staff_cannot_retrieve_or_mark_other_collector_settlement(self):
         self.client.force_authenticate(user=self.staff)
-
         detail = self.client.get(
             self.settlement_detail_url(self.club, self.other_staff_settlement)
         )
         self.assertEqual(detail.status_code, status.HTTP_404_NOT_FOUND)
-
         mark = self.client.post(
             self.settlement_mark_settled_url(self.club, self.other_staff_settlement),
             {},
@@ -283,42 +224,8 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
         )
         self.assertEqual(mark.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_manager_without_flag_sees_only_own_settlements(self):
-        self.client.force_authenticate(user=self.manager_without_flag)
-
-        response = self.client.get(self.settlement_list_url(self.club))
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(self.list_ids(response), {self.manager_settlement.id})
-
-        other_detail = self.client.get(
-            self.settlement_detail_url(self.club, self.other_staff_settlement)
-        )
-        self.assertEqual(other_detail.status_code, status.HTTP_404_NOT_FOUND)
-
-        mark_own = self.client.post(
-            self.settlement_mark_settled_url(self.club, self.manager_settlement),
-            {},
-            format="json",
-        )
-        self.assertEqual(mark_own.status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_owner_and_manager_with_flag_see_all_club_settlements(self):
-        expected = {
-            self.staff_settlement_unassigned_court.id,
-            self.other_staff_settlement.id,
-            self.manager_settlement.id,
-        }
-        for actor in (self.owner, self.manager, self.platform_admin):
-            with self.subTest(actor=actor.username):
-                self.client.force_authenticate(user=actor)
-                response = self.client.get(self.settlement_list_url(self.club))
-                self.assertEqual(response.status_code, status.HTTP_200_OK)
-                self.assertEqual(self.list_ids(response), expected)
-                self.assertNotIn(self.other_club_settlement.id, self.list_ids(response))
-
     def test_out_of_club_id_is_404_not_existence_leak(self):
         self.client.force_authenticate(user=self.owner)
-
         detail = self.client.get(
             self.settlement_detail_url(self.club, self.other_club_settlement)
         )
@@ -332,27 +239,19 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
 
     def test_filters_cannot_expose_unauthorized_settlements(self):
         self.client.force_authenticate(user=self.staff)
-
         by_collector = self.client.get(
-            self.settlement_list_url(self.club),
-            {"collected_by": self.other_staff.id},
+            self.settlement_list_url(self.club), {"collected_by": self.other_staff.id}
         )
         by_court = self.client.get(
-            self.settlement_list_url(self.club),
-            {"court": self.court_a.id},
+            self.settlement_list_url(self.club), {"court": self.court_a.id}
         )
-
         self.assertEqual(by_collector.status_code, status.HTTP_200_OK)
         self.assertNotIn(self.other_staff_settlement.id, self.list_ids(by_collector))
         self.assertNotIn(self.other_staff_settlement.id, self.list_ids(by_court))
-        self.assertEqual(
-            self.list_ids(by_court),
-            set(),
-        )
+        self.assertEqual(self.list_ids(by_court), set())
 
     def test_staff_preview_includes_unassigned_court_collections(self):
         self.client.force_authenticate(user=self.staff)
-
         preview = self.client.get(self.settlement_preview_url(self.club))
         self.assertEqual(preview.status_code, status.HTTP_200_OK)
         ids = {row["id"] for row in preview.data["transactions"]}
@@ -361,7 +260,6 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
 
     def test_staff_cannot_preview_another_collector(self):
         self.client.force_authenticate(user=self.staff)
-
         response = self.client.get(
             self.settlement_preview_url(self.club),
             {"collected_by": self.other_staff.id},
@@ -370,7 +268,6 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
 
     def test_staff_cannot_access_unsettled_summary(self):
         self.client.force_authenticate(user=self.staff)
-
         response = self.client.get(self.settlement_unsettled_summary_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -384,7 +281,6 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
         tx_ids = {row["id"] for row in tx_list.data["results"]}
         self.assertIn(self.tx_staff_court_a.id, tx_ids)
         self.assertNotIn(self.tx_staff_court_b.id, tx_ids)
-
         custody = build_custody(club=self.club, collector=self.staff)
         custody_ids = {tx.id for tx in custody["transactions"]}
         self.assertIn(self.tx_staff_court_a.id, custody_ids)

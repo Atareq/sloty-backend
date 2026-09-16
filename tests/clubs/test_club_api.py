@@ -10,9 +10,10 @@ from apps.accounts.models import User
 from apps.bookings.models import Booking
 from apps.clubs.models import Club
 from apps.courts.models import Court
-from apps.profiles.models import AdminProfile, OwnerProfile, Profile, StaffProfile
+from apps.profiles.models import AdminProfile, Profile
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking
+from tests.profile_factories import grant_owner_club, grant_staff_court
 
 
 class ClubAPITestCase(APITestCase):
@@ -27,10 +28,7 @@ class ClubAPITestCase(APITestCase):
 
     def create_platform_admin(self, username="platform-admin") -> User:
         user = self.create_user(username=username)
-        profile, _ = Profile.objects.get_or_create(
-            user=user, defaults={"role": Profile.Role.ADMIN}
-        )
-        AdminProfile.objects.get_or_create(profile=profile)
+        AdminProfile.objects.create(user=user, role=Profile.Role.ADMIN)
         return user
 
     def create_club(self, name: str, slug: str | None = None, **extra_fields) -> Club:
@@ -52,38 +50,6 @@ class ClubAPITestCase(APITestCase):
         }
         data.update(extra_fields)
         return Court.objects.create(**data)
-
-    def create_membership(
-        self,
-        user: User,
-        club: Club,
-        role: str,
-        court: Court | None = None,
-        is_active: bool = True,
-        **extra_fields,
-    ):
-        if role == "OWNER":
-            profile, _ = Profile.objects.get_or_create(
-                user=user, defaults={"role": Profile.Role.OWNER}
-            )
-            owner_profile, _ = OwnerProfile.objects.get_or_create(profile=profile)
-            owner_profile.clubs.add(club)
-            return owner_profile
-        elif role == "STAFF":
-            profile, _ = Profile.objects.get_or_create(
-                user=user, defaults={"role": Profile.Role.STAFF}
-            )
-            staff_profile, _ = StaffProfile.objects.get_or_create(
-                profile=profile, defaults={"court": court}
-            )
-            return staff_profile
-        elif role == "ADMIN":
-            profile, _ = Profile.objects.get_or_create(
-                user=user, defaults={"role": Profile.Role.ADMIN}
-            )
-            admin_profile, _ = AdminProfile.objects.get_or_create(profile=profile)
-            return admin_profile
-        return None
 
     def time_at(self, hour: int):
         return timezone.datetime(
@@ -126,18 +92,6 @@ class ClubAPITestCase(APITestCase):
             response.data["field_errors"][field][0]["message"],
             message,
         )
-
-    def membership_list_url(self, club):
-        return reverse("club-membership-list", kwargs={"club_slug": club.slug})
-
-    def membership_detail_url(self, club, membership):
-        return reverse(
-            "club-membership-detail",
-            kwargs={"club_slug": club.slug, "pk": membership.pk},
-        )
-
-    def club_user_list_url(self, club):
-        return reverse("club-user-list", kwargs={"club_slug": club.slug})
 
 
 class ClubAPITests(ClubAPITestCase):
@@ -260,10 +214,6 @@ class ClubAPITests(ClubAPITestCase):
         club = self.create_club("Default Club")
 
         self.assertTrue(club.is_active)
-        self.assertFalse(
-            hasattr(club, "manager_can_settle_transactions"),
-        )
-        self.assertFalse(hasattr(club, "manager_can_change_pricing"))
 
     def test_club_can_be_deactivated_with_patch(self):
         club = self.create_club("Deactivate Club")
@@ -387,12 +337,8 @@ class ClubAPITests(ClubAPITestCase):
     def test_owner_can_list_only_assigned_clubs(self):
         owned_club = self.create_club("Owned Club")
         unrelated_club = self.create_club("Unrelated Club")
-        self.create_membership(self.owner, owned_club, "OWNER")
-        self.create_membership(
-            self.other_owner,
-            unrelated_club,
-            "OWNER",
-        )
+        grant_owner_club(self.owner, owned_club)
+        grant_owner_club(self.other_owner, unrelated_club)
         self.client.force_authenticate(user=self.owner)
 
         response = self.client.get(reverse("club-list"))
@@ -403,12 +349,7 @@ class ClubAPITests(ClubAPITestCase):
     def test_staff_can_list_club_through_staff_membership(self):
         club = self.create_club("Staff Club")
         court = self.create_court(club, "Staff Court")
-        self.create_membership(
-            self.staff,
-            club,
-            "STAFF",
-            court=court,
-        )
+        grant_staff_court(self.staff, court)
         self.client.force_authenticate(user=self.staff)
 
         response = self.client.get(reverse("club-list"))
@@ -418,7 +359,7 @@ class ClubAPITests(ClubAPITestCase):
 
     def test_owner_can_update_owned_club(self):
         club = self.create_club("Owned Update Club")
-        self.create_membership(self.owner, club, "OWNER")
+        grant_owner_club(self.owner, club)
         self.client.force_authenticate(user=self.owner)
 
         response = self.client.patch(

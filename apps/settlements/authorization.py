@@ -10,15 +10,14 @@ from apps.accounts.models import User
 from apps.common.authorization.context import RequestAccessContext
 from apps.common.authorization.roles import Role
 from apps.common.exceptions import SlotyAPIException
-from apps.profiles.models import Profile
 from apps.settlements.models import Settlement
 
 SELF_APPROVAL_MESSAGE = _("You cannot approve your own settlement.")
 
 
 def get_active_collector_roles(club, user: User) -> Set[str]:
-    profile = Profile.objects.filter(user=user).first()
-    if profile is None:
+    profile = getattr(user, "profile", None)
+    if profile is None or not profile.is_enabled:
         return set()
     if profile.role == Role.ADMIN:
         return {Role.ADMIN}
@@ -33,7 +32,7 @@ def get_active_collector_roles(club, user: User) -> Set[str]:
     if (
         profile.role == Role.STAFF
         and staff_profile
-        and staff_profile.court.club_id == club.pk
+        and staff_profile.club_id == club.pk
     ):
         return {Role.STAFF}
     return set()
@@ -42,16 +41,19 @@ def get_active_collector_roles(club, user: User) -> Set[str]:
 def get_active_collector_roles_by_id(
     club, user_ids: Collection[int]
 ) -> Dict[int, Set[str]]:
-    return {
-        user_id: get_active_collector_roles(club, User.objects.get(pk=user_id))
-        for user_id in user_ids
-    }
+    users = (
+        User.objects.filter(pk__in=user_ids)
+        .select_related("profile__owner_profile", "profile__staff_profile__club")
+        .prefetch_related("profile__owner_profile__clubs")
+    )
+    by_id = {user.id: get_active_collector_roles(club, user) for user in users}
+    return {user_id: by_id.get(user_id, set()) for user_id in user_ids}
 
 
-def validate_collected_by_membership(
+def validate_collected_by_profile(
     *, context: RequestAccessContext, collector: User
 ) -> None:
-    if context.is_platform_admin and collector.id == context.user.id:
+    if context.role == Role.ADMIN and collector.id == context.user.id:
         return
     if not get_active_collector_roles(context.club, collector):
         raise serializers.ValidationError(
@@ -60,7 +62,7 @@ def validate_collected_by_membership(
 
 
 def can_manage_settlements(context: RequestAccessContext) -> bool:
-    return context.is_platform_admin or context.role == Role.OWNER
+    return context.role in {Role.ADMIN, Role.OWNER}
 
 
 def apply_collector_scope(context: RequestAccessContext, queryset):
@@ -99,7 +101,7 @@ def can_view_collector_in_summary(
 def validate_preview_authority(
     *, context: RequestAccessContext, collector: User
 ) -> None:
-    validate_collected_by_membership(context=context, collector=collector)
+    validate_collected_by_profile(context=context, collector=collector)
     if can_manage_settlements(context) or collector.id == context.user.id:
         return
     raise PermissionDenied(_("You cannot preview settlements for this user."))
@@ -108,10 +110,12 @@ def validate_preview_authority(
 def validate_settlement_authority(
     *, context: RequestAccessContext, collector: User
 ) -> None:
-    validate_collected_by_membership(context=context, collector=collector)
+    validate_collected_by_profile(context=context, collector=collector)
     if not can_manage_settlements(context):
         raise PermissionDenied(_("You cannot manage settlements for this club."))
-    if collector.id == context.user.id and not context.is_platform_admin:
+    if collector.id == context.user.id and not (
+        context.role in {Role.ADMIN, Role.OWNER}
+    ):
         raise SlotyAPIException(
             status_code=status.HTTP_403_FORBIDDEN,
             code="SELF_SETTLEMENT_APPROVAL_FORBIDDEN",
@@ -125,7 +129,7 @@ def validate_unsettled_summary_authority(
     if not can_manage_settlements(context):
         raise PermissionDenied(_("You cannot manage settlements for this club."))
     if collector is not None:
-        validate_collected_by_membership(context=context, collector=collector)
+        validate_collected_by_profile(context=context, collector=collector)
 
 
 def build_unsettled_summary(

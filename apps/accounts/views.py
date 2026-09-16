@@ -1,5 +1,4 @@
 from django.db.models import Subquery
-from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import status
@@ -23,7 +22,6 @@ from apps.accounts.serializers import (
     PasswordChangeSerializer,
     SlotyTokenObtainPairSerializer,
     SlotyTokenRefreshSerializer,
-    SyncHeartbeatResponseSerializer,
     UserCreateSerializer,
     UserListSerializer,
     UserMeSerializer,
@@ -61,26 +59,11 @@ class MeAPIView(RetrieveAPIView):
     serializer_class = UserMeSerializer
 
     def get_object(self):
-        return User.objects.select_related("created_by", "profile").get(
-            pk=self.request.user.pk
+        return (
+            User.objects.select_related("created_by")
+            .select_related("profile")
+            .get(pk=self.request.user.pk)
         )
-
-
-@extend_schema(tags=["Accounts"], responses=SyncHeartbeatResponseSerializer)
-class SyncHeartbeatAPIView(APIView):
-    """
-    Explicit offline/PWA sync heartbeat.
-
-    The endpoint is retained as a no-op acknowledgement for existing clients.
-    Profile authorization has no request-level side effects and no longer
-    stores membership presence or sync timestamps.
-    """
-
-    permission_classes = (IsAuthenticated,)
-
-    def post(self, request, *args, **kwargs):
-        now = timezone.now()
-        return Response(SyncHeartbeatResponseSerializer({"last_sync_at": now}).data)
 
 
 @extend_schema_view(
@@ -104,7 +87,11 @@ class UserViewSet(
     UpdateModelMixin,
     GenericViewSet,
 ):
-    queryset = User.objects.select_related("created_by").order_by("id")
+    queryset = (
+        User.objects.select_related("created_by")
+        .select_related("profile")
+        .order_by("id")
+    )
     permission_classes = (CanAccessUsers,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = UserFilter
@@ -119,19 +106,25 @@ class UserViewSet(
             return User.objects.none()
 
         if user.is_platform_super_admin():
-            return User.objects.select_related("created_by").order_by("id")
+            return (
+                User.objects.select_related("created_by")
+                .select_related("profile")
+                .order_by("id")
+            )
         profile = getattr(user, "profile", None)
-        if not profile or profile.role != Profile.Role.OWNER:
+        if not profile or not profile.is_enabled or profile.role != Profile.Role.OWNER:
             return User.objects.none()
         owned_club_ids = profile.owner_profile.clubs.values("id")
         staff_user_ids = Profile.objects.filter(
             role=Profile.Role.STAFF,
-            staff_profile__court__club_id__in=owned_club_ids,
+            is_enabled=True,
+            staff_profile__club_id__in=owned_club_ids,
         ).values("user_id")
 
         return (
             User.objects.filter(id__in=Subquery(staff_user_ids))
             .select_related("created_by")
+            .select_related("profile")
             .order_by("id")
         )
 

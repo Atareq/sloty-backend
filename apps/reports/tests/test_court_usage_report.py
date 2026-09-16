@@ -13,7 +13,13 @@ from apps.accounts.models import User
 from apps.bookings.models import Booking
 from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
-from apps.profiles.models import AdminProfile, OwnerProfile, Profile, StaffProfile
+from apps.profiles.models import (
+    AdminProfile,
+    OwnerProfile,
+    Profile,
+    StaffCourtAccess,
+    StaffProfile,
+)
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking
 
@@ -139,14 +145,18 @@ class CourtUsageReportAPITestCase(APITestCase):
         )
 
     def create_profile_scope(self, user, role, *, club=None, court=None):
-        profile = Profile.objects.create(user=user, role=role)
         if role == Profile.Role.ADMIN:
-            AdminProfile.objects.create(profile=profile)
+            profile = AdminProfile.objects.create(user=user, role=role)
         elif role == Profile.Role.OWNER:
-            owner_profile = OwnerProfile.objects.create(profile=profile)
-            owner_profile.clubs.add(club)
+            profile = OwnerProfile.objects.create(user=user, role=role)
+            profile.clubs.add(club)
         elif role == Profile.Role.STAFF:
-            StaffProfile.objects.create(profile=profile, court=court)
+            target_club = club or (court.club if court else None)
+            profile = StaffProfile.objects.create(
+                user=user, role=role, club=target_club
+            )
+            if court:
+                StaffCourtAccess.objects.create(staff_profile=profile, court=court)
         return profile
 
     def create_working_hours(self, court, opens_at, closes_at):

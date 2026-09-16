@@ -9,6 +9,15 @@ from apps.profiles.models import AdminProfile, Profile
 
 
 class UserModelTests(TestCase):
+    def test_authentication_account_can_exist_before_profile_provisioning(self):
+        user = User.objects.create_user(
+            username="pending-profile", password="test-pass-123"
+        )
+        self.assertTrue(user.check_password("test-pass-123"))
+        self.assertIsNone(user.role)
+        self.assertFalse(user.is_platform_super_admin())
+        self.assertNotIn("role", {field.name for field in User._meta.local_fields})
+
     def create_user(self, username: str, **extra_fields) -> User:
         return User.objects.create_user(
             username=username,
@@ -16,18 +25,9 @@ class UserModelTests(TestCase):
             **extra_fields,
         )
 
-    def test_user_no_longer_requires_business_role(self):
-        user = self.create_user(username="normal-user")
-
-        self.assertFalse(hasattr(user, "role"))
-        self.assertFalse(hasattr(user, "club"))
-        self.assertFalse(hasattr(user, "court"))
-        self.assertFalse(user.is_platform_super_admin())
-
     def test_admin_profile_controls_platform_helper(self):
         user = self.create_user(username="platform-admin")
-        profile = Profile.objects.create(user=user, role=Profile.Role.ADMIN)
-        AdminProfile.objects.create(profile=profile)
+        AdminProfile.objects.create(user=user, role=Profile.Role.ADMIN)
 
         self.assertTrue(user.is_platform_super_admin())
 
@@ -79,8 +79,7 @@ class PlatformPermissionTests(TestCase):
         user = User.objects.create_user(
             username="allowed-platform-admin", password="test-pass-123"
         )
-        profile = Profile.objects.create(user=user, role=Profile.Role.ADMIN)
-        AdminProfile.objects.create(profile=profile)
+        AdminProfile.objects.create(user=user, role=Profile.Role.ADMIN)
 
         self.assertTrue(
             IsPlatformSuperAdmin().has_permission(self.make_request(user), view=None)

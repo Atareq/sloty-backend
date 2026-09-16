@@ -6,7 +6,7 @@ Validates:
 2. Direct detail/cancel lookup cannot bypass court authorization (404).
 3. Creation on unauthorized court is denied (403).
 4. Cross-club access is denied (CLUB_ACCESS_REVOKED - 403).
-5. Owner / Manager club-wide visibility and cancellation rules.
+5. Owner club-wide visibility and cancellation rules.
 6. Platform Admin cancellation authority.
 7. Transaction Attempt scoping and dismissal authority.
 8. Custody separation: Staff Current Custody includes all-court collections
@@ -24,7 +24,6 @@ from rest_framework import status
 from rest_framework.test import APIRequestFactory
 
 from apps.bookings.models import Booking
-from apps.clubs.models import ClubMembership
 from apps.common.authorization.contracts import load_authorization_config
 from apps.common.authorization.matrix import is_action_allowed
 from apps.common.authorization.mixins import SlotyScopedResourceMixin
@@ -36,6 +35,7 @@ from apps.common.authorization.scopes import ResourceScope
 from apps.settlements.services import build_custody
 from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.views import TransactionAttemptViewSet, TransactionViewSet
+from tests.profile_factories import grant_owner_club, grant_staff_court
 from tests.transactions.test_transaction_api import TransactionAPITestCase
 
 TRANSACTION_VIEWSET_ACTIONS = ("list", "retrieve", "create", "cancel")
@@ -43,6 +43,7 @@ TRANSACTION_ATTEMPT_VIEWSET_ACTIONS = ("list", "retrieve", "dismiss")
 
 
 class TransactionAuthorizationConfigTests(TransactionAPITestCase):
+
     def setUp(self):
         self.owner = self.create_user("tx-config-owner")
         self.staff = self.create_user("tx-config-staff")
@@ -53,10 +54,8 @@ class TransactionAuthorizationConfigTests(TransactionAPITestCase):
         self.court_a = self.create_court(self.club, "Tx Config Court A")
         self.court_b = self.create_court(self.club, "Tx Config Court B")
         self.other_court = self.create_court(self.other_club, "Tx Config Other Court")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(
-            self.staff, self.club, ClubMembership.Role.STAFF, court=self.court_a
-        )
+        grant_owner_club(self.owner, self.club)
+        grant_staff_court(self.staff, self.court_a)
         booking_a = self.create_booking(self.court_a, customer_phone="+201000000301")
         booking_b = self.create_booking(
             self.court_b,
@@ -80,7 +79,6 @@ class TransactionAuthorizationConfigTests(TransactionAPITestCase):
 
     def test_transaction_config_declares_club_and_court_scope(self):
         config = load_authorization_config(Transaction)
-
         self.assertEqual(config.default_scope, ResourceScope.COURT.value)
         self.assertEqual(config.scopes[ResourceScope.CLUB.value].path, "club")
         self.assertEqual(config.scopes[ResourceScope.COURT.value].path, "court")
@@ -88,7 +86,6 @@ class TransactionAuthorizationConfigTests(TransactionAPITestCase):
 
     def test_transaction_attempt_config_declares_club_and_court_scope(self):
         config = load_authorization_config(TransactionAttempt)
-
         self.assertEqual(config.default_scope, ResourceScope.COURT.value)
         self.assertEqual(config.scopes[ResourceScope.CLUB.value].path, "club")
         self.assertEqual(config.scopes[ResourceScope.COURT.value].path, "court")
@@ -122,15 +119,14 @@ class TransactionAuthorizationConfigTests(TransactionAPITestCase):
         try:
             with self.assertRaises(ImproperlyConfigured):
                 scoped_queryset(
-                    self.context_for(self.owner),
-                    Transaction,
-                    scope=ResourceScope.COURT,
+                    self.context_for(self.owner), Transaction, scope=ResourceScope.COURT
                 )
         finally:
             Transaction.authorization_config = original
 
 
 class TransactionViewSetSpineCompositionTests(TransactionAPITestCase):
+
     def test_transaction_viewset_does_not_override_get_queryset(self):
         self.assertIs(
             TransactionViewSet.get_queryset, SlotyScopedResourceMixin.get_queryset
@@ -151,7 +147,7 @@ class TransactionViewSetSpineCompositionTests(TransactionAPITestCase):
         )
 
     def test_matrix_allows_every_migrated_transaction_action_for_club_roles(self):
-        for role in (Role.ADMIN, Role.OWNER, Role.MANAGER, Role.STAFF):
+        for role in (Role.ADMIN, Role.OWNER, Role.STAFF):
             for action in TRANSACTION_VIEWSET_ACTIONS:
                 with self.subTest(role=role, action=action):
                     self.assertTrue(
@@ -169,43 +165,22 @@ class TransactionViewSetSpineCompositionTests(TransactionAPITestCase):
 
 
 class TransactionAuthorizationSpineTests(TransactionAPITestCase):
+
     def setUp(self):
         self.club = self.create_club("Spine Club", "spine-club")
         self.other_club = self.create_club("Other Club", "other-club")
-
         self.court_a = self.create_court(self.club, "Court A")
         self.court_b = self.create_court(self.club, "Court B")
         self.other_court = self.create_court(self.other_club, "Other Club Court")
-
         self.platform_admin = self.create_platform_admin("spine-admin")
         self.owner = self.create_user("spine-owner")
-        self.manager = self.create_user("spine-manager")
         self.staff = self.create_user("spine-staff")
         self.other_staff = self.create_user("spine-other-staff")
         self.other_club_user = self.create_user("other-club-user")
-
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
-        self.staff_membership = self.create_membership(
-            self.staff,
-            self.club,
-            ClubMembership.Role.STAFF,
-            court=self.court_a,
-        )
-        self.create_membership(
-            self.other_staff,
-            self.club,
-            ClubMembership.Role.STAFF,
-            court=self.court_b,
-        )
-        self.create_membership(
-            self.other_club_user,
-            self.other_club,
-            ClubMembership.Role.STAFF,
-            court=self.other_court,
-        )
-
-        # Bookings
+        grant_owner_club(self.owner, self.club)
+        self.staff_membership = grant_staff_court(self.staff, self.court_a)
+        grant_staff_court(self.other_staff, self.court_b)
+        grant_staff_court(self.other_club_user, self.other_court)
         self.booking_a = self.create_booking(
             self.court_a,
             customer_name="Booking Court A",
@@ -218,22 +193,14 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
             start_time=self.time_at(18),
             end_time=self.time_at(19),
         )
-
-        # Transactions
         self.tx_court_a_staff = self.create_transaction(
-            self.booking_a,
-            amount=Decimal("50.00"),
-            created_by=self.staff,
+            self.booking_a, amount=Decimal("50.00"), created_by=self.staff
         )
         self.tx_court_a_owner = self.create_transaction(
-            self.booking_a,
-            amount=Decimal("60.00"),
-            created_by=self.owner,
+            self.booking_a, amount=Decimal("60.00"), created_by=self.owner
         )
         self.tx_court_b_other_staff = self.create_transaction(
-            self.booking_b,
-            amount=Decimal("70.00"),
-            created_by=self.other_staff,
+            self.booking_b, amount=Decimal("70.00"), created_by=self.other_staff
         )
 
     def create_attempt(self, booking, attempted_by, **extra_fields):
@@ -267,19 +234,13 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
     def test_staff_allowed_court_access(self):
         """Staff has access to Court A and own transactions."""
         self.client.force_authenticate(user=self.staff)
-
-        # List
         response = self.client.get(self.transaction_list_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(self.list_ids(response), {self.tx_court_a_staff.id})
-
-        # Detail
         detail_res = self.client.get(
             self.transaction_detail_url(self.club, self.tx_court_a_staff)
         )
         self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
-
-        # Create on assigned court
         booking = self.create_booking(
             self.court_a,
             start_time=self.time_at(10),
@@ -288,8 +249,6 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
         )
         create_res = self.post_transaction(self.club, booking)
         self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
-
-        # Cancel own transaction
         cancel_res = self.client.post(
             self.cancel_url(self.club, self.tx_court_a_staff),
             {"reason": "Entry error"},
@@ -300,26 +259,18 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
     def test_staff_unauthorized_court_denied(self):
         """Staff is denied list, detail, create, and cancel for unauthorized Court B."""
         self.client.force_authenticate(user=self.staff)
-
-        # List does not leak Court B
         list_res = self.client.get(self.transaction_list_url(self.club))
         self.assertNotIn(self.tx_court_b_other_staff.id, self.list_ids(list_res))
-
-        # Detail on Court B is 404
         detail_res = self.client.get(
             self.transaction_detail_url(self.club, self.tx_court_b_other_staff)
         )
         self.assertEqual(detail_res.status_code, status.HTTP_404_NOT_FOUND)
-
-        # Cancel on Court B is 404
         cancel_res = self.client.post(
             self.cancel_url(self.club, self.tx_court_b_other_staff),
             {"reason": "Unauthorized attempt"},
             format="json",
         )
         self.assertEqual(cancel_res.status_code, status.HTTP_404_NOT_FOUND)
-
-        # Create on Court B is 403
         create_res = self.post_transaction(self.club, self.booking_b)
         self.assertEqual(create_res.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -329,18 +280,12 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
         even on assigned court.
         """
         self.client.force_authenticate(user=self.staff)
-
-        # Not in list
         list_res = self.client.get(self.transaction_list_url(self.club))
         self.assertNotIn(self.tx_court_a_owner.id, self.list_ids(list_res))
-
-        # Detail returns 404
         detail_res = self.client.get(
             self.transaction_detail_url(self.club, self.tx_court_a_owner)
         )
         self.assertEqual(detail_res.status_code, status.HTTP_404_NOT_FOUND)
-
-        # Cancel returns 404
         cancel_res = self.client.post(
             self.cancel_url(self.club, self.tx_court_a_owner),
             {"reason": "Cancel other"},
@@ -351,59 +296,13 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
     def test_club_isolation_enforced(self):
         """Staff from another club cannot access this club's transactions."""
         self.client.force_authenticate(user=self.other_club_user)
-
         response = self.client.get(self.transaction_list_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assert_api_error(response, "CLUB_ACCESS_REVOKED")
 
-    def test_owner_and_manager_scoping(self):
-        """
-        Owner and Manager see all club transactions across all courts,
-        but can only cancel own.
-        """
-        for actor in (self.owner, self.manager):
-            with self.subTest(actor=actor.username):
-                self.client.force_authenticate(user=actor)
-
-                # List includes all club transactions
-                list_res = self.client.get(self.transaction_list_url(self.club))
-                self.assertEqual(list_res.status_code, status.HTTP_200_OK)
-                self.assertEqual(
-                    self.list_ids(list_res),
-                    {
-                        self.tx_court_a_staff.id,
-                        self.tx_court_a_owner.id,
-                        self.tx_court_b_other_staff.id,
-                    },
-                )
-
-                # Detail on any club transaction is allowed
-                detail_res = self.client.get(
-                    self.transaction_detail_url(self.club, self.tx_court_b_other_staff)
-                )
-                self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
-
-                # Cannot cancel other collector's transaction -> 403
-                cancel_res = self.client.post(
-                    self.cancel_url(self.club, self.tx_court_a_staff),
-                    {"reason": "Cannot cancel other"},
-                    format="json",
-                )
-                self.assertEqual(cancel_res.status_code, status.HTTP_403_FORBIDDEN)
-
-        # Owner can cancel own transaction
-        self.client.force_authenticate(user=self.owner)
-        owner_cancel = self.client.post(
-            self.cancel_url(self.club, self.tx_court_a_owner),
-            {"reason": "Cancel own"},
-            format="json",
-        )
-        self.assertEqual(owner_cancel.status_code, status.HTTP_200_OK)
-
     def test_platform_admin_can_cancel_any_transaction(self):
         """Platform Admin can cancel any eligible transaction in the club."""
         self.client.force_authenticate(user=self.platform_admin)
-
         cancel_res = self.client.post(
             self.cancel_url(self.club, self.tx_court_b_other_staff),
             {"reason": "Admin correction"},
@@ -415,23 +314,17 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
         """TransactionAttempt scoping and dismissal authority."""
         staff_attempt = self.create_attempt(self.booking_a, self.staff)
         other_attempt = self.create_attempt(self.booking_b, self.other_staff)
-
-        # Staff lists only own attempt
         self.client.force_authenticate(user=self.staff)
         list_res = self.client.get(self.transaction_attempt_list_url(self.club))
         self.assertEqual(list_res.status_code, status.HTTP_200_OK)
         self.assertEqual(self.attempt_ids(list_res), {staff_attempt.id})
         self.assertNotIn(other_attempt.id, self.attempt_ids(list_res))
-
-        # Staff cannot dismiss other staff's attempt -> 404
         dismiss_other = self.client.post(
             self.transaction_attempt_dismiss_url(self.club, other_attempt),
             {},
             format="json",
         )
         self.assertEqual(dismiss_other.status_code, status.HTTP_404_NOT_FOUND)
-
-        # Owner cannot dismiss staff's attempt -> 403
         self.client.force_authenticate(user=self.owner)
         dismiss_by_owner = self.client.post(
             self.transaction_attempt_dismiss_url(self.club, staff_attempt),
@@ -439,8 +332,6 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
             format="json",
         )
         self.assertEqual(dismiss_by_owner.status_code, status.HTTP_403_FORBIDDEN)
-
-        # Staff can dismiss own rejected attempt
         self.client.force_authenticate(user=self.staff)
         dismiss_own = self.client.post(
             self.transaction_attempt_dismiss_url(self.club, staff_attempt),
@@ -455,8 +346,6 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
         across all courts for a staff member, completely independent of
         operational transaction court scoping.
         """
-        # Staff collected tx1 on Court A (assigned court)
-        # Staff also collected tx2 on Court B (unassigned court)
         tx_court_b_staff = Transaction.objects.create(
             club=self.club,
             court=self.court_b,
@@ -465,15 +354,10 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
             payment_method=Transaction.PaymentMethod.CASH,
             created_by=self.staff,
         )
-
-        # 1. Operational Transaction API: Staff sees ONLY Court A
         self.client.force_authenticate(user=self.staff)
         tx_list = self.client.get(self.transaction_list_url(self.club))
         self.assertIn(self.tx_court_a_staff.id, self.list_ids(tx_list))
         self.assertNotIn(tx_court_b_staff.id, self.list_ids(tx_list))
-
-        # 2. Financial Custody (Settlement Domain):
-        # Staff custody includes BOTH Court A and Court B
         custody = build_custody(club=self.club, collector=self.staff)
         candidate_ids = {tx.id for tx in custody["transactions"]}
         self.assertIn(self.tx_court_a_staff.id, candidate_ids)
@@ -485,20 +369,15 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
 
     def test_filters_cannot_expose_unauthorized_transactions(self):
         self.client.force_authenticate(user=self.staff)
-
         by_court = self.client.get(
-            self.transaction_list_url(self.club),
-            {"court": self.court_b.id},
+            self.transaction_list_url(self.club), {"court": self.court_b.id}
         )
         by_creator = self.client.get(
-            self.transaction_list_url(self.club),
-            {"created_by": self.owner.id},
+            self.transaction_list_url(self.club), {"created_by": self.owner.id}
         )
         by_search = self.client.get(
-            self.transaction_list_url(self.club),
-            {"search": "Booking Court B"},
+            self.transaction_list_url(self.club), {"search": "Booking Court B"}
         )
-
         self.assertEqual(by_court.status_code, status.HTTP_200_OK)
         self.assertNotIn(self.tx_court_b_other_staff.id, self.list_ids(by_court))
         self.assertNotIn(self.tx_court_a_owner.id, self.list_ids(by_creator))

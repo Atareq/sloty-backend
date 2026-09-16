@@ -62,8 +62,8 @@ Aggregation / JSON response
 - Optional `court=` may only **narrow** the authorized court queryset. Another club's court → HTTP 403.
 - Optional `staff=` is a `Booking.created_by` report filter. The named user must have active access in this club (`REPORT_STAFF_NOT_IN_CLUB`); it is **not** Settlement collector isolation.
 - Do not apply Transaction Staff `created_by` narrowing or Settlement collector narrowing to report totals. Report viewers are financial roles.
-- [`apps/reports/authorization.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/reports/authorization.py) exists only for: Spine source querysets, court-filter 403, and the staff-membership filter rule.
-- Report views use Spine source querysets. They do not use `ClubAccessContext` or a Clubs permission class (no implicit `last_sync_at` updates).
+- [`apps/reports/authorization.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/reports/authorization.py) exists only for: Spine source querysets, court-filter 403, and the staff-in-club filter rule.
+- Report views use Spine source querysets. They do not write presence state.
 
 ## Cross-App Dependencies
 

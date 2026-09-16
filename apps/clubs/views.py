@@ -21,7 +21,7 @@ def scoped_clubs_for_user(user):
     if not user or not user.is_authenticated:
         return Club.objects.none()
     profile = getattr(user, "profile", None)
-    if profile is None:
+    if profile is None or not profile.is_enabled:
         return Club.objects.none()
     if profile.role == Profile.Role.ADMIN:
         return Club.objects.all()
@@ -31,7 +31,7 @@ def scoped_clubs_for_user(user):
     if profile.role == Profile.Role.STAFF:
         staff_profile = getattr(profile, "staff_profile", None)
         return (
-            Club.objects.filter(pk=staff_profile.court.club_id)
+            Club.objects.filter(pk=staff_profile.club_id)
             if staff_profile
             else Club.objects.none()
         )

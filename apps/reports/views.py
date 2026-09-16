@@ -1,3 +1,4 @@
+from drf_spectacular.openapi import AutoSchema
 from drf_spectacular.utils import extend_schema
 from rest_framework.generics import GenericAPIView
 from rest_framework.response import Response
@@ -11,6 +12,14 @@ from apps.reports.serializers import (
 from apps.reports.services import get_court_usage_report
 
 
+class DirectObjectAutoSchema(AutoSchema):
+    """Ensure non-paginated endpoints generate single object schema
+    rather than array."""
+
+    def _is_list_view(self, serializer=None) -> bool:
+        return False
+
+
 class CourtUsageReportAPIView(ClubScopedViewMixin, GenericAPIView):
     """
     Read-model court usage report. There is no Report table, so this
@@ -22,6 +31,8 @@ class CourtUsageReportAPIView(ClubScopedViewMixin, GenericAPIView):
     permission_classes = (SlotyBasePermission,)
     permission_view_name = "CourtUsageReportViewSet"
     action = "list"
+    pagination_class = None
+    schema = DirectObjectAutoSchema()
     query_serializer_class = CourtUsageReportQuerySerializer
     response_serializer_class = CourtUsageReportResponseSerializer
 

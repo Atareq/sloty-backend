@@ -6,8 +6,8 @@ ClubPlayer    — club-local representation of a player, stored as immutable
 Identity boundary:
   PlayerProfile is GLOBAL — no authorization_config. Phone uniqueness is the
   identity constraint; it is not club-scoped at the row level. Access is gated
-  by club membership at the API layer (club membership required to call any
-  endpoint), but the profile row itself is shared across clubs.
+  by Profile scope at the API layer (club access required to call any
+  endpoint), but the player profile row itself is shared across clubs.
 
   ClubPlayer IS club-scoped. It declares authorization_config with
   default_scope="club" and is served exclusively through the Authorization
@@ -52,7 +52,7 @@ class PlayerProfile(models.Model):
 
     This model does NOT declare authorization_config because it has no club
     boundary at the DB row level. Access control is enforced at the API layer
-    via club membership checks.
+    via Profile club-scope checks.
     """
 
     phone_number = PhoneNumberField(

@@ -23,7 +23,7 @@ class RequestAccessContext:
     owner_profile: Optional[Any] = None
     staff_profile: Optional[Any] = None
     court: Optional[Any] = None
-    is_platform_admin: bool = False
+    court_ids: tuple[Any, ...] = ()
 
     def __post_init__(self):
         if self.profile is None:

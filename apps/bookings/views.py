@@ -362,7 +362,7 @@ class BookingAttemptViewSet(
 
     def filter_scoped_queryset(self, queryset):
         context = self.get_access_context()
-        if context.role == Role.STAFF and not context.is_platform_admin:
+        if context.role == Role.STAFF:
             queryset = queryset.filter(attempted_by=context.user)
         return queryset.order_by("-created", "-id")
 

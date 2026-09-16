@@ -15,6 +15,12 @@ class User(AbstractUser):
 
     REQUIRED_FIELDS = ["email"]
 
+    @property
+    def role(self):
+        """Convenient access to the single stored application role."""
+        profile = getattr(self, "profile", None)
+        return profile.role if profile else None
+
     def is_platform_super_admin(self) -> bool:
         profile = getattr(self, "profile", None)
-        return bool(profile and profile.role == "ADMIN")
+        return bool(profile and profile.is_enabled and profile.role == "ADMIN")

@@ -24,9 +24,12 @@ CLUB_ACCESS_REVOKED_MESSAGE = _("Your access to the selected club is no longer a
 def _get_profile_scope(user):
     """Load the Profile graph once for authorization resolution."""
     return (
-        Profile.objects.select_related("owner_profile", "staff_profile__court")
-        .prefetch_related("owner_profile__clubs")
-        .filter(user_id=user.pk)
+        Profile.objects.select_related("owner_profile", "staff_profile__club")
+        .prefetch_related(
+            "owner_profile__clubs",
+            "staff_profile__court_accesses__court",
+        )
+        .filter(user_id=user.pk, is_enabled=True)
         .first()
     )
 
@@ -50,8 +53,8 @@ def resolve_club_scope(
     1. The URL club scope is authoritative. Client payloads cannot override it.
     2. Revoked or missing access raises standard CLUB_ACCESS_REVOKED (HTTP 403).
     3. Caches context on request._access_context to eliminate duplicate DB queries.
-    4. Does NOT preload staff court assignments. Court is resolved only when
-       explicitly targeted.
+    4. Preloads staff court assignments; the targeted Court is resolved only
+       when explicitly requested.
     """
     cached = getattr(request, "_access_context", None)
     if cached is not None and cached.club and cached.club.slug == club_slug:
@@ -75,7 +78,6 @@ def resolve_club_scope(
         )
 
     role = profile.role
-    is_platform_admin = role == Role.ADMIN
     owner_profile = getattr(profile, "owner_profile", None)
     staff_profile = getattr(profile, "staff_profile", None)
     if role == Role.OWNER and (
@@ -88,7 +90,7 @@ def resolve_club_scope(
             details={"club_slug": club.slug},
         )
     if role == Role.STAFF and (
-        staff_profile is None or staff_profile.court.club_id != club.pk
+        staff_profile is None or staff_profile.club_id != club.pk
     ):
         raise SlotyAPIException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -112,6 +114,12 @@ def resolve_club_scope(
 
         resolved_court = get_object_or_404(Court, club=club, pk=court_id)
 
+    court_ids: tuple[Any, ...] = ()
+    if role == Role.STAFF and staff_profile is not None:
+        court_ids = tuple(
+            access.court_id for access in staff_profile.court_accesses.all()
+        )
+
     context = RequestAccessContext(
         user=user,
         role=role,
@@ -120,7 +128,7 @@ def resolve_club_scope(
         owner_profile=owner_profile,
         staff_profile=staff_profile,
         court=resolved_court,
-        is_platform_admin=is_platform_admin,
+        court_ids=court_ids,
     )
 
     request._access_context = context
@@ -147,7 +155,6 @@ def resolve_global_scope(request) -> RequestAccessContext:
             code="PROFILE_REQUIRED",
             message=_("An application profile is required."),
         )
-    is_platform_admin = profile.role == Role.ADMIN
 
     context = RequestAccessContext(
         user=user,
@@ -157,7 +164,6 @@ def resolve_global_scope(request) -> RequestAccessContext:
         owner_profile=getattr(profile, "owner_profile", None),
         staff_profile=getattr(profile, "staff_profile", None),
         court=None,
-        is_platform_admin=is_platform_admin,
     )
 
     request._access_context = context

@@ -22,7 +22,6 @@ class AuditLog(models.Model):
             "SETTLEMENT_MARKED_SETTLED",
             _("Settlement marked settled"),
         )
-        MEMBERSHIP_DELETED = "MEMBERSHIP_DELETED", _("Membership deleted")
 
     club = models.ForeignKey(
         Club,
@@ -54,7 +53,7 @@ class AuditLog(models.Model):
     # Authorization Spine v2 resource-query contract
     # (apps/common/authorization/contracts.py). Audit is a club-scoped read
     # model: every event belongs to one club. Court is an optional event
-    # attribute (nullable for membership deletes and some settlements), not
+    # attribute (nullable for club-wide settlements), not
     # a security boundary. Do not apply Booking/Transaction court scope or
     # Settlement collector scope to AuditLog rows.
     authorization_config = {

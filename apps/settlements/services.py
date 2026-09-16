@@ -34,7 +34,6 @@ from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers, status
-from rest_framework.exceptions import PermissionDenied
 
 from apps.audit.services import record_audit_log, settlement_audit_snapshot
 from apps.bookings.identity import (
@@ -72,26 +71,12 @@ def get_user_display_name(user):
     return full_name or user.username
 
 
-def validate_collected_by_membership(*, access, collected_by, actor):
-    if actor and collected_by.id == actor.id and access.is_platform_admin:
-        return
-    if not access.user_has_active_membership(collected_by):
-        raise serializers.ValidationError(
-            {"collected_by": "User must have an active membership in this club."}
-        )
-    if hasattr(access, "user_has_active_membership"):
-        if actor and collected_by.id == actor.id and access.is_platform_admin:
-            return
-        if not access.user_has_active_membership(collected_by):
-            raise serializers.ValidationError(
-                {"collected_by": "User must have an active membership in this club."}
-            )
-    else:
-        from apps.settlements.authorization import (
-            validate_collected_by_membership as auth_validate_collected_by,
-        )
+def validate_collected_by_profile(*, access, collected_by, actor):
+    from apps.settlements.authorization import (
+        validate_collected_by_profile as auth_validate_collected_by,
+    )
 
-        auth_validate_collected_by(context=access, collector=collected_by)
+    auth_validate_collected_by(context=access, collector=collected_by)
 
 
 # =============================================================================
@@ -109,33 +94,17 @@ def validate_preview_authority(*, access, actor, collector):
     Rules:
     - Staff may ONLY preview themselves (actor.id == collector.id).
     - Owner and Platform Admin may preview any collector.
-    - Collector must have active membership in the club (except Platform Admin
+    - Collector must have enabled Profile scope in the club (except Platform Admin
       self-preview).
 
     This function only performs authorization. It does NOT query transactions
     or calculate custody.
     """
-    validate_collected_by_membership(
-        access=access,
-        collected_by=collector,
-        actor=actor,
+    from apps.settlements.authorization import (
+        validate_preview_authority as auth_validate_preview,
     )
-    if not access.can_preview_settlement_for_user(collector):
-        raise PermissionDenied("You cannot preview settlements for this user.")
-    if hasattr(access, "can_preview_settlement_for_user"):
-        validate_collected_by_membership(
-            access=access,
-            collected_by=collector,
-            actor=actor,
-        )
-        if not access.can_preview_settlement_for_user(collector):
-            raise PermissionDenied("You cannot preview settlements for this user.")
-    else:
-        from apps.settlements.authorization import (
-            validate_preview_authority as auth_validate_preview,
-        )
 
-        auth_validate_preview(context=access, collector=collector)
+    auth_validate_preview(context=access, collector=collector)
 
 
 def validate_settlement_authority(*, access, actor, collector, court=None):
@@ -149,39 +118,17 @@ def validate_settlement_authority(*, access, actor, collector, court=None):
     - Actor must have settlement creation permission in the club.
     - Staff cannot settle.
     - Self-settlement approval is forbidden unless Owner or Platform Admin.
-    - Collector must have active membership in the club.
+    - Collector must have enabled Profile scope in the club.
     """
+    from apps.settlements.authorization import (
+        validate_settlement_authority as auth_validate_settlement,
+    )
+
     if court is not None and court.club_id != access.club.id:
         raise serializers.ValidationError(
             {"court": "Court must belong to the selected club."}
         )
-    if hasattr(access, "can_create_settlement"):
-        if not access.can_create_settlement(court):
-            raise PermissionDenied("You cannot manage settlements for this club.")
-
-        validate_collected_by_membership(
-            access=access,
-            collected_by=collector,
-            actor=actor,
-        )
-        if (
-            actor
-            and collector.id == actor.id
-            and not (access.is_platform_admin or access.is_owner)
-        ):
-            raise SlotyAPIException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                code="SELF_SETTLEMENT_APPROVAL_FORBIDDEN",
-                message=SELF_APPROVAL_MESSAGE,
-            )
-        if not access.can_approve_settlement_for_user(collector):
-            raise PermissionDenied("You cannot approve settlements for this user.")
-    else:
-        from apps.settlements.authorization import (
-            validate_settlement_authority as auth_validate_settlement,
-        )
-
-        auth_validate_settlement(context=access, collector=collector)
+    auth_validate_settlement(context=access, collector=collector)
 
 
 # =============================================================================
@@ -377,9 +324,11 @@ def build_settlement_summary(
     queryset,
     court=None,
 ):
+    from apps.settlements.authorization import can_approve_collector
+
     transactions = list(queryset)
     custody = summarize_current_custody_transactions(transactions)
-    can_approve = access.can_approve_settlement_for_user(collected_by)
+    can_approve = can_approve_collector(access, collected_by.id)
     return {
         "club": access.club.id,
         "collected_by": collected_by.id,
@@ -492,16 +441,9 @@ def preview_custody(
             code="NO_UNSETTLED_TRANSACTIONS",
             message=NO_UNSETTLED_TRANSACTIONS_MESSAGE,
         )
-    can_approve = access.can_approve_settlement_for_user(collector)
-    can_approve = (
-        access.can_approve_settlement_for_user(collector)
-        if hasattr(access, "can_approve_settlement_for_user")
-        else None
-    )
-    if can_approve is None:
-        from apps.settlements.authorization import can_approve_collector
+    from apps.settlements.authorization import can_approve_collector
 
-        can_approve = can_approve_collector(access, collector.id)
+    can_approve = can_approve_collector(access, collector.id)
     return {
         "club": access.club.id,
         "collected_by": collector.id,

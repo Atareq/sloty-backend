@@ -57,9 +57,9 @@ Current Custody and Settlement are financially scoped by CLUB + optional COLLECT
 not by COURT. This is intentionally different from operational Transaction and
 Booking authorization.
 
-Operational transaction and booking authorization (e.g. `ClubAccessContext.scoped_transactions_queryset`)
+Operational transaction and booking authorization (Authorization Spine `scoped_queryset`)
 remains court-scoped for Staff: staff can only view transactions for bookings on
-their assigned court.
+their assigned courts through StaffProfile and StaffCourtAccess.
 
 However, financial custody represents physical or accountable money held by a collector
 for the Club. A collector holding cash holds it for the entire club, regardless of which

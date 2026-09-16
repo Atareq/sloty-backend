@@ -1,5 +1,11 @@
 # ADR-001: Player Identity and Booking Link Architecture
 
+> Operational identity sections reflect the September 13 migration state and are
+> superseded by the September 16 Profile inheritance baseline. The customer
+> identity decision remains valid. Current account roles and club/court scope
+> are documented in `apps/profiles/AGENTS.md`; historical objections to the
+> operational child profiles below no longer apply.
+
 **Status:** Accepted
 **Date:** 2026-09-13
 **Deciders:** Backend Engineering

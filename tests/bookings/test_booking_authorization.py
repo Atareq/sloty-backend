@@ -23,7 +23,6 @@ from rest_framework.test import APIRequestFactory
 
 from apps.bookings.models import Booking, BookingAttempt
 from apps.bookings.views import BookingAttemptViewSet, BookingViewSet
-from apps.clubs.models import ClubMembership
 from apps.common.authorization.contracts import load_authorization_config
 from apps.common.authorization.matrix import is_action_allowed
 from apps.common.authorization.mixins import SlotyScopedResourceMixin
@@ -33,6 +32,7 @@ from apps.common.authorization.resolver import resolve_club_scope
 from apps.common.authorization.roles import Role
 from apps.common.authorization.scopes import ResourceScope
 from tests.bookings.test_booking_api import BookingAPITestCase
+from tests.profile_factories import grant_owner_club, grant_staff_court
 
 BOOKING_VIEWSET_ACTIONS = (
     "list",
@@ -49,9 +49,7 @@ BOOKING_VIEWSET_ACTIONS = (
     "recurrence_next",
     "cancellation_preview",
 )
-
 BOOKING_ATTEMPT_VIEWSET_ACTIONS = ("list", "retrieve", "dismiss")
-
 LIFECYCLE_POST_ACTIONS = (
     "cancel",
     "cancellation-preview",
@@ -64,6 +62,7 @@ LIFECYCLE_POST_ACTIONS = (
 
 
 class BookingAuthorizationConfigTests(BookingAPITestCase):
+
     def setUp(self):
         self.owner = self.create_user("booking-config-owner")
         self.staff = self.create_user("booking-config-staff")
@@ -75,13 +74,9 @@ class BookingAuthorizationConfigTests(BookingAPITestCase):
         self.court_a = self.create_court(self.club, "Config Court A")
         self.court_b = self.create_court(self.club, "Config Court B")
         self.other_court = self.create_court(self.other_club, "Config Other Court")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(
-            self.staff, self.club, ClubMembership.Role.STAFF, court=self.court_a
-        )
-        self.create_membership(
-            self.other_staff, self.club, ClubMembership.Role.STAFF, court=self.court_a
-        )
+        grant_owner_club(self.owner, self.club)
+        grant_staff_court(self.staff, self.court_a)
+        grant_staff_court(self.other_staff, self.court_a)
         self.owner_booking = self.create_booking(
             self.court_a, created_by=self.owner, customer_phone="+201000000101"
         )
@@ -99,14 +94,11 @@ class BookingAuthorizationConfigTests(BookingAPITestCase):
         request = APIRequestFactory().get(f"/api/v1/clubs/{self.club.slug}/bookings/")
         request.user = user
         return resolve_club_scope(
-            request,
-            club_slug=self.club.slug,
-            court_id=court.pk if court else None,
+            request, club_slug=self.club.slug, court_id=court.pk if court else None
         )
 
     def test_booking_config_declares_club_and_court_scope(self):
         config = load_authorization_config(Booking)
-
         self.assertEqual(config.default_scope, ResourceScope.COURT.value)
         self.assertEqual(config.scopes[ResourceScope.CLUB.value].path, "club")
         self.assertEqual(config.scopes[ResourceScope.COURT.value].path, "court")
@@ -116,7 +108,6 @@ class BookingAuthorizationConfigTests(BookingAPITestCase):
 
     def test_booking_attempt_config_declares_club_and_court_scope(self):
         config = load_authorization_config(BookingAttempt)
-
         self.assertEqual(config.default_scope, ResourceScope.COURT.value)
         self.assertEqual(config.scopes[ResourceScope.CLUB.value].path, "club")
         self.assertEqual(config.scopes[ResourceScope.COURT.value].path, "court")
@@ -126,15 +117,10 @@ class BookingAuthorizationConfigTests(BookingAPITestCase):
         queryset = scoped_queryset(
             self.context_for(self.owner), Booking, scope=ResourceScope.CLUB
         )
-
         ids = set(queryset.values_list("id", flat=True))
         self.assertSetEqual(
             ids,
-            {
-                self.owner_booking.id,
-                self.staff_booking.id,
-                self.other_court_booking.id,
-            },
+            {self.owner_booking.id, self.staff_booking.id, self.other_court_booking.id},
         )
         self.assertNotIn(self.other_club_booking.id, ids)
 
@@ -142,7 +128,6 @@ class BookingAuthorizationConfigTests(BookingAPITestCase):
         queryset = scoped_queryset(
             self.context_for(self.staff), Booking, scope=ResourceScope.COURT
         )
-
         ids = set(queryset.values_list("id", flat=True))
         self.assertSetEqual(ids, {self.owner_booking.id, self.staff_booking.id})
         self.assertNotIn(self.other_court_booking.id, ids)
@@ -151,7 +136,6 @@ class BookingAuthorizationConfigTests(BookingAPITestCase):
         queryset = scoped_queryset(
             self.context_for(self.staff), Booking, scope=ResourceScope.COURT
         )
-
         self.assertIn(self.owner_booking.id, queryset.values_list("id", flat=True))
 
     def test_missing_booking_configuration_never_falls_back_to_unscoped_manager(self):
@@ -167,6 +151,7 @@ class BookingAuthorizationConfigTests(BookingAPITestCase):
 
 
 class BookingViewSetSpineCompositionTests(BookingAPITestCase):
+
     def test_booking_viewset_does_not_override_get_queryset(self):
         self.assertIs(
             BookingViewSet.get_queryset, SlotyScopedResourceMixin.get_queryset
@@ -184,7 +169,7 @@ class BookingViewSetSpineCompositionTests(BookingAPITestCase):
         )
 
     def test_matrix_allows_every_migrated_booking_action_for_club_roles(self):
-        for role in (Role.ADMIN, Role.OWNER, Role.MANAGER, Role.STAFF):
+        for role in (Role.ADMIN, Role.OWNER, Role.STAFF):
             for action in BOOKING_VIEWSET_ACTIONS:
                 with self.subTest(role=role, action=action):
                     self.assertTrue(is_action_allowed(role, "BookingViewSet", action))
@@ -196,10 +181,10 @@ class BookingViewSetSpineCompositionTests(BookingAPITestCase):
 
 
 class BookingAuthorizationAPITests(BookingAPITestCase):
+
     def setUp(self):
         self.platform_admin = self.create_platform_admin("booking-auth-admin")
         self.owner = self.create_user("booking-auth-owner")
-        self.manager = self.create_user("booking-auth-manager")
         self.staff = self.create_user("booking-auth-staff")
         self.peer_staff = self.create_user("booking-auth-peer-staff")
         self.outsider = self.create_user("booking-auth-outsider")
@@ -210,17 +195,10 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
         self.court = self.create_court(self.club, "Auth Court")
         self.same_club_other_court = self.create_court(self.club, "Auth Other Court")
         self.other_court = self.create_court(self.other_club, "Auth External Court")
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
-        self.create_membership(
-            self.staff, self.club, ClubMembership.Role.STAFF, court=self.court
-        )
-        self.create_membership(
-            self.peer_staff, self.club, ClubMembership.Role.STAFF, court=self.court
-        )
-        self.create_membership(
-            self.outsider, self.other_club, ClubMembership.Role.OWNER
-        )
+        grant_owner_club(self.owner, self.club)
+        grant_staff_court(self.staff, self.court)
+        grant_staff_court(self.peer_staff, self.court)
+        grant_owner_club(self.outsider, self.other_club)
         self.owner_booking = self.create_booking(
             self.court, created_by=self.owner, customer_phone="+201000000201"
         )
@@ -267,46 +245,36 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
 
     def test_outsider_cannot_list_selected_club_bookings(self):
         self.client.force_authenticate(user=self.outsider)
-
         response = self.client.get(self.booking_list_url(self.club))
-
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.data["code"], "CLUB_ACCESS_REVOKED")
 
     def test_staff_lists_assigned_court_bookings_including_peer_created(self):
         self.client.force_authenticate(user=self.staff)
-
         response = self.client.get(self.booking_list_url(self.club))
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
-            self.list_ids(response),
-            {self.owner_booking.id, self.staff_booking.id},
+            self.list_ids(response), {self.owner_booking.id, self.staff_booking.id}
         )
         self.assertNotIn(self.other_court_booking.id, self.list_ids(response))
 
     def test_staff_can_retrieve_peer_booking_on_assigned_court(self):
         self.client.force_authenticate(user=self.peer_staff)
-
         response = self.client.get(
             self.booking_detail_url(self.club, self.staff_booking)
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["id"], self.staff_booking.id)
         self.assertEqual(
-            response.data["customer_name"],
-            self.staff_booking.club_player.display_name,
+            response.data["customer_name"], self.staff_booking.club_player.display_name
         )
         self.assertIn("customer_phone", response.data)
 
     def test_staff_cannot_retrieve_other_court_booking(self):
         self.client.force_authenticate(user=self.staff)
-
         response = self.client.get(
             self.booking_detail_url(self.club, self.other_court_booking)
         )
-
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_staff_lifecycle_actions_on_other_court_are_404(self):
@@ -329,7 +297,6 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
                     payload,
                 )
                 self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-
         self.client.force_authenticate(user=self.staff)
         next_response = self.client.get(
             self.booking_lifecycle_url(
@@ -346,9 +313,7 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
             customer_phone="+201000000205",
         )
         self.create_transaction(booking, amount=booking.total_price)
-
         response = self.post_lifecycle(self.club, booking, "complete", self.peer_staff)
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.COMPLETED)
@@ -380,7 +345,6 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
             requested_end=self.time_at(23),
         )
         self.client.force_authenticate(user=self.staff)
-
         list_response = self.client.get(self.booking_attempt_list_url(self.club))
         peer_detail = self.client.get(
             self.booking_attempt_detail_url(self.club, peer_attempt)
@@ -389,11 +353,8 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
             self.booking_attempt_detail_url(self.club, other_court_own_attempt)
         )
         dismiss_peer = self.client.post(
-            self.booking_attempt_dismiss_url(self.club, peer_attempt),
-            {},
-            format="json",
+            self.booking_attempt_dismiss_url(self.club, peer_attempt), {}, format="json"
         )
-
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             {item["id"] for item in list_response.data["results"]}, {own_attempt.id}
@@ -405,17 +366,13 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
     def test_owner_can_list_peer_attempts_but_cannot_dismiss_them(self):
         attempt = self.create_attempt(self.court, self.staff)
         self.client.force_authenticate(user=self.owner)
-
         list_response = self.client.get(self.booking_attempt_list_url(self.club))
         detail_response = self.client.get(
             self.booking_attempt_detail_url(self.club, attempt)
         )
         dismiss_response = self.client.post(
-            self.booking_attempt_dismiss_url(self.club, attempt),
-            {},
-            format="json",
+            self.booking_attempt_dismiss_url(self.club, attempt), {}, format="json"
         )
-
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertIn(
             attempt.id, {item["id"] for item in list_response.data["results"]}

@@ -27,6 +27,7 @@ class Booking(models.Model):
         ADMIN_CORRECTION = "ADMIN_CORRECTION", _("Admin correction")
         RECURRING = "RECURRING", _("Recurring")
 
+    # For identifying the terminateed statuses by the system
     class LastStatusActorType(models.TextChoices):
         INTERNAL_USER = "INTERNAL_USER", _("Internal user")
         SYSTEM = "SYSTEM", _("System")

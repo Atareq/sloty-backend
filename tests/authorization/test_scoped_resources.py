@@ -13,7 +13,7 @@ from apps.common.authorization.querysets import scoped_queryset
 from apps.common.authorization.resolver import resolve_club_scope
 from apps.common.authorization.scopes import ResourceScope
 from apps.courts.models import Court
-from apps.profiles.models import OwnerProfile, Profile, StaffProfile
+from apps.profiles.models import OwnerProfile, Profile, StaffCourtAccess, StaffProfile
 
 
 class CourtSerializer(serializers.ModelSerializer):
@@ -56,13 +56,17 @@ class AuthorizationSpineV2TestCase(APITestCase):
         self.owner = User.objects.create_user(
             username="scope-owner", password="password"
         )
-        owner_profile = Profile.objects.create(user=self.owner, role=Profile.Role.OWNER)
-        OwnerProfile.objects.create(profile=owner_profile).clubs.add(self.club_a)
+        owner_profile = OwnerProfile.objects.create(
+            user=self.owner, role=Profile.Role.OWNER
+        )
+        owner_profile.clubs.add(self.club_a)
         self.staff = User.objects.create_user(
             username="scope-staff", password="password"
         )
-        staff_profile = Profile.objects.create(user=self.staff, role=Profile.Role.STAFF)
-        StaffProfile.objects.create(profile=staff_profile, court=self.court_a1)
+        staff = StaffProfile.objects.create(
+            user=self.staff, role=Profile.Role.STAFF, club=self.club_a
+        )
+        StaffCourtAccess.objects.create(staff_profile=staff, court=self.court_a1)
 
     def context_for(self, user, club=None, court=None):
         club = club or self.club_a

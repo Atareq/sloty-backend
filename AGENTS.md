@@ -90,11 +90,11 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 | Migration | Courts ✅ · Transactions (auth Spine v2) ✅ · Settlements (auth Spine v2) ✅ · Identity Foundation ✅ · Bookings (auth Spine v2) ✅ · Dashboard (auth Spine) ✅ · Audit (auth Spine v2) ✅ · Reports (auth Spine) ✅ · Clubs (auth Spine v2) ✅ · Auth & Lifecycle Hardening (Sprint 15/16) ✅ · Authorization Matrix & Compatibility Cleanup (Sprint 17) ✅ |
 | Migration | Courts ✅ · Transactions (auth Spine v2) ✅ · Settlements (auth Spine v2) ✅ · Identity Foundation ✅ · Bookings (auth Spine v2) ✅ · Dashboard (auth Spine) ✅ · Audit (auth Spine v2) ✅ · Reports (auth Spine) ✅ · Clubs (auth Spine v2) ✅ · Auth & Lifecycle Hardening (Sprint 15/16) ✅ · Authorization Matrix & Compatibility Cleanup (Sprint 17) ✅ · Booking Identity Finalization (Sprint 18) ✅ · Cross-Domain Consistency (Sprint 19) ✅ |
 
-### Transitional runtime notes
+### Current runtime notes
 
 - Spine code: [`apps/common/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/)
-- Club scope is derived from the current `Profile`: an owner through `OwnerProfile.clubs`, staff through `StaffProfile.court`, and an admin by `Profile.role == ADMIN`. `ClubAccessContext` is retained strictly as a duck-typed direct-service test fixture; it is not an authorization source.
-- `POST /api/v1/me/sync-heartbeat/` is a compatibility acknowledgement only. Authorization mixins, ordinary API traffic, login, refresh, `/me`, and scope resolution never write presence state.
+- Club scope is derived from the current `Profile`: an owner through `OwnerProfile.clubs`, staff through `StaffProfile.club` and `StaffCourtAccess`, and an admin by `Profile.role == ADMIN`. `User.profile` is one-to-one. `Profile` is the concrete Django multi-table parent; Owner/Staff/AdminProfile inherit its identity, fields, and common `clean()`/`save()`. Children hold only role-specific data. Disabled profiles grant no resource access.
+- There is no heartbeat/presence API. Authorization mixins, ordinary API traffic, login, refresh, `/me`, and scope resolution never write presence state.
 - **Offline & Reconnect Safety**: Server is authoritative. Reconnect mutations require idempotency keys (`client_request_id`). Duplicate requests return `200 OK` with the existing entity; mismatched payloads return `409 Conflict`. Financial mutations (payments, refunds, settlements) require live server authority and can never be committed offline.
 - **Account and Profile Lifecycle**: `User` is authentication identity; the current `Profile` is application-role authority. A missing or invalid profile scope is denied immediately (`CLUB_ACCESS_REVOKED`), regardless of JWT claims.
 
@@ -109,7 +109,7 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
   - Normalization is handled globally by `sloty_exception_handler`. Never return ad-hoc error dictionaries like `{"booking": "error"}`.
 - **Query Parameter Filtering**:
   - List filters must be declared in domain `filters.py` via `django-filter` `FilterSet` classes.
-  - `FilterSet` classes must not perform permission checks or query memberships.
+  - `FilterSet` classes must not perform permission checks or query club scope.
   - `ViewSet.get_queryset()` must return an already authorized and scoped queryset before filters are applied.
 - **Schema & Documentation**: OpenAPI schema is exposed at `/api/v1/schema/` and Swagger UI at `/api/v1/docs/`.
 
@@ -119,7 +119,7 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 
 - **Transactions**: Multi-model writes and state transitions must be wrapped in `transaction.atomic()`.
 - **Concurrency & Locking**: When concurrent requests can conflict (e.g. booking creation, slot reservation, rescheduling, settlements, transaction cancellation), lock affected rows using `select_for_update()`.
-- **Migrations**: Every model change requires a migration. Avoid data migrations inside schema migration files.
+- **Migrations**: Every model change requires a migration. Avoid data migrations inside schema migration files. The September 2026 pre-release Profile refactor intentionally rebuilt first-party migrations as one `0001_initial.py` per model-bearing app. Recreate development/test databases when adopting this baseline; do not migrate an obsolete database forward or fake its history.
 - **Timezone**: Django `TIME_ZONE = "Africa/Cairo"` with `USE_TZ = True`. Datetimes are stored as UTC in the database and translated to local Cairo time for business logic.
 
 ---

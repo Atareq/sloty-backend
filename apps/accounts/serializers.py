@@ -1,5 +1,6 @@
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers, status
 from rest_framework_simplejwt.authentication import JWTAuthentication
@@ -20,7 +21,7 @@ def get_token_name(user):
 
 def get_profile_for_token_context(*, user, club):
     profile = getattr(user, "profile", None)
-    if profile is None:
+    if profile is None or not profile.is_enabled:
         return None
     if profile.role == Profile.Role.ADMIN:
         return profile
@@ -30,10 +31,11 @@ def get_profile_for_token_context(*, user, club):
         and profile.owner_profile.clubs.filter(pk=club.pk).exists()
     ):
         return profile
+    staff_profile = getattr(profile, "staff_profile", None)
     if (
         profile.role == Profile.Role.STAFF
-        and getattr(profile, "staff_profile", None)
-        and profile.staff_profile.court.club_id == club.pk
+        and staff_profile is not None
+        and staff_profile.club_id == club.pk
     ):
         return profile
     return None
@@ -47,7 +49,7 @@ def build_token_claims(*, user, club_slug=None):
     }
 
     profile = getattr(user, "profile", None)
-    if profile is not None:
+    if profile is not None and profile.is_enabled:
         claims["role"] = profile.role
 
     if not club_slug:
@@ -60,7 +62,7 @@ def build_token_claims(*, user, club_slug=None):
             {"club_slug": "Invalid club context."}
         ) from exc
 
-    if profile and profile.role == Profile.Role.ADMIN:
+    if profile and profile.is_enabled and profile.role == Profile.Role.ADMIN:
         claims["club_id"] = club.id
         return claims
 
@@ -78,7 +80,11 @@ def build_token_claims(*, user, club_slug=None):
     claims["role"] = profile.role
     claims["club_id"] = club.id
     if profile.role == Profile.Role.STAFF:
-        claims["court_id"] = profile.staff_profile.court_id
+        court_ids = list(
+            profile.staff_profile.court_accesses.values_list("court_id", flat=True)
+        )
+        if len(court_ids) == 1:
+            claims["court_id"] = court_ids[0]
     return claims
 
 
@@ -149,16 +155,6 @@ class PasswordChangeSerializer(serializers.Serializer):
         return user
 
 
-class SyncHeartbeatResponseSerializer(serializers.Serializer):
-    """
-    Compatibility response for the explicit offline/PWA sync heartbeat
-    endpoint. The timestamp is an acknowledgement clock, not persisted
-    authorization or membership state.
-    """
-
-    last_sync_at = serializers.DateTimeField(read_only=True)
-
-
 class AccountCreatorSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     name = serializers.CharField()
@@ -200,6 +196,9 @@ class UserMeSerializer(serializers.ModelSerializer):
 
 class UserListSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    profile_role = serializers.CharField(
+        source="profile.role", read_only=True, allow_null=True
+    )
 
     class Meta:
         model = User
@@ -211,6 +210,7 @@ class UserListSerializer(serializers.ModelSerializer):
             "last_name",
             "phone_number",
             "is_active",
+            "profile_role",
             "created_by",
         )
         read_only_fields = fields
@@ -218,10 +218,6 @@ class UserListSerializer(serializers.ModelSerializer):
 
 class UserCreateSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
-    is_platform_admin = serializers.BooleanField(
-        write_only=True, required=False, default=False
-    )
-    non_platform_user_error = "Only platform-admin accounts can be created here."
 
     class Meta:
         model = User
@@ -234,7 +230,6 @@ class UserCreateSerializer(serializers.ModelSerializer):
             "last_name",
             "phone_number",
             "is_active",
-            "is_platform_admin",
         )
         read_only_fields = ("id",)
         extra_kwargs = {
@@ -242,7 +237,13 @@ class UserCreateSerializer(serializers.ModelSerializer):
         }
 
     def validate(self, attrs):
-        forbidden_fields = {"role", "club", "court", "membership", "memberships"}
+        forbidden_fields = {
+            "role",
+            "club",
+            "court",
+            "membership",
+            "memberships",
+        }
         submitted_forbidden_fields = forbidden_fields.intersection(self.initial_data)
         if submitted_forbidden_fields:
             raise serializers.ValidationError(
@@ -251,33 +252,20 @@ class UserCreateSerializer(serializers.ModelSerializer):
                     for field_name in sorted(submitted_forbidden_fields)
                 }
             )
-        if not attrs.get("is_platform_admin"):
-            raise serializers.ValidationError(
-                {
-                    "non_field_errors": [
-                        serializers.ErrorDetail(
-                            self.non_platform_user_error,
-                            code="invalid",
-                        )
-                    ]
-                }
-            )
         return attrs
 
+    @transaction.atomic
     def create(self, validated_data):
+        from apps.profiles.models import AdminProfile
+
         password = validated_data.pop("password")
-        is_platform_admin = validated_data.pop("is_platform_admin", False)
         user = User.objects.create_user(
             password=password,
             is_staff=False,
             is_superuser=False,
             **validated_data,
         )
-        if is_platform_admin:
-            profile = Profile.objects.create(user=user, role=Profile.Role.ADMIN)
-            from apps.profiles.models import AdminProfile
-
-            AdminProfile.objects.create(profile=profile)
+        AdminProfile.objects.create(user=user, role=Profile.Role.ADMIN)
         return user
 
     def to_representation(self, instance):

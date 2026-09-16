@@ -29,7 +29,7 @@ Authentication Identity
 
 | Model | Boundary | Authorization |
 |---|---|---|
-| `PlayerProfile` | **Global** — no club boundary | No `authorization_config`. Club membership gates API access but the row itself is shared. |
+| `PlayerProfile` | **Global** — no club boundary | No `authorization_config`. The enabled operational Profile's club scope gates API access but the row itself is shared. |
 | `ClubPlayer` | **Club-scoped** | `authorization_config` with `default_scope="club"` (Spine v2). |
 
 ---

@@ -8,7 +8,8 @@ from rest_framework.test import APITestCase
 from apps.accounts.models import User
 from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
-from apps.profiles.models import AdminProfile, OwnerProfile, Profile, StaffProfile
+from apps.profiles.models import AdminProfile, Profile
+from tests.profile_factories import grant_owner_club, grant_staff_court
 
 
 class CourtAPITestCase(APITestCase):
@@ -23,13 +24,7 @@ class CourtAPITestCase(APITestCase):
 
     def create_platform_admin(self, username="court-admin") -> User:
         user = self.create_user(username=username)
-        profile, _ = Profile.objects.get_or_create(
-            user=user, defaults={"role": Profile.Role.ADMIN}
-        )
-        if profile.role != Profile.Role.ADMIN:
-            profile.role = Profile.Role.ADMIN
-            profile.save(update_fields=["role"])
-        AdminProfile.objects.get_or_create(profile=profile)
+        AdminProfile.objects.create(user=user, role=Profile.Role.ADMIN)
         return user
 
     def create_club(self, name: str, slug: str | None = None, **extra_fields) -> Club:
@@ -51,41 +46,6 @@ class CourtAPITestCase(APITestCase):
         }
         data.update(extra_fields)
         return Court.objects.create(**data)
-
-    def create_membership(
-        self,
-        user: User,
-        club: Club,
-        role: str,
-        court: Court | None = None,
-        **extra_fields,
-    ):
-        role = role.upper()
-        if role == "OWNER":
-            profile, _ = Profile.objects.get_or_create(
-                user=user, defaults={"role": Profile.Role.OWNER}
-            )
-            if profile.role != Profile.Role.OWNER:
-                profile.role = Profile.Role.OWNER
-                profile.save(update_fields=["role"])
-            owner_profile, _ = OwnerProfile.objects.get_or_create(profile=profile)
-            owner_profile.clubs.add(club)
-            return owner_profile
-        elif role == "STAFF":
-            profile, _ = Profile.objects.get_or_create(
-                user=user, defaults={"role": Profile.Role.STAFF}
-            )
-            if profile.role != Profile.Role.STAFF:
-                profile.role = Profile.Role.STAFF
-                profile.save(update_fields=["role"])
-            staff_court = court or club.courts.first()
-            if not staff_court:
-                staff_court = self.create_court(club, f"{club.name} Default Court")
-            staff_profile, _ = StaffProfile.objects.update_or_create(
-                profile=profile, defaults={"court": staff_court}
-            )
-            return staff_profile
-        return None
 
     def create_price_period(self, working_hour, starts_at, ends_at, price="250.00"):
         return CourtWorkingHourPricePeriod.objects.create(
@@ -137,8 +97,8 @@ class CourtAPITests(CourtAPITestCase):
         self.staff = self.create_user("court-staff")
         self.club = self.create_club("Court Club", slug="court-club")
         self.other_club = self.create_club("Other Court Club", slug="other-court-club")
-        self.create_membership(self.owner, self.club, "OWNER")
-        self.create_membership(self.other_owner, self.other_club, "OWNER")
+        grant_owner_club(self.owner, self.club)
+        grant_owner_club(self.other_owner, self.other_club)
 
     def authenticate_platform_admin(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -208,12 +168,7 @@ class CourtAPITests(CourtAPITestCase):
 
     def test_staff_cannot_create_court(self):
         court = self.create_court(self.club, "Staff Assigned Court")
-        self.create_membership(
-            self.staff,
-            self.club,
-            "STAFF",
-            court=court,
-        )
+        grant_staff_court(self.staff, court)
         self.client.force_authenticate(user=self.staff)
 
         response = self.post_court(self.club, name="Staff Court")
@@ -278,12 +233,7 @@ class CourtAPITests(CourtAPITestCase):
     def test_staff_can_see_assigned_court_only(self):
         assigned_court = self.create_court(self.club, "Staff Court")
         other_court = self.create_court(self.club, "Hidden Staff Court")
-        self.create_membership(
-            self.staff,
-            self.club,
-            "STAFF",
-            court=assigned_court,
-        )
+        grant_staff_court(self.staff, assigned_court)
         self.client.force_authenticate(user=self.staff)
 
         response = self.client.get(self.court_list_url(self.club))
@@ -293,7 +243,7 @@ class CourtAPITests(CourtAPITestCase):
         self.assertNotIn(other_court.id, self.list_ids(response))
 
     def test_default_price_is_deprecated_for_update(self):
-        court = self.create_court(self.club, "Manager Price Court")
+        court = self.create_court(self.club, "Al Nasr Price Court")
         self.client.force_authenticate(user=self.owner)
 
         response = self.client.patch(
@@ -320,12 +270,7 @@ class CourtAPITests(CourtAPITestCase):
 
     def test_staff_cannot_update_courts(self):
         court = self.create_court(self.club, "Staff Price Court")
-        self.create_membership(
-            self.staff,
-            self.club,
-            "STAFF",
-            court=court,
-        )
+        grant_staff_court(self.staff, court)
         self.client.force_authenticate(user=self.staff)
 
         response = self.client.patch(
@@ -339,12 +284,7 @@ class CourtAPITests(CourtAPITestCase):
     def test_staff_can_retrieve_only_assigned_court(self):
         assigned_court = self.create_court(self.club, "Assigned Detail Court")
         other_court = self.create_court(self.club, "Other Detail Court")
-        self.create_membership(
-            self.staff,
-            self.club,
-            "STAFF",
-            court=assigned_court,
-        )
+        grant_staff_court(self.staff, assigned_court)
         self.client.force_authenticate(user=self.staff)
 
         assigned_response = self.client.get(
@@ -366,8 +306,8 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         self.staff = self.create_user("hours-staff")
         self.club = self.create_club("Hours Club", slug="hours-club")
         self.other_club = self.create_club("Other Hours Club", slug="other-hours-club")
-        self.create_membership(self.owner, self.club, "OWNER")
-        self.create_membership(self.other_owner, self.other_club, "OWNER")
+        grant_owner_club(self.owner, self.club)
+        grant_owner_club(self.other_owner, self.other_club)
         self.court = self.create_court(self.club, "Hours Court")
         self.other_court = self.create_court(self.other_club, "Other Hours Court")
 
@@ -445,12 +385,7 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
 
     def test_staff_can_list_but_not_manage_working_hours_for_assigned_court(self):
-        self.create_membership(
-            self.staff,
-            self.club,
-            "STAFF",
-            court=self.court,
-        )
+        grant_staff_court(self.staff, self.court)
         working_hour = CourtWorkingHour.objects.create(
             court=self.court,
             weekday=CourtWorkingHour.Weekday.TUESDAY,
@@ -505,12 +440,7 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_staff_can_read_assigned_nested_working_hours_only(self):
-        self.create_membership(
-            self.staff,
-            self.club,
-            "STAFF",
-            court=self.court,
-        )
+        grant_staff_court(self.staff, self.court)
         self.client.force_authenticate(user=self.staff)
 
         assigned_response = self.client.get(
@@ -753,12 +683,7 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_staff_cannot_manage_nested_working_hours(self):
-        self.create_membership(
-            self.staff,
-            self.club,
-            "STAFF",
-            court=self.court,
-        )
+        grant_staff_court(self.staff, self.court)
         self.client.force_authenticate(user=self.staff)
 
         response = self.client.put(

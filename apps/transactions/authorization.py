@@ -32,7 +32,7 @@ from apps.transactions.models import Transaction, TransactionAttempt
 
 
 def _is_staff_collector(context: RequestAccessContext) -> bool:
-    return context.role == Role.STAFF and not context.is_platform_admin
+    return context.role == Role.STAFF
 
 
 def apply_staff_collector_scope(
@@ -80,7 +80,7 @@ def can_cancel_transaction(
         return False
     if transaction.club_id != context.club.id:
         return False
-    return context.is_platform_admin or transaction.created_by_id == context.user.id
+    return (context.role == Role.ADMIN) or transaction.created_by_id == context.user.id
 
 
 def can_dismiss_transaction_attempt(

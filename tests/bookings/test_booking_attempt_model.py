@@ -16,7 +16,7 @@ from apps.bookings.models import Booking, BookingAttempt
 from apps.bookings.services import blocking_booking_queryset
 from apps.clubs.models import Club
 from apps.courts.models import Court
-from apps.profiles.models import Profile, StaffProfile
+from apps.profiles.models import Profile, StaffCourtAccess, StaffProfile
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking
@@ -92,9 +92,11 @@ class BookingAttemptModelTests(TestCase):
         self.other_court = self.create_court(self.other_club, "Other Court")
         self.staff = self.create_user("attempt-staff")
         self.create_user("other-staff")
-        profile = Profile.objects.create(user=self.staff, role=Profile.Role.STAFF)
         self.staff_profile = StaffProfile.objects.create(
-            profile=profile, court=self.court
+            user=self.staff, role=Profile.Role.STAFF, club=self.club
+        )
+        StaffCourtAccess.objects.create(
+            staff_profile=self.staff_profile, court=self.court
         )
 
     def test_rejected_attempt_preserves_original_business_intent(self):
@@ -130,9 +132,9 @@ class BookingAttemptModelTests(TestCase):
         self.assertEqual(attempt.resolution, BookingAttempt.Resolution.UNRESOLVED)
         self.assertIsNotNone(attempt.created)
         self.assertIsNotNone(attempt.modified)
-        self.assertEqual(self.staff_profile.court.club, attempt.club)
-        self.assertEqual(self.staff_profile.court, attempt.court)
-        self.assertEqual(self.staff_profile.profile.user, attempt.attempted_by)
+        self.assertEqual(self.staff_profile.club, attempt.club)
+        self.assertEqual(self.court, attempt.court)
+        self.assertEqual(self.staff_profile.user, attempt.attempted_by)
 
     def test_successful_attempt_can_reference_resulting_booking(self):
         booking = self.create_booking(self.court, created_by=self.staff)

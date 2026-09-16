@@ -156,7 +156,7 @@ Request → Authentication → resolve_club_scope → Spine scoped QuerySet (clu
 - **Create / slots / reschedule target court:** the court in the request body must be inside the same Spine court queryset; denial remains HTTP 403.
 - **BookingAttempt:** Club + Court, then Staff narrowed to `attempted_by=request.user`. Owner/Admin can list/retrieve club+court attempts but may dismiss only their own (`check_object_permission`).
 - Do **not** create `bookings/authorization.py` to re-express court assignment. `actor_requires_staff_cancel_reason()` remains a service business rule (Staff cancel requires a reason).
-- Booking ViewSets consume the Profile-backed Authorization Spine. The compatibility-only `ClubAccessContext` is not used by runtime request handling.
+- Booking ViewSets consume the Profile-backed Authorization Spine.
 
 ## Service Layer
 

@@ -13,13 +13,13 @@ Application authorization is profile-backed:
 ```text
 User -> Profile.role
 OWNER -> OwnerProfile.clubs
-STAFF -> StaffProfile.court -> Court.club
+STAFF -> StaffProfile.club + StaffCourtAccess -> Courts
 ADMIN -> AdminProfile
 ```
 
 - `Profile.role` is the only application-role authority.
 - Owner access to a club is derived from `OwnerProfile.clubs` (many-to-many).
-- Staff access is derived from the one assigned `StaffProfile.court`.
+- Staff club access is derived from `StaffProfile.club`; court scope is the set of `StaffCourtAccess` rows.
 - Admin access is platform-wide because `Profile.role == ADMIN`; `AdminProfile`
   is an extension record, not a separate permission engine.
 - No Manager, ManagerProfile, delegation flag, or `ClubMembership` model is
@@ -47,14 +47,20 @@ ADMIN -> AdminProfile
 `scoped_clubs_for_user()` and `CanManageClubs` consume the Profile graph.
 Club-scoped operational endpoints use the shared Authorization Spine;
 `apps/clubs/authorization.py` contains only club-specific predicates.
-
-`ClubAccessContext` exists solely as a duck-typed fixture for direct legacy
-service tests. Views, resolvers, and runtime authorization use
-`RequestAccessContext`, never this compatibility object.
+There is no `ClubAccessContext` or `ClubScopedAccessMixin`.
 
 ## Cross-App Boundaries
 
 - `apps/profiles` owns Profile models and extension validation.
-- `apps/courts` owns courts and StaffProfile's assigned court target.
+- `apps/courts` owns courts and the targets of staff court-access rows.
 - `apps/players` owns customer identity (`PlayerProfile`, `ClubPlayer`), which
   is unrelated to operational staff/owner/admin profiles.
+
+## Staff API
+
+`/api/v1/clubs/{club_slug}/staff/` supports owner/admin staff management.
+Detail routes use the inherited Profile primary key (`profile_id` in the URL).
+Staff serializers read inherited `user`, `role`, `is_enabled`, and timestamps
+directly. Court replacement locks the staff row; courts must belong to the URL
+club. Deletion removes the child and parent, retaining the authentication user
+and business history.

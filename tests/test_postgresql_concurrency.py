@@ -37,7 +37,7 @@ from apps.players.services import (
     find_or_create_player_profile,
     get_or_create_club_player,
 )
-from apps.profiles.models import AdminProfile, Profile, StaffProfile
+from apps.profiles.models import AdminProfile, Profile, StaffCourtAccess, StaffProfile
 from apps.settlements.services import create_approved_settlement
 from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.services import create_booking_transaction
@@ -54,8 +54,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             username="pg-concurrency-admin",
             password="test-pass-123",
         )
-        admin_profile = Profile.objects.create(user=self.admin, role=Profile.Role.ADMIN)
-        AdminProfile.objects.create(profile=admin_profile)
+        AdminProfile.objects.create(user=self.admin, role=Profile.Role.ADMIN)
         self.club = Club.objects.create(
             name="PG Concurrency Club",
             slug="pg-concurrency",
@@ -319,8 +318,10 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             username="pg-settle-staff",
             password="test-pass-123",
         )
-        staff_p = Profile.objects.create(user=staff, role=Profile.Role.STAFF)
-        StaffProfile.objects.create(profile=staff_p, court=self.court)
+        staff_prof = StaffProfile.objects.create(
+            user=staff, role=Profile.Role.STAFF, club=self.club
+        )
+        StaffCourtAccess.objects.create(staff_profile=staff_prof, court=self.court)
         start, end = self.slot(15)
         booking = create_booking(
             created_by=staff,
@@ -519,17 +520,14 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(len(errors), 1)
 
-    def test_staff_profile_uniqueness_race_enforces_single_profile(self):
-        staff_user = User.objects.create_user(
-            username="pg-staff-race-user",
-            password="test-pass-123",
+    def test_concurrent_staff_creation_enforces_one_profile_per_user(self):
+        user = User.objects.create_user(
+            username="concurrent-staff", password="test-pass-123"
         )
-        profile = Profile.objects.create(user=staff_user, role=Profile.Role.STAFF)
 
         def worker():
             return StaffProfile.objects.create(
-                profile=profile,
-                court=self.court,
+                user=user, role=Profile.Role.STAFF, club=self.club
             )
 
         results, errors = self.run_threads([worker, worker])
@@ -537,8 +535,6 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         self.assertEqual(len(errors), 1)
         from django.core.exceptions import ValidationError
 
-        self.assertTrue(isinstance(errors[0], (IntegrityError, ValidationError)))
-        self.assertEqual(
-            StaffProfile.objects.filter(profile=profile).count(),
-            1,
-        )
+        self.assertIsInstance(errors[0], (IntegrityError, ValidationError))
+        profile = Profile.objects.get(user=user)
+        self.assertEqual(StaffProfile.objects.get(user=user).pk, profile.pk)

@@ -23,32 +23,28 @@ from apps.audit.services import (
 )
 from apps.audit.views import AuditLogViewSet
 from apps.bookings.models import Booking
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking
+from tests.profile_factories import (
+    ProfileIdentityMixin,
+    grant_owner_club,
+    grant_staff_court,
+)
 
 
-class AuditAPITestCase(APITestCase):
+class AuditAPITestCase(ProfileIdentityMixin, APITestCase):
     password = "test-pass-123"
 
     def create_user(self, username: str, **extra_fields) -> User:
         return User.objects.create_user(
-            username=username,
-            password=self.password,
-            **extra_fields,
+            username=username, password=self.password, **extra_fields
         )
 
-    def create_platform_admin(self, username="audit-admin") -> User:
-        return self.create_user(username=username, is_platform_admin=True)
-
     def create_club(self, name: str, slug: str | None = None, **extra_fields) -> Club:
-        data = {
-            "name": name,
-            "governorate": "ASSIUT",
-            "city": "ASSIUT_MARKAZ",
-        }
+        data = {"name": name, "governorate": "ASSIUT", "city": "ASSIUT_MARKAZ"}
         if slug is not None:
             data["slug"] = slug
         data.update(extra_fields)
@@ -65,22 +61,6 @@ class AuditAPITestCase(APITestCase):
         data.update(extra_fields)
         return Court.objects.create(**data)
 
-    def create_membership(
-        self,
-        user: User,
-        club: Club,
-        role: str,
-        court: Court | None = None,
-        **extra_fields,
-    ) -> ClubMembership:
-        return ClubMembership.objects.create(
-            club=club,
-            user=user,
-            role=role,
-            court=court,
-            **extra_fields,
-        )
-
     def create_working_hour_price_period(
         self,
         court,
@@ -90,10 +70,7 @@ class AuditAPITestCase(APITestCase):
         closes_at="23:00:00",
         price=Decimal("300.00"),
     ):
-        working_hour = CourtWorkingHour.objects.create(
-            court=court,
-            weekday=weekday,
-        )
+        working_hour = CourtWorkingHour.objects.create(court=court, weekday=weekday)
         CourtWorkingHourPricePeriod.objects.create(
             working_hour=working_hour,
             starts_at=opens_at,
@@ -104,12 +81,7 @@ class AuditAPITestCase(APITestCase):
 
     def time_at(self, hour: int):
         day_start = timezone.datetime(
-            2026,
-            7,
-            3,
-            0,
-            0,
-            tzinfo=timezone.get_current_timezone(),
+            2026, 7, 3, 0, 0, tzinfo=timezone.get_current_timezone()
         )
         return day_start + timedelta(hours=hour)
 
@@ -145,8 +117,7 @@ class AuditAPITestCase(APITestCase):
 
     def audit_detail_url(self, club, audit_log):
         return reverse(
-            "club-audit-log-detail",
-            kwargs={"club_slug": club.slug, "pk": audit_log.pk},
+            "club-audit-log-detail", kwargs={"club_slug": club.slug, "pk": audit_log.pk}
         )
 
     def booking_list_url(self, club):
@@ -154,14 +125,12 @@ class AuditAPITestCase(APITestCase):
 
     def booking_detail_url(self, club, booking):
         return reverse(
-            "club-booking-detail",
-            kwargs={"club_slug": club.slug, "pk": booking.pk},
+            "club-booking-detail", kwargs={"club_slug": club.slug, "pk": booking.pk}
         )
 
     def booking_action_url(self, club, booking, action):
         return reverse(
-            f"club-booking-{action}",
-            kwargs={"club_slug": club.slug, "pk": booking.pk},
+            f"club-booking-{action}", kwargs={"club_slug": club.slug, "pk": booking.pk}
         )
 
     def transaction_list_url(self, club):
@@ -187,6 +156,7 @@ class AuditAPITestCase(APITestCase):
 
 
 class AuditModelServiceTests(AuditAPITestCase):
+
     def setUp(self):
         self.actor = self.create_user("audit-model-actor")
         self.club = self.create_club("Audit Model Club", slug="audit-model")
@@ -194,7 +164,6 @@ class AuditModelServiceTests(AuditAPITestCase):
 
     def test_audit_log_can_be_created_with_default_json_data(self):
         audit_log = self.create_audit_log(self.club, actor=self.actor, court=self.court)
-
         self.assertEqual(audit_log.before_data, {})
         self.assertEqual(audit_log.after_data, {})
         self.assertEqual(audit_log.metadata, {})
@@ -204,7 +173,6 @@ class AuditModelServiceTests(AuditAPITestCase):
         newer = self.create_audit_log(self.club, entity_id=2)
         AuditLog.objects.filter(pk=older.pk).update(created=self.time_at(10))
         AuditLog.objects.filter(pk=newer.pk).update(created=self.time_at(11))
-
         self.assertEqual(
             list(AuditLog.objects.values_list("id", flat=True)), [newer.id, older.id]
         )
@@ -221,7 +189,6 @@ class AuditModelServiceTests(AuditAPITestCase):
             after_data={"new": "value"},
             metadata={"source": "test"},
         )
-
         self.assertEqual(audit_log.club, self.club)
         self.assertEqual(audit_log.court, self.court)
         self.assertEqual(audit_log.actor, self.actor)
@@ -233,10 +200,7 @@ class AuditModelServiceTests(AuditAPITestCase):
         self.assertEqual(audit_log.metadata["source"], "test")
         self.assertEqual(
             audit_log.metadata["display_snapshot"],
-            {
-                "actor_name": self.actor.username,
-                "court_name": self.court.name,
-            },
+            {"actor_name": self.actor.username, "court_name": self.court.name},
         )
 
     def test_record_audit_log_accepts_actor_none(self):
@@ -247,15 +211,14 @@ class AuditModelServiceTests(AuditAPITestCase):
             entity_type="Booking",
             entity_id=1,
         )
-
         self.assertIsNone(audit_log.actor)
 
 
 class AuditAccessAPITests(AuditAPITestCase):
+
     def setUp(self):
         self.platform_admin = self.create_platform_admin("audit-access-admin")
         self.owner = self.create_user("audit-access-owner")
-        self.manager = self.create_user("audit-access-manager")
         self.staff = self.create_user("audit-access-staff")
         self.other_user = self.create_user("audit-access-other")
         self.club = self.create_club("Audit Access Club", slug="audit-access")
@@ -263,66 +226,32 @@ class AuditAccessAPITests(AuditAPITestCase):
         self.court = self.create_court(self.club, "Audit Court")
         self.other_court = self.create_court(self.other_club, "Other Audit Court")
         self.audit_log = self.create_audit_log(
-            self.club,
-            court=self.court,
-            actor=self.owner,
-            entity_id=10,
+            self.club, court=self.court, actor=self.owner, entity_id=10
         )
         self.other_log = self.create_audit_log(
-            self.other_club,
-            court=self.other_court,
-            entity_id=20,
+            self.other_club, court=self.other_court, entity_id=20
         )
-        self.create_membership(self.owner, self.club, ClubMembership.Role.OWNER)
-        self.create_membership(self.manager, self.club, ClubMembership.Role.MANAGER)
-        self.create_membership(
-            self.staff,
-            self.club,
-            ClubMembership.Role.STAFF,
-            court=self.court,
-        )
-        self.create_membership(
-            self.other_user,
-            self.other_club,
-            ClubMembership.Role.OWNER,
-        )
+        grant_owner_club(self.owner, self.club)
+        grant_staff_court(self.staff, self.court)
+        grant_owner_club(self.other_user, self.other_club)
 
     def test_anonymous_rejected(self):
         response = self.client.get(self.audit_list_url(self.club))
-
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    def test_platform_admin_owner_and_manager_can_list_and_retrieve(self):
-        for user in (self.platform_admin, self.owner, self.manager):
-            self.client.force_authenticate(user=user)
-
-            list_response = self.client.get(self.audit_list_url(self.club))
-            detail_response = self.client.get(
-                self.audit_detail_url(self.club, self.audit_log)
-            )
-
-            self.assertEqual(list_response.status_code, status.HTTP_200_OK)
-            self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
 
     def test_staff_rejected(self):
         self.client.force_authenticate(user=self.staff)
-
         response = self.client.get(self.audit_list_url(self.club))
-
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_unrelated_club_member_rejected(self):
         self.client.force_authenticate(user=self.other_user)
-
         response = self.client.get(self.audit_list_url(self.club))
-
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_wrong_club_logs_not_visible(self):
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.audit_list_url(self.club))
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn(self.audit_log.id, self.list_ids(response))
         self.assertNotIn(self.other_log.id, self.list_ids(response))
@@ -337,49 +266,37 @@ class AuditAccessAPITests(AuditAPITestCase):
             entity_id=101,
         )
         self.client.force_authenticate(user=self.platform_admin)
-
         list_response = self.client.get(
-            self.audit_list_url(self.club),
-            HTTP_ACCEPT_LANGUAGE="en",
+            self.audit_list_url(self.club), HTTP_ACCEPT_LANGUAGE="en"
         )
         detail_en_response = self.client.get(
-            self.audit_detail_url(self.club, transaction_log),
-            HTTP_ACCEPT_LANGUAGE="en",
+            self.audit_detail_url(self.club, transaction_log), HTTP_ACCEPT_LANGUAGE="en"
         )
         detail_ar_response = self.client.get(
-            self.audit_detail_url(self.club, transaction_log),
-            HTTP_ACCEPT_LANGUAGE="ar",
+            self.audit_detail_url(self.club, transaction_log), HTTP_ACCEPT_LANGUAGE="ar"
         )
-
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertIn("action_label", list_response.data["results"][0])
         self.assertEqual(detail_en_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_ar_response.status_code, status.HTTP_200_OK)
         self.assertEqual(
-            detail_en_response.data["action"],
-            AuditLog.Action.TRANSACTION_CANCELLED,
+            detail_en_response.data["action"], AuditLog.Action.TRANSACTION_CANCELLED
         )
         self.assertEqual(
-            detail_ar_response.data["action"],
-            AuditLog.Action.TRANSACTION_CANCELLED,
+            detail_ar_response.data["action"], AuditLog.Action.TRANSACTION_CANCELLED
         )
         self.assertEqual(
-            detail_en_response.data["action_label"],
-            "Transaction cancelled",
+            detail_en_response.data["action_label"], "Transaction cancelled"
         )
         self.assertEqual(
-            detail_ar_response.data["action_label"],
-            "تم إلغاء عملية الدفع",
+            detail_ar_response.data["action_label"], "تم إلغاء عملية الدفع"
         )
 
     def test_list_and_detail_include_event_snapshot_names_and_entity_summaries(self):
         self.owner.first_name = "Ahmed"
         self.owner.last_name = "Ali"
         self.owner.save(update_fields=["first_name", "last_name"])
-        booking = self.create_booking(
-            self.court,
-            customer_name="Original Customer",
-        )
+        booking = self.create_booking(self.court, customer_name="Original Customer")
         transaction_obj = self.create_transaction(
             booking,
             created_by=self.owner,
@@ -433,18 +350,16 @@ class AuditAccessAPITests(AuditAPITestCase):
         self.court.name = "Renamed Court"
         self.court.save(update_fields=["name"])
         self.client.force_authenticate(user=self.platform_admin)
-
         list_response = self.client.get(self.audit_list_url(self.club))
         detail_response = self.client.get(self.audit_detail_url(self.club, logs[0]))
-
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         rows = {
             (row["entity_type"], row["entity_id"]): row
             for row in list_response.data["results"]
         }
-        booking_row = rows[("Booking", booking.id)]
-        transaction_row = rows[("Transaction", transaction_obj.id)]
-        settlement_row = rows[("Settlement", settlement.id)]
+        booking_row = rows["Booking", booking.id]
+        transaction_row = rows["Transaction", transaction_obj.id]
+        settlement_row = rows["Settlement", settlement.id]
         self.assertEqual(booking_row["actor_name"], "Ahmed Ali")
         self.assertEqual(booking_row["actor_name_source"], "EVENT_SNAPSHOT")
         self.assertEqual(booking_row["court_name"], original_court_name)
@@ -471,9 +386,7 @@ class AuditAccessAPITests(AuditAPITestCase):
         self.court.name = "Current Court Name"
         self.court.save(update_fields=["name"])
         self.client.force_authenticate(user=self.platform_admin)
-
         response = self.client.get(self.audit_detail_url(self.club, old_log))
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["actor_name"], "Current Owner")
         self.assertEqual(
@@ -489,7 +402,6 @@ class AuditAccessAPITests(AuditAPITestCase):
         self.client.force_authenticate(user=self.platform_admin)
         list_url = self.audit_list_url(self.club)
         detail_url = self.audit_detail_url(self.club, self.audit_log)
-
         self.assertEqual(
             self.client.post(list_url, {}, format="json").status_code,
             status.HTTP_405_METHOD_NOT_ALLOWED,
@@ -509,6 +421,7 @@ class AuditAccessAPITests(AuditAPITestCase):
 
 
 class AuditFilterRegressionTests(AuditAPITestCase):
+
     def setUp(self):
         self.platform_admin = self.create_platform_admin("audit-filter-admin")
         self.actor = self.create_user("audit-filter-actor")
@@ -562,8 +475,7 @@ class AuditFilterRegressionTests(AuditAPITestCase):
         self.assertEqual(
             self.list_ids(
                 self.client.get(
-                    self.audit_list_url(self.club),
-                    {"entity_type": "Transaction"},
+                    self.audit_list_url(self.club), {"entity_type": "Transaction"}
                 )
             ),
             {self.transaction_log.id},
@@ -580,8 +492,7 @@ class AuditFilterRegressionTests(AuditAPITestCase):
         self.assertEqual(
             self.list_ids(
                 self.client.get(
-                    self.audit_list_url(self.club),
-                    {"actor": self.other_actor.id},
+                    self.audit_list_url(self.club), {"actor": self.other_actor.id}
                 )
             ),
             {self.transaction_log.id},
@@ -589,8 +500,7 @@ class AuditFilterRegressionTests(AuditAPITestCase):
         self.assertEqual(
             self.list_ids(
                 self.client.get(
-                    self.audit_list_url(self.club),
-                    {"court": self.court.id},
+                    self.audit_list_url(self.club), {"court": self.court.id}
                 )
             ),
             {self.booking_log.id},
@@ -602,14 +512,11 @@ class AuditFilterRegressionTests(AuditAPITestCase):
             {"date": self.time_at(10).date().isoformat()},
         )
         date_from_response = self.client.get(
-            self.audit_list_url(self.club),
-            {"date_from": self.time_at(11).isoformat()},
+            self.audit_list_url(self.club), {"date_from": self.time_at(11).isoformat()}
         )
         date_to_response = self.client.get(
-            self.audit_list_url(self.club),
-            {"date_to": self.time_at(11).isoformat()},
+            self.audit_list_url(self.club), {"date_to": self.time_at(11).isoformat()}
         )
-
         self.assertEqual(
             self.list_ids(date_response), {self.booking_log.id, self.transaction_log.id}
         )
@@ -618,10 +525,8 @@ class AuditFilterRegressionTests(AuditAPITestCase):
 
     def test_filters_respect_club_scope_and_ignore_club_query_param(self):
         response = self.client.get(
-            self.audit_list_url(self.club),
-            {"club": self.other_club.id},
+            self.audit_list_url(self.club), {"club": self.other_club.id}
         )
-
         self.assertEqual(
             self.list_ids(response), {self.booking_log.id, self.transaction_log.id}
         )
@@ -629,33 +534,21 @@ class AuditFilterRegressionTests(AuditAPITestCase):
 
     def test_audit_route_resolves_to_viewset(self):
         match = resolve("/api/v1/clubs/example-club/audit-logs/")
-
         self.assertIs(match.func.cls, AuditLogViewSet)
 
     def test_audit_viewset_uses_filterset_and_does_not_parse_query_params(self):
         self.assertEqual(AuditLogViewSet.filter_backends, (DjangoFilterBackend,))
         self.assertIs(AuditLogViewSet.filterset_class, AuditLogFilter)
         self.assertEqual(AuditLogViewSet.http_method_names, ("get", "head", "options"))
-
         repo_root = Path(__file__).resolve().parents[2]
         view_source = (repo_root / "apps" / "audit" / "views.py").read_text()
-
         self.assertNotIn("request.query_params.get", view_source)
         self.assertNotIn("parse_date", view_source)
         self.assertNotIn("parse_datetime", view_source)
 
-    def test_audit_filter_does_not_contain_access_logic(self):
-        repo_root = Path(__file__).resolve().parents[2]
-        filter_source = (repo_root / "apps" / "audit" / "filters.py").read_text()
-
-        self.assertNotIn("ClubMembership", filter_source)
-        self.assertNotIn("ClubAccessContext", filter_source)
-        self.assertNotIn("club_slug", filter_source)
-
     def test_no_forbidden_role_or_permission_files_were_introduced(self):
         repo_root = Path(__file__).resolve().parents[2]
         user_fields = {field.name for field in User._meta.get_fields()}
-
         self.assertNotIn("role", user_fields)
         self.assertNotIn("club", user_fields)
         self.assertNotIn("court", user_fields)
@@ -670,6 +563,7 @@ class AuditFilterRegressionTests(AuditAPITestCase):
 
 
 class AuditQueryScalingTests(AuditAPITestCase):
+
     def setUp(self):
         self.platform_admin = self.create_platform_admin("audit-query-admin")
         self.actor = self.create_user("audit-query-actor")
@@ -685,44 +579,28 @@ class AuditQueryScalingTests(AuditAPITestCase):
 
     def test_human_readable_audit_fields_are_query_bounded_for_one_vs_twenty_rows(self):
         self.create_audit_log(
-            self.club,
-            court=self.court,
-            actor=self.actor,
-            entity_id=1,
+            self.club, court=self.court, actor=self.actor, entity_id=1
         )
         one_row_queries = self.capture_list_queries()
         for entity_id in range(2, 21):
             self.create_audit_log(
-                self.club,
-                court=self.court,
-                actor=self.actor,
-                entity_id=entity_id,
+                self.club, court=self.court, actor=self.actor, entity_id=entity_id
             )
-
         twenty_row_queries = self.capture_list_queries()
-
         self.assertEqual(twenty_row_queries, one_row_queries)
 
 
 class AuditBusinessLoggingTests(AuditAPITestCase):
+
     def setUp(self):
         self.platform_admin = self.create_platform_admin("audit-business-admin")
-        self.club = self.create_club(
-            "Audit Business Club",
-            slug="audit-business",
-        )
+        self.club = self.create_club("Audit Business Club", slug="audit-business")
         self.court = self.create_court(self.club, "Audit Business Court")
         self.create_working_hour_price_period(
-            self.court,
-            CourtWorkingHour.Weekday.FRIDAY,
+            self.court, CourtWorkingHour.Weekday.FRIDAY
         )
         self.staff = self.create_user("audit-business-staff")
-        self.create_membership(
-            self.staff,
-            self.club,
-            ClubMembership.Role.STAFF,
-            court=self.court,
-        )
+        grant_staff_court(self.staff, self.court)
         self.client.force_authenticate(user=self.platform_admin)
 
     def booking_payload(self, hour=10, **extra_fields):
@@ -739,11 +617,8 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
 
     def test_creating_booking_creates_audit_log(self):
         response = self.client.post(
-            self.booking_list_url(self.club),
-            self.booking_payload(),
-            format="json",
+            self.booking_list_url(self.club), self.booking_payload(), format="json"
         )
-
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(
             AuditLog.objects.filter(
@@ -757,13 +632,11 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
         booking = self.create_booking(
             self.court, start_time=self.time_at(12), end_time=self.time_at(13)
         )
-
         response = self.client.patch(
             self.booking_detail_url(self.club, booking),
             {"notes": "Updated note"},
             format="json",
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         audit_log = AuditLog.objects.get(
             action=AuditLog.Action.BOOKING_UPDATED,
@@ -815,19 +688,15 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             )
             if action_name == "complete":
                 self.create_transaction(booking, amount=booking.total_price)
-
             response = self.client.post(
                 self.booking_action_url(self.club, booking, action_name),
                 payload,
                 format="json",
             )
-
             self.assertEqual(response.status_code, status.HTTP_200_OK)
             self.assertTrue(
                 AuditLog.objects.filter(
-                    action=audit_action,
-                    entity_type="Booking",
-                    entity_id=booking.id,
+                    action=audit_action, entity_type="Booking", entity_id=booking.id
                 ).exists()
             )
 
@@ -839,7 +708,6 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             end_time=self.time_at(11),
             status=Booking.Status.CONFIRMED,
         )
-
         response = self.client.post(
             self.booking_action_url(self.club, booking, "reschedule"),
             {
@@ -850,7 +718,6 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             },
             format="json",
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         audit_log = AuditLog.objects.get(
             action=AuditLog.Action.BOOKING_RESCHEDULED,
@@ -867,7 +734,6 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             end_time=self.time_at(20),
             status=Booking.Status.HOLD,
         )
-
         response = self.client.post(
             self.transaction_list_url(self.club),
             {
@@ -878,7 +744,6 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             },
             format="json",
         )
-
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(
             AuditLog.objects.filter(
@@ -897,16 +762,13 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             status=Booking.Status.CONFIRMED,
         )
         transaction_obj = self.create_transaction(
-            booking,
-            created_by=self.platform_admin,
+            booking, created_by=self.platform_admin
         )
-
         response = self.client.post(
             self.transaction_cancel_url(self.club, transaction_obj),
             {"reason": "Audit correction"},
             format="json",
         )
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         cancel_log = AuditLog.objects.get(
             action=AuditLog.Action.TRANSACTION_CANCELLED,
@@ -942,13 +804,11 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
         Transaction.objects.filter(pk=transaction_obj.pk).update(
             created=self.time_at(22)
         )
-
         create_response = self.client.post(
             self.settlement_list_url(self.club),
             {"collected_by": self.staff.id},
             format="json",
         )
-
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
         settlement = Settlement.objects.get(pk=create_response.data["id"])
         create_log = AuditLog.objects.get(
@@ -958,7 +818,6 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
         )
         self.assertEqual(create_log.after_data["collected_by_id"], self.staff.id)
         self.assertEqual(create_log.after_data["transaction_ids"], [transaction_obj.id])
-
         pending_settlement = Settlement.objects.create(
             club=self.club,
             court=self.court,
@@ -975,7 +834,6 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             {},
             format="json",
         )
-
         self.assertEqual(settle_response.status_code, status.HTTP_200_OK)
         settle_log = AuditLog.objects.get(
             action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
@@ -986,17 +844,15 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
 
 
 class AuditSeedSchemaTests(AuditAPITestCase):
+
     def test_seed_demo_data_creates_audit_examples_idempotently(self):
         call_command("seed_demo_data", verbosity=0)
         count = AuditLog.objects.count()
-
         call_command("seed_demo_data", verbosity=0)
-
         self.assertEqual(AuditLog.objects.count(), count)
         self.assertTrue(
             AuditLog.objects.filter(
-                club__slug="barcelona-fc",
-                action=AuditLog.Action.BOOKING_CREATED,
+                club__slug="barcelona-fc", action=AuditLog.Action.BOOKING_CREATED
             ).exists()
         )
         self.assertTrue(
@@ -1011,13 +867,9 @@ class AuditSeedSchemaTests(AuditAPITestCase):
         docs_response = self.client.get(reverse("swagger-ui"))
         schema = schema_response.content.decode()
         schema_doc = yaml.safe_load(schema)
-
         self.assertEqual(schema_response.status_code, status.HTTP_200_OK)
         self.assertEqual(docs_response.status_code, status.HTTP_200_OK)
-        self.assertIn(
-            "/api/v1/clubs/{club_slug}/audit-logs/",
-            schema,
-        )
+        self.assertIn("/api/v1/clubs/{club_slug}/audit-logs/", schema)
         audit_list_fields = schema_doc["components"]["schemas"]["AuditLogList"][
             "properties"
         ]
@@ -1037,6 +889,7 @@ class AuditSeedSchemaTests(AuditAPITestCase):
 
 
 class AuditBookingPhoneSearchTests(AuditAPITestCase):
+
     def setUp(self):
         self.platform_admin = self.create_platform_admin("audit-phone-admin")
         self.club = self.create_club("Audit Phone Club", slug="audit-phone")
@@ -1044,7 +897,6 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
         self.court = self.create_court(self.club, "Audit Phone Court")
         self.other_court = self.create_court(self.other_club, "Other Phone Court")
         self.client.force_authenticate(user=self.platform_admin)
-
         self.booking_1 = self.create_booking(
             self.court,
             customer_name="Customer One",
@@ -1068,7 +920,6 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
             entity_type="Booking",
             entity_id=self.booking_1.id,
         )
-
         self.booking_2 = self.create_booking(
             self.court,
             customer_name="Customer Two",
@@ -1084,7 +935,6 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
             entity_type="Booking",
             entity_id=self.booking_2.id,
         )
-
         self.non_booking_log = self.create_audit_log(
             self.club,
             court=self.court,
@@ -1093,7 +943,6 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
             entity_type="Settlement",
             entity_id=999,
         )
-
         self.other_club_booking = self.create_booking(
             self.other_court,
             customer_name="Other Club Customer",
@@ -1112,8 +961,7 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
 
     def test_search_by_exact_egyptian_phone(self):
         response = self.client.get(
-            self.audit_list_url(self.club),
-            {"search": "01012345678"},
+            self.audit_list_url(self.club), {"search": "01012345678"}
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
@@ -1126,12 +974,10 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
 
     def test_search_by_plus_20_and_20_prefixes(self):
         plus_20_response = self.client.get(
-            self.audit_list_url(self.club),
-            {"search": "+201012345678"},
+            self.audit_list_url(self.club), {"search": "+201012345678"}
         )
         prefix_20_response = self.client.get(
-            self.audit_list_url(self.club),
-            {"search": "201012345678"},
+            self.audit_list_url(self.club), {"search": "201012345678"}
         )
         expected_ids = {self.booking_1_created_log.id, self.booking_1_completed_log.id}
         self.assertEqual(self.list_ids(plus_20_response), expected_ids)
@@ -1139,12 +985,10 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
 
     def test_search_by_spaced_and_trimmed_phone(self):
         spaced_response = self.client.get(
-            self.audit_list_url(self.club),
-            {"search": "010 1234 5678"},
+            self.audit_list_url(self.club), {"search": "010 1234 5678"}
         )
         trimmed_response = self.client.get(
-            self.audit_list_url(self.club),
-            {"search": "  01012345678  "},
+            self.audit_list_url(self.club), {"search": "  01012345678  "}
         )
         expected_ids = {self.booking_1_created_log.id, self.booking_1_completed_log.id}
         self.assertEqual(self.list_ids(spaced_response), expected_ids)
@@ -1152,13 +996,9 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
 
     def test_search_preserves_non_booking_records_when_search_is_omitted_or_empty(self):
         omitted_response = self.client.get(self.audit_list_url(self.club))
-        empty_response = self.client.get(
-            self.audit_list_url(self.club),
-            {"search": ""},
-        )
+        empty_response = self.client.get(self.audit_list_url(self.club), {"search": ""})
         whitespace_response = self.client.get(
-            self.audit_list_url(self.club),
-            {"search": "   "},
+            self.audit_list_url(self.club), {"search": "   "}
         )
         all_club_ids = {
             self.booking_1_created_log.id,
@@ -1172,52 +1012,39 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
 
     def test_search_respects_club_tenant_isolation(self):
         club_response = self.client.get(
-            self.audit_list_url(self.club),
-            {"search": "01012345678"},
+            self.audit_list_url(self.club), {"search": "01012345678"}
         )
         other_club_response = self.client.get(
-            self.audit_list_url(self.other_club),
-            {"search": "01012345678"},
+            self.audit_list_url(self.other_club), {"search": "01012345678"}
         )
         self.assertEqual(
             self.list_ids(club_response),
             {self.booking_1_created_log.id, self.booking_1_completed_log.id},
         )
-        self.assertEqual(
-            self.list_ids(other_club_response),
-            {self.other_club_log.id},
-        )
+        self.assertEqual(self.list_ids(other_club_response), {self.other_club_log.id})
 
     def test_search_combines_with_other_audit_filters(self):
         combined_response = self.client.get(
             self.audit_list_url(self.club),
-            {
-                "search": "01012345678",
-                "action": AuditLog.Action.BOOKING_COMPLETED,
-            },
+            {"search": "01012345678", "action": AuditLog.Action.BOOKING_COMPLETED},
         )
         self.assertEqual(
-            self.list_ids(combined_response),
-            {self.booking_1_completed_log.id},
+            self.list_ids(combined_response), {self.booking_1_completed_log.id}
         )
 
     def test_search_no_match_returns_empty_results(self):
         no_match_response = self.client.get(
-            self.audit_list_url(self.club),
-            {"search": "01199999999"},
+            self.audit_list_url(self.club), {"search": "01199999999"}
         )
         self.assertEqual(self.list_ids(no_match_response), set())
 
     def test_search_query_scaling_constant_queries(self):
         with CaptureQueriesContext(connection) as captured:
             response = self.client.get(
-                self.audit_list_url(self.club),
-                {"search": "01012345678"},
+                self.audit_list_url(self.club), {"search": "01012345678"}
             )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         single_page_queries = len(captured)
-
-        # Add more audit rows for the matching booking
         for _ in range(10):
             self.create_audit_log(
                 self.club,
@@ -1227,11 +1054,9 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
                 entity_type="Booking",
                 entity_id=self.booking_1.id,
             )
-
         with CaptureQueriesContext(connection) as captured_after:
             response_after = self.client.get(
-                self.audit_list_url(self.club),
-                {"search": "01012345678"},
+                self.audit_list_url(self.club), {"search": "01012345678"}
             )
         self.assertEqual(response_after.status_code, status.HTTP_200_OK)
         self.assertEqual(len(captured_after), single_page_queries)

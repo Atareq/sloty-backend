@@ -57,7 +57,7 @@ Authorized source querysets are built **before** aggregation via source-domain `
 
 Do not apply Transaction Staff `created_by` narrowing to dashboard financial aggregations. Do not apply Settlement collector narrowing to dashboard settlement totals. Do not implicitly court-scope custody from Staff assignment.
 
-Dashboard views use Spine source querysets. They do not use `ClubScopedAccessMixin` (no implicit `last_sync_at` updates).
+Dashboard views use Spine source querysets. They do not write presence state.
 
 ## Cross-App Dependencies
 

@@ -1,7 +1,7 @@
 """
 Players filters.
 
-FilterSet classes must not perform permission checks or membership lookups.
+FilterSet classes must not perform permission checks or Profile scope lookups.
 The ViewSet's get_queryset() returns an already-authorized, club-scoped
 queryset before any filter is applied.
 """

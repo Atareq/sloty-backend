@@ -12,9 +12,16 @@ from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from apps.accounts.models import User
 from apps.accounts.services import find_orphan_business_users
-from apps.clubs.models import Club, ClubMembership
+from apps.clubs.models import Club
 from apps.courts.models import Court
 from apps.players.models import PlayerProfile
+from apps.profiles.models import (
+    AdminProfile,
+    OwnerProfile,
+    Profile,
+    StaffCourtAccess,
+    StaffProfile,
+)
 
 
 class AccountAPITestCase(APITestCase):
@@ -28,7 +35,24 @@ class AccountAPITestCase(APITestCase):
         )
 
     def create_platform_admin(self, username="platform-admin") -> User:
-        return self.create_user(username=username, is_platform_admin=True)
+        user = self.create_user(username=username)
+        AdminProfile.objects.create(user=user, role=Profile.Role.ADMIN)
+        return user
+
+    def create_owner(self, username="owner-user", clubs=None, **extra_fields) -> User:
+        user = self.create_user(username=username, **extra_fields)
+        owner_profile = OwnerProfile.objects.create(user=user, role=Profile.Role.OWNER)
+        if clubs:
+            owner_profile.clubs.set(clubs)
+        return user
+
+    def create_staff(self, court: Court, username="staff-user", **extra_fields) -> User:
+        user = self.create_user(username=username, **extra_fields)
+        staff_profile = StaffProfile.objects.create(
+            user=user, role=Profile.Role.STAFF, club=court.club
+        )
+        StaffCourtAccess.objects.create(staff_profile=staff_profile, court=court)
+        return user
 
     def create_club(self, name: str, slug: str, **extra_fields) -> Club:
         data = {
@@ -49,14 +73,6 @@ class AccountAPITestCase(APITestCase):
         data.update(extra_fields)
         return Court.objects.create(**data)
 
-    def create_membership(self, user, club, role, court=None):
-        return ClubMembership.objects.create(
-            club=club,
-            user=user,
-            role=role,
-            court=court,
-        )
-
 
 class MeAPITests(AccountAPITestCase):
     def test_anonymous_user_gets_401(self):
@@ -64,40 +80,22 @@ class MeAPITests(AccountAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_authenticated_user_gets_profile_with_active_memberships(self):
+    def test_authenticated_user_gets_me_profile(self):
         creator = self.create_user(
             username="profile-creator",
             first_name="Creator",
             last_name="User",
         )
-        user = self.create_user(
+        staff_club = self.create_club("Champions", "champions")
+        staff_court = self.create_court(staff_club, "Court 1")
+        user = self.create_staff(
+            court=staff_court,
             username="profile-user",
             email="profile@example.com",
             first_name="Profile",
             last_name="User",
             phone_number="+201000000001",
             created_by=creator,
-        )
-        owner_club = self.create_club("El Nasr", "el-nasr")
-        staff_club = self.create_club("Champions", "champions")
-        staff_court = self.create_court(staff_club, "Court 1")
-        owner_membership = self.create_membership(
-            user,
-            owner_club,
-            ClubMembership.Role.OWNER,
-        )
-        staff_membership = self.create_membership(
-            user,
-            staff_club,
-            ClubMembership.Role.STAFF,
-            court=staff_court,
-        )
-        inactive_club = self.create_club("Inactive Scope", "inactive-scope")
-        ClubMembership.objects.create(
-            club=inactive_club,
-            user=user,
-            role=ClubMembership.Role.OWNER,
-            is_active=False,
         )
         self.client.force_authenticate(user=user)
 
@@ -114,51 +112,19 @@ class MeAPITests(AccountAPITestCase):
                 "last_name",
                 "phone_number",
                 "is_active",
-                "is_platform_admin",
+                "profile_role",
                 "account_created_by",
-                "memberships",
             },
         )
         self.assertEqual(response.data["id"], user.id)
         self.assertEqual(response.data["username"], user.username)
-        self.assertFalse(response.data["is_platform_admin"])
+        self.assertEqual(response.data["profile_role"], "STAFF")
         self.assertEqual(
             response.data["account_created_by"],
             {"id": creator.id, "name": "Creator User"},
         )
         self.assertNotIn("password", response.data)
         self.assertNotIn("hash_password", response.data)
-
-        memberships = {item["id"]: item for item in response.data["memberships"]}
-        self.assertEqual(set(memberships), {owner_membership.id, staff_membership.id})
-        self.assertEqual(memberships[owner_membership.id]["role"], "OWNER")
-        self.assertEqual(memberships[owner_membership.id]["club"]["slug"], "el-nasr")
-        self.assertIsNone(memberships[owner_membership.id]["court"])
-        self.assertEqual(
-            memberships[owner_membership.id]["permissions"],
-            {
-                "can_change_pricing": True,
-                "can_manage_working_hours": True,
-                "can_manage_settlements": True,
-            },
-        )
-        self.assertEqual(memberships[staff_membership.id]["role"], "STAFF")
-        self.assertEqual(
-            memberships[staff_membership.id]["club"]["slug"],
-            "champions",
-        )
-        self.assertEqual(
-            memberships[staff_membership.id]["court"],
-            {"id": staff_court.id, "name": staff_court.name},
-        )
-        self.assertEqual(
-            memberships[staff_membership.id]["permissions"],
-            {
-                "can_change_pricing": False,
-                "can_manage_working_hours": False,
-                "can_manage_settlements": False,
-            },
-        )
 
     def test_authenticated_user_without_creator_gets_null_account_created_by(self):
         user = self.create_user(username="profile-user-without-creator")
@@ -169,12 +135,9 @@ class MeAPITests(AccountAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIsNone(response.data["account_created_by"])
 
-    def test_me_response_prefetches_creator_and_active_memberships(self):
+    def test_me_response_prefetches_creator_and_profile(self):
         creator = self.create_user(username="query-creator")
         user = self.create_user(username="query-profile-user", created_by=creator)
-        club = self.create_club("Query Club", "query-club")
-        court = self.create_court(club, "Query Court")
-        self.create_membership(user, club, ClubMembership.Role.STAFF, court=court)
         self.client.force_authenticate(user=user)
 
         with CaptureQueriesContext(connection) as queries:
@@ -194,11 +157,7 @@ class MeAPITests(AccountAPITestCase):
             fields["account_created_by"]["allOf"][0]["$ref"],
             "#/components/schemas/AccountCreator",
         )
-        self.assertEqual(fields["memberships"]["type"], "array")
-        self.assertEqual(
-            fields["memberships"]["items"]["$ref"],
-            "#/components/schemas/UserMembership",
-        )
+        self.assertIn("profile_role", fields)
 
 
 class JWTAPITests(AccountAPITestCase):
@@ -369,14 +328,14 @@ class JWTAPITests(AccountAPITestCase):
         self.assertNotIn("club_id", claims)
         self.assertNotIn("court_id", claims)
 
-    def test_platform_admin_token_has_platform_role(self):
+    def test_platform_admin_token_has_admin_role(self):
         admin = self.create_platform_admin(username="claims-admin")
 
         response = self.obtain_token(admin.username)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         claims = self.decode_access(response.data["access"])
-        self.assertEqual(claims["role"], "PLATFORM_ADMIN")
+        self.assertEqual(claims["role"], "ADMIN")
         self.assertEqual(claims["name"], admin.username)
 
     def test_platform_admin_token_with_club_slug_includes_club_context(self):
@@ -387,47 +346,32 @@ class JWTAPITests(AccountAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         claims = self.decode_access(response.data["access"])
-        self.assertEqual(claims["role"], "PLATFORM_ADMIN")
+        self.assertEqual(claims["role"], "ADMIN")
         self.assertEqual(claims["club_id"], club.id)
         self.assertNotIn("court_id", claims)
 
     def test_owner_token_with_club_slug_has_owner_claims(self):
-        owner = self.create_user(username="claims-owner")
         club = self.create_club("Owner Claims Club", "owner-claims-club")
-        self.create_membership(owner, club, ClubMembership.Role.OWNER)
+        owner = self.create_owner(username="claims-owner", clubs=[club])
 
         response = self.obtain_token(owner.username, club_slug=club.slug)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         claims = self.decode_access(response.data["access"])
-        self.assertEqual(claims["role"], ClubMembership.Role.OWNER)
-        self.assertEqual(claims["club_id"], club.id)
-        self.assertNotIn("court_id", claims)
-
-    def test_manager_token_with_club_slug_has_manager_claims(self):
-        manager = self.create_user(username="claims-manager")
-        club = self.create_club("Manager Claims Club", "manager-claims-club")
-        self.create_membership(manager, club, ClubMembership.Role.MANAGER)
-
-        response = self.obtain_token(manager.username, club_slug=club.slug)
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        claims = self.decode_access(response.data["access"])
-        self.assertEqual(claims["role"], ClubMembership.Role.MANAGER)
+        self.assertEqual(claims["role"], Profile.Role.OWNER)
         self.assertEqual(claims["club_id"], club.id)
         self.assertNotIn("court_id", claims)
 
     def test_staff_token_with_club_slug_has_staff_and_court_claims(self):
-        staff = self.create_user(username="claims-staff")
         club = self.create_club("Staff Claims Club", "staff-claims-club")
         court = self.create_court(club, "Staff Claims Court")
-        self.create_membership(staff, club, ClubMembership.Role.STAFF, court=court)
+        staff = self.create_staff(court=court, username="claims-staff")
 
         response = self.obtain_token(staff.username, club_slug=club.slug)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         claims = self.decode_access(response.data["access"])
-        self.assertEqual(claims["role"], ClubMembership.Role.STAFF)
+        self.assertEqual(claims["role"], Profile.Role.STAFF)
         self.assertEqual(claims["club_id"], club.id)
         self.assertEqual(claims["court_id"], court.id)
 
@@ -441,7 +385,7 @@ class JWTAPITests(AccountAPITestCase):
         self.assertEqual(response.data["code"], "VALIDATION_ERROR")
         self.assertIn("club_slug", response.data["field_errors"])
 
-    def test_club_slug_without_membership_is_rejected_for_non_platform_user(self):
+    def test_club_slug_without_scope_is_rejected_for_non_platform_user(self):
         user = self.create_user(username="unauthorized-club-token-user")
         club = self.create_club("Unauthorized Claims Club", "unauthorized-claims")
 
@@ -453,10 +397,9 @@ class JWTAPITests(AccountAPITestCase):
         self.assertEqual(response.data["details"]["club_slug"], club.slug)
 
     def test_refresh_preserves_custom_claims(self):
-        staff = self.create_user(username="refresh-claims-staff")
         club = self.create_club("Refresh Claims Club", "refresh-claims")
         court = self.create_court(club, "Refresh Claims Court")
-        self.create_membership(staff, club, ClubMembership.Role.STAFF, court=court)
+        staff = self.create_staff(court=court, username="refresh-claims-staff")
         token_response = self.obtain_token(staff.username, club_slug=club.slug)
 
         refresh_response = self.client.post(
@@ -467,7 +410,7 @@ class JWTAPITests(AccountAPITestCase):
 
         self.assertEqual(refresh_response.status_code, status.HTTP_200_OK)
         claims = self.decode_access(refresh_response.data["access"])
-        self.assertEqual(claims["role"], ClubMembership.Role.STAFF)
+        self.assertEqual(claims["role"], Profile.Role.STAFF)
         self.assertEqual(claims["club_id"], club.id)
         self.assertEqual(claims["court_id"], court.id)
 
@@ -565,19 +508,14 @@ class JWTAPITests(AccountAPITestCase):
         self.assertEqual(refresh_response.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(refresh_response.data["code"], "PASSWORD_CHANGED")
 
-    def test_stale_club_claim_does_not_bypass_deactivated_membership(self):
-        staff = self.create_user(username="stale-membership-claims-user")
+    def test_stale_club_claim_does_not_bypass_revoked_access(self):
         club = self.create_club("Stale Claims Club", "stale-claims-club")
         court = self.create_court(club, "Stale Claims Court")
-        membership = self.create_membership(
-            staff,
-            club,
-            ClubMembership.Role.STAFF,
-            court=court,
-        )
+        staff = self.create_staff(court=court, username="stale-claims-user")
         token_response = self.obtain_token(staff.username, club_slug=club.slug)
-        membership.is_active = False
-        membership.save(update_fields=["is_active"])
+
+        # Revoke staff access by deleting the profile
+        staff.profile.delete()
 
         self.client.credentials(
             HTTP_AUTHORIZATION=f"Bearer {token_response.data['access']}"
@@ -634,13 +572,12 @@ class PasswordChangeAPITests(AccountAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_user_can_change_own_password_without_changing_memberships(self):
+    def test_user_can_change_own_password_without_affecting_profile(self):
         club = self.create_club("Password Change Club", "password-change-club")
-        membership = self.create_membership(
-            self.user,
-            club,
-            ClubMembership.Role.OWNER,
+        owner_profile = OwnerProfile.objects.create(
+            user=self.user, role=Profile.Role.OWNER
         )
+        owner_profile.clubs.add(club)
         player_profile = PlayerProfile.objects.create(
             phone_number="+201066661111",
             full_name="Password Change Player",
@@ -658,13 +595,12 @@ class PasswordChangeAPITests(AccountAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertEqual(response.content, b"")
         self.user.refresh_from_db()
-        membership.refresh_from_db()
+        owner_profile.refresh_from_db()
         player_profile.refresh_from_db()
         self.assertNotEqual(self.user.password, original_password_hash)
         self.assertTrue(self.user.check_password(self.new_password))
         self.assertFalse(self.user.check_password(self.password))
-        self.assertTrue(membership.is_active)
-        self.assertEqual(membership.role, ClubMembership.Role.OWNER)
+        self.assertEqual(owner_profile.role, Profile.Role.OWNER)
         self.assertEqual(player_profile.user_id, self.user.id)
 
     def test_wrong_current_password_returns_validation_error(self):
@@ -755,7 +691,7 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         "last_name",
         "phone_number",
         "is_active",
-        "is_platform_admin",
+        "profile_role",
         "created_by",
     }
 
@@ -802,33 +738,6 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         self.assertEqual(response.data["username"], self.non_platform_user.username)
         self.assertNotIn("password", response.data)
 
-    def test_platform_admin_cannot_create_non_platform_user(self):
-        self.authenticate_platform_admin()
-
-        response = self.client.post(
-            reverse("user-list"),
-            {
-                "username": "created-user",
-                "password": "new-user-pass-123",
-                "email": "created@example.com",
-                "first_name": "Created",
-                "last_name": "User",
-                "phone_number": "+201000000002",
-                "is_active": True,
-                "is_platform_admin": False,
-            },
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(
-            response.data["field_errors"]["non_field_errors"][0]["message"],
-            "Club users must be created through a club-scoped membership endpoint.",
-        )
-        self.assertEqual(response.data["success"], False)
-        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
-        self.assertFalse(User.objects.filter(username="created-user").exists())
-
     def test_platform_admin_can_create_platform_admin_user(self):
         self.authenticate_platform_admin()
 
@@ -837,18 +746,17 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
             {
                 "username": "created-admin",
                 "password": "new-user-pass-123",
-                "is_platform_admin": True,
             },
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         user = User.objects.get(username="created-admin")
-        self.assertTrue(user.is_platform_admin)
+        self.assertTrue(user.is_platform_super_admin())
         self.assertFalse(user.is_staff)
         self.assertFalse(user.is_superuser)
         self.assertEqual(user.created_by, self.platform_admin)
-        self.assertTrue(response.data["is_platform_admin"])
+        self.assertEqual(set(response.data), self.user_list_response_fields)
         self.assertNotIn("password", response.data)
 
     def test_user_create_rejects_role_club_and_court_fields(self):
@@ -859,8 +767,7 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
             {
                 "username": "bad-scope-user",
                 "password": "new-user-pass-123",
-                "is_platform_admin": True,
-                "role": ClubMembership.Role.STAFF,
+                "role": "STAFF",
                 "club": 1,
                 "court": 1,
             },
@@ -883,7 +790,6 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
             {
                 "username": "flagged-user",
                 "password": "new-user-pass-123",
-                "is_platform_admin": True,
                 "is_staff": True,
                 "is_superuser": True,
             },
@@ -892,14 +798,14 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         user = User.objects.get(username="flagged-user")
-        self.assertTrue(user.is_platform_admin)
+        self.assertTrue(user.is_platform_super_admin())
         self.assertFalse(user.is_staff)
         self.assertFalse(user.is_superuser)
         self.assertNotIn("is_staff", response.data)
         self.assertNotIn("is_superuser", response.data)
         self.assertNotIn("password", response.data)
 
-    def test_platform_admin_can_patch_user_identity_and_platform_flag(self):
+    def test_platform_admin_can_patch_user_identity(self):
         self.authenticate_platform_admin()
 
         response = self.client.patch(
@@ -909,7 +815,6 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
                 "first_name": "Updated",
                 "last_name": "User",
                 "phone_number": "+201000000003",
-                "is_platform_admin": True,
             },
             format="json",
         )
@@ -923,9 +828,7 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
             str(self.non_platform_user.phone_number),
             "+201000000003",
         )
-        self.assertTrue(self.non_platform_user.is_platform_admin)
         self.assertEqual(set(response.data), self.user_list_response_fields)
-        self.assertTrue(response.data["is_platform_admin"])
         self.assertNotIn("password", response.data)
 
     def test_platform_admin_can_deactivate_user(self):
@@ -963,8 +866,7 @@ class OrphanBusinessUserIntegrityTests(AccountAPITestCase):
         inactive_user.save(update_fields=["is_active"])
         platform_admin = self.create_platform_admin("orphan-platform-admin")
         club = self.create_club("Scoped Club", "scoped-club")
-        scoped_user = self.create_user(username="scoped-business-user")
-        self.create_membership(scoped_user, club, ClubMembership.Role.OWNER)
+        scoped_user = self.create_owner(username="scoped-business-user", clubs=[club])
 
         orphan_ids = set(find_orphan_business_users().values_list("id", flat=True))
 
@@ -986,84 +888,54 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
         self.court_c = self.create_court(self.club_c, "Court Gamma")
 
         # Owner of Club A and Club B
-        self.owner = self.create_user(
+        self.owner = self.create_owner(
             "owner_user",
+            clubs=[self.club_a, self.club_b],
             first_name="Tarek",
             last_name="Owner",
         )
-        self.create_membership(self.owner, self.club_a, ClubMembership.Role.OWNER)
-        self.create_membership(self.owner, self.club_b, ClubMembership.Role.OWNER)
-
-        # Manager of Club A
-        self.manager_a = self.create_user(
-            "manager_a",
-            first_name="Mona",
-            last_name="Manager",
-        )
-        self.create_membership(self.manager_a, self.club_a, ClubMembership.Role.MANAGER)
 
         # Staff in Club A
-        self.staff_a1 = self.create_user(
-            "staff_ahmed",
+        self.staff_a1 = self.create_staff(
+            court=self.court_a,
+            username="staff_ahmed",
             first_name="Ahmed",
             last_name="Mohamed",
             email="ahmed@example.com",
             phone_number="+201012345678",
         )
-        self.create_membership(
-            self.staff_a1,
-            self.club_a,
-            ClubMembership.Role.STAFF,
-            court=self.court_a,
-        )
 
-        self.staff_a2 = self.create_user(
-            "staff_alo",
+        self.staff_a2 = self.create_staff(
+            court=self.court_a,
+            username="staff_alo",
             first_name="Alo",
             last_name="Hassan",
             email="alo@example.com",
             phone_number="+201098765432",
         )
-        self.create_membership(
-            self.staff_a2,
-            self.club_a,
-            ClubMembership.Role.STAFF,
-            court=self.court_a,
-        )
 
         # Staff in Club B
-        self.staff_b = self.create_user(
-            "staff_beta",
+        self.staff_b = self.create_staff(
+            court=self.court_b,
+            username="staff_beta",
             first_name="Beta",
             last_name="Staff",
             email="beta@example.com",
             phone_number="+201122334455",
         )
-        self.create_membership(
-            self.staff_b,
-            self.club_b,
-            ClubMembership.Role.STAFF,
-            court=self.court_b,
-        )
 
         # Staff in Club C (unrelated club)
-        self.staff_c = self.create_user(
-            "staff_gamma",
+        self.staff_c = self.create_staff(
+            court=self.court_c,
+            username="staff_gamma",
             first_name="Alo",
             last_name="External",
             email="gamma@example.com",
             phone_number="+201233445566",
         )
-        self.create_membership(
-            self.staff_c,
-            self.club_c,
-            ClubMembership.Role.STAFF,
-            court=self.court_c,
-        )
 
         # External Owner of Club C
-        self.owner_c = self.create_user("owner_c")
-        self.create_membership(self.owner_c, self.club_c, ClubMembership.Role.OWNER)
+        self.owner_c = self.create_owner("owner_c", clubs=[self.club_c])
 
         # Platform Admin
         self.platform_admin = self.create_platform_admin()
@@ -1081,7 +953,6 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
         self.assertIn(self.staff_a2.id, ids)
         self.assertIn(self.staff_b.id, ids)
         self.assertNotIn(self.staff_c.id, ids)
-        self.assertNotIn(self.manager_a.id, ids)
         self.assertNotIn(self.owner.id, ids)
         self.assertNotIn(self.owner_c.id, ids)
         self.assertNotIn(self.platform_admin.id, ids)
@@ -1113,9 +984,9 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
         self.assertEqual(resp_owner.status_code, status.HTTP_200_OK)
         self.assertEqual(self.list_ids(resp_owner), set())
 
-        resp_mgr = self.client.get(reverse("user-list"), {"role": "MANAGER"})
-        self.assertEqual(resp_mgr.status_code, status.HTTP_200_OK)
-        self.assertEqual(self.list_ids(resp_mgr), set())
+        resp_admin = self.client.get(reverse("user-list"), {"role": "ADMIN"})
+        self.assertEqual(resp_admin.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(resp_admin), set())
 
         resp_staff = self.client.get(reverse("user-list"), {"role": "STAFF"})
         self.assertEqual(resp_staff.status_code, status.HTTP_200_OK)
@@ -1166,15 +1037,15 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
         resp_c = self.client.get(reverse("user-detail", kwargs={"pk": self.staff_c.pk}))
         self.assertEqual(resp_c.status_code, status.HTTP_404_NOT_FOUND)
 
-        resp_mgr = self.client.get(
-            reverse("user-detail", kwargs={"pk": self.manager_a.pk})
-        )
-        self.assertEqual(resp_mgr.status_code, status.HTTP_404_NOT_FOUND)
-
         resp_admin = self.client.get(
             reverse("user-detail", kwargs={"pk": self.platform_admin.pk})
         )
         self.assertEqual(resp_admin.status_code, status.HTTP_404_NOT_FOUND)
+
+        resp_owner_c = self.client.get(
+            reverse("user-detail", kwargs={"pk": self.owner_c.pk})
+        )
+        self.assertEqual(resp_owner_c.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_owner_cannot_create_or_patch_users(self):
         self.client.force_authenticate(user=self.owner)
@@ -1183,7 +1054,6 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
             {
                 "username": "new_staff",
                 "password": "password123",
-                "is_platform_admin": False,
             },
             format="json",
         )
@@ -1196,56 +1066,33 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
         )
         self.assertEqual(patch_resp.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_manager_cannot_access_users_endpoint(self):
-        self.client.force_authenticate(user=self.manager_a)
-        response = self.client.get(reverse("user-list"))
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-
-        search_response = self.client.get(reverse("user-list"), {"search": "alo"})
-        self.assertEqual(search_response.status_code, status.HTTP_403_FORBIDDEN)
-
     def test_staff_cannot_access_users_endpoint(self):
         self.client.force_authenticate(user=self.staff_a1)
         response = self.client.get(reverse("user-list"))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_soft_deleted_staff_membership_is_excluded(self):
-        from django.utils import timezone
-
-        ClubMembership.objects.filter(user=self.staff_a2, club=self.club_a).update(
-            deleted_at=timezone.now()
-        )
-        self.client.force_authenticate(user=self.owner)
-        response = self.client.get(reverse("user-list"))
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        ids = self.list_ids(response)
-        self.assertNotIn(self.staff_a2.id, ids)
-
-    def test_deactivated_owner_cannot_access_users_endpoint(self):
-        ClubMembership.objects.filter(user=self.owner).update(is_active=False)
-        self.client.force_authenticate(user=self.owner)
+    def test_unassigned_user_cannot_access_users_endpoint(self):
+        user = self.create_user("plain_user")
+        self.client.force_authenticate(user=user)
         response = self.client.get(reverse("user-list"))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_query_count_is_bounded_for_list(self):
-        self.client.force_authenticate(user=self.owner)
-        with CaptureQueriesContext(connection) as capture_three:
-            resp_three = self.client.get(reverse("user-list"))
-        self.assertEqual(resp_three.status_code, status.HTTP_200_OK)
-        queries_three = len(capture_three)
+    def test_listing_more_staff_does_not_add_per_user_queries(self):
+        # Each request starts with an uncached User.profile reverse relation.
+        self.client.force_authenticate(user=User.objects.get(pk=self.owner.pk))
+        with CaptureQueriesContext(connection) as small_queries:
+            small = self.client.get(reverse("user-list"))
+        self.assertEqual(small.status_code, status.HTTP_200_OK)
+        self.assertEqual(small.data["count"], 3)
 
-        for i in range(10):
-            extra_staff = self.create_user(f"extra_staff_{i}")
-            self.create_membership(
-                extra_staff,
-                self.club_a,
-                ClubMembership.Role.STAFF,
-                court=self.court_a,
-            )
+        for index in range(10):
+            self.create_staff(self.court_a, username=f"list-scale-staff-{index}")
 
-        with CaptureQueriesContext(connection) as capture_thirteen:
-            resp_thirteen = self.client.get(reverse("user-list"))
-        self.assertEqual(resp_thirteen.status_code, status.HTTP_200_OK)
-        queries_thirteen = len(capture_thirteen)
-
-        self.assertEqual(queries_three, queries_thirteen)
+        self.client.force_authenticate(user=User.objects.get(pk=self.owner.pk))
+        with CaptureQueriesContext(connection) as large_queries:
+            large = self.client.get(reverse("user-list"))
+        self.assertEqual(large.status_code, status.HTTP_200_OK)
+        self.assertEqual(large.data["count"], 13)
+        self.assertEqual(len(large.data["results"]), 13)
+        self.assertEqual(len(small_queries), len(large_queries))
+        self.assertLessEqual(len(large_queries), 5)

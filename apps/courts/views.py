@@ -1,5 +1,6 @@
 from django.shortcuts import get_object_or_404
 from django.utils.translation import gettext_lazy as _
+from drf_spectacular.openapi import AutoSchema
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied
@@ -160,6 +161,14 @@ class CourtWorkingHourViewSet(
         self.reject_individual_write()
 
 
+class DirectObjectAutoSchema(AutoSchema):
+    """Ensure non-paginated endpoints generate single object schema
+    rather than array."""
+
+    def _is_list_view(self, serializer=None) -> bool:
+        return False
+
+
 @extend_schema_view(
     list=extend_schema(
         tags=["Courts"],
@@ -187,6 +196,8 @@ class CourtWeeklyWorkingHoursViewSet(SlotyScopedResourceMixin, GenericViewSet):
     authorization_scope = ResourceScope.COURT
     authorization_prefetch_related = ("working_hours__pricing_periods",)
     serializer_class = CourtWeeklyWorkingHoursSerializer
+    pagination_class = None
+    schema = DirectObjectAutoSchema()
     permission_classes = (SlotyBasePermission,)
     http_method_names = ("get", "put", "head", "options")
 

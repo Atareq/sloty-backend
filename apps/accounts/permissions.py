@@ -25,7 +25,11 @@ class CanAccessUsers(BasePermission):
         if user.is_platform_super_admin():
             return True
         if request.method in SAFE_METHODS:
-            return Profile.objects.filter(user=user, role=Profile.Role.OWNER).exists()
+            return Profile.objects.filter(
+                user=user,
+                role=Profile.Role.OWNER,
+                is_enabled=True,
+            ).exists()
         return False
 
     def has_object_permission(self, request, view, obj) -> bool:
@@ -38,6 +42,8 @@ class CanAccessUsers(BasePermission):
             return Profile.objects.filter(
                 user=user,
                 role=Profile.Role.OWNER,
-                owner_profile__clubs__staff_profiles__profile__user=obj,
+                is_enabled=True,
+                owner_profile__clubs__staff_profiles__user=obj,
+                owner_profile__clubs__staff_profiles__is_enabled=True,
             ).exists()
         return False

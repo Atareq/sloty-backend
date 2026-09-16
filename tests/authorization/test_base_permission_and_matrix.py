@@ -10,7 +10,8 @@ from apps.common.authorization.mixins import ClubScopedViewMixin
 from apps.common.authorization.permissions import SlotyBasePermission
 from apps.common.authorization.roles import Role
 from apps.courts.models import Court
-from apps.profiles.models import Profile, StaffProfile
+from apps.profiles.models import Profile, StaffCourtAccess, StaffProfile
+from tests.profile_factories import ProfileIdentityMixin
 
 
 class SampleResourceViewSet(ClubScopedViewMixin, viewsets.ViewSet):
@@ -29,7 +30,8 @@ class SampleResourceViewSet(ClubScopedViewMixin, viewsets.ViewSet):
         return Response({"status": "custom"})
 
 
-class BasePermissionAndMatrixTestCase(APITestCase):
+class BasePermissionAndMatrixTestCase(ProfileIdentityMixin, APITestCase):
+
     def setUp(self):
         self.factory = APIRequestFactory()
         self.club = Club.objects.create(
@@ -42,8 +44,10 @@ class BasePermissionAndMatrixTestCase(APITestCase):
             club=self.club, name="Court", default_price="200.00"
         )
         self.staff = User.objects.create_user(username="staff", password="password")
-        profile = Profile.objects.create(user=self.staff, role=Profile.Role.STAFF)
-        StaffProfile.objects.create(profile=profile, court=self.court)
+        sp = StaffProfile.objects.create(
+            user=self.staff, role=Profile.Role.STAFF, club=self.club
+        )
+        StaffCourtAccess.objects.create(staff_profile=sp, court=self.court)
 
     def test_default_deny_rules(self):
         self.assertFalse(is_action_allowed("UNKNOWN", "BookingViewSet", "list"))
@@ -57,10 +61,9 @@ class BasePermissionAndMatrixTestCase(APITestCase):
         self.assertTrue(is_action_allowed(Role.OWNER, "SettlementViewSet", "create"))
         self.assertFalse(is_action_allowed(Role.STAFF, "SettlementViewSet", "create"))
         self.assertFalse(is_action_allowed(Role.STAFF, "AuditLogViewSet", "list"))
-        self.assertFalse(is_action_allowed("MANAGER", "BookingViewSet", "list"))
-        self.assertFalse(
-            is_action_allowed(Role.OWNER, "ClubMembershipViewSet", "create")
-        )
+        from apps.common.authorization.matrix import ROLE_PERMISSIONS
+
+        self.assertEqual(set(ROLE_PERMISSIONS), set(Profile.Role.values))
 
     def test_drf_uses_profile_context_and_matrix(self):
         view = SampleResourceViewSet.as_view({"get": "list", "post": "cancel"})
@@ -69,7 +72,6 @@ class BasePermissionAndMatrixTestCase(APITestCase):
             view(unauthenticated, club_slug=self.club.slug).status_code,
             status.HTTP_401_UNAUTHORIZED,
         )
-
         request = self.factory.get("/api/v1/clubs/al-ahly-club/sample/")
         force_authenticate(request, user=self.staff)
         response = view(request, club_slug=self.club.slug)

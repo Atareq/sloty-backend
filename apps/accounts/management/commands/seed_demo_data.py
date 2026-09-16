@@ -12,7 +12,13 @@ from apps.bookings.services import resolve_booking_club_player
 from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.courts.services import replace_weekly_working_hours
-from apps.profiles.models import AdminProfile, OwnerProfile, Profile, StaffProfile
+from apps.profiles.models import (
+    AdminProfile,
+    OwnerProfile,
+    Profile,
+    StaffCourtAccess,
+    StaffProfile,
+)
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
@@ -209,7 +215,6 @@ class Command(BaseCommand):
             if user.created_by_id != getattr(created_by, "id", None):
                 user.created_by = created_by
                 user.save(update_fields=["created_by"])
-        User.objects.filter(username="manager").update(is_active=False)
         return users
 
     def create_albaladya_club(self, users):
@@ -246,24 +251,21 @@ class Command(BaseCommand):
         return court
 
     def create_albaladya_profiles(self, users, club, court):
-        profiles = {}
-        for username, role in (
-            ("admin", Profile.Role.ADMIN),
-            ("owner", Profile.Role.OWNER),
-            ("staff", Profile.Role.STAFF),
-        ):
-            profile, _ = Profile.objects.update_or_create(
-                user=users[username], defaults={"role": role}
-            )
-            profiles[username] = profile
-
-        AdminProfile.objects.get_or_create(profile=profiles["admin"])
-        owner_profile, _ = OwnerProfile.objects.get_or_create(profile=profiles["owner"])
-        owner_profile.clubs.set([club])
-        StaffProfile.objects.update_or_create(
-            profile=profiles["staff"], defaults={"court": court}
+        admin, _ = AdminProfile.objects.update_or_create(
+            user=users["admin"],
+            defaults={"role": Profile.Role.ADMIN, "is_enabled": True},
         )
-        return profiles
+        owner, _ = OwnerProfile.objects.update_or_create(
+            user=users["owner"],
+            defaults={"role": Profile.Role.OWNER, "is_enabled": True},
+        )
+        owner.clubs.set([club])
+        staff, _ = StaffProfile.objects.update_or_create(
+            user=users["staff"],
+            defaults={"role": Profile.Role.STAFF, "is_enabled": True, "club": club},
+        )
+        StaffCourtAccess.objects.get_or_create(staff_profile=staff, court=court)
+        return {"admin": admin, "owner": owner, "staff": staff}
 
     def albaladya_working_hours_payload(self):
         rows = []
@@ -325,9 +327,6 @@ class Command(BaseCommand):
             user.set_password(DEMO_PASSWORD)
             user.save(update_fields=["password"])
             users[username] = user
-        User.objects.filter(
-            username__in=("manager_a", "manager_b", "manager_c")
-        ).update(is_active=False)
         return users
 
     def create_clubs(self, users):
@@ -390,23 +389,26 @@ class Command(BaseCommand):
     def create_profiles(self, users, clubs, courts):
         profiles = {}
         for username, _, _, role, _, _ in USER_SPECS:
-            profile, _ = Profile.objects.update_or_create(
-                user=users[username], defaults={"role": role}
-            )
-            profiles[username] = profile
             if role == Profile.Role.ADMIN:
-                AdminProfile.objects.get_or_create(profile=profile)
-
+                profiles[username], _ = AdminProfile.objects.update_or_create(
+                    user=users[username], defaults={"role": role, "is_enabled": True}
+                )
         for club_key, club in clubs.items():
             suffix = club_key.lower()
-            owner_profile, _ = OwnerProfile.objects.get_or_create(
-                profile=profiles[f"owner_{suffix}"]
+            owner, _ = OwnerProfile.objects.update_or_create(
+                user=users[f"owner_{suffix}"],
+                defaults={"role": Profile.Role.OWNER, "is_enabled": True},
             )
-            owner_profile.clubs.set([club])
-            StaffProfile.objects.update_or_create(
-                profile=profiles[f"staff_{suffix}"],
-                defaults={"court": courts[club_key][1]},
+            owner.clubs.set([club])
+            staff, _ = StaffProfile.objects.update_or_create(
+                user=users[f"staff_{suffix}"],
+                defaults={"role": Profile.Role.STAFF, "is_enabled": True, "club": club},
             )
+            StaffCourtAccess.objects.get_or_create(
+                staff_profile=staff, court=courts[club_key][1]
+            )
+            profiles[f"owner_{suffix}"] = owner
+            profiles[f"staff_{suffix}"] = staff
         return profiles
 
     def base_day(self):

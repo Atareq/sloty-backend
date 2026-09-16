@@ -4,7 +4,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.db import models
+from django.db import models, transaction
 
 from apps.clubs.models import Club
 from apps.courts.pricing import is_valid_period_bounds
@@ -101,6 +101,24 @@ class Court(models.Model):
 
     def __str__(self) -> str:
         return f"{self.club} - {self.name}"
+
+    def clean(self):
+        super().clean()
+        if self.pk and self.club_id:
+            if self.staff_court_accesses.exclude(
+                staff_profile__club_id=self.club_id
+            ).exists():
+                raise ValidationError(
+                    {"club": "Assigned staff must belong to the court's club."}
+                )
+
+    def save(self, *args, **kwargs):
+        if not self.pk:
+            return super().save(*args, **kwargs)
+        with transaction.atomic():
+            Court.objects.select_for_update().filter(pk=self.pk).first()
+            self.clean()
+            return super().save(*args, **kwargs)
 
 
 class CourtWorkingHour(models.Model):

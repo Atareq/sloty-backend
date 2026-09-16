@@ -12,7 +12,7 @@ authorization_config + scoped_queryset:
 
 This module keeps:
 - court-object access for the optional court filter (HTTP 403)
-- staff-membership validation for the optional created_by filter
+- staff Profile scope validation for the optional created_by filter
 - source querysets used before aggregation
 """
 
@@ -44,7 +44,7 @@ def can_filter_reports_by_staff(context: RequestAccessContext, user) -> bool:
     """
     if user is None or getattr(context, "club", None) is None:
         return False
-    profile = Profile.objects.filter(user=user).first()
+    profile = Profile.objects.filter(user=user, is_enabled=True).first()
     if profile is None:
         return False
     if profile.role == Profile.Role.ADMIN:
@@ -52,7 +52,8 @@ def can_filter_reports_by_staff(context: RequestAccessContext, user) -> bool:
     if profile.role == Profile.Role.OWNER:
         return profile.owner_profile.clubs.filter(pk=context.club.pk).exists()
     if profile.role == Profile.Role.STAFF:
-        return profile.staff_profile.court.club_id == context.club.pk
+        staff_profile = getattr(profile, "staff_profile", None)
+        return bool(staff_profile and staff_profile.club_id == context.club.pk)
     return False
 
 

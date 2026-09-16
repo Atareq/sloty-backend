@@ -21,15 +21,16 @@ def _is_valid_club_context(context) -> bool:
     if not user or not getattr(user, "is_authenticated", False) or club is None:
         return False
 
-    if getattr(context, "is_platform_admin", False):
-        is_platform_admin = getattr(user, "is_platform_super_admin", None)
-        return bool(
-            role == Role.ADMIN and callable(is_platform_admin) and is_platform_admin()
-        )
-
     profile = getattr(context, "profile", None)
-    if not profile or profile.user_id != user.pk or profile.role != role:
+    if (
+        not profile
+        or not profile.is_enabled
+        or profile.user_id != user.pk
+        or profile.role != role
+    ):
         return False
+    if role == Role.ADMIN:
+        return user.is_platform_super_admin()
     if role == Role.OWNER:
         owner_profile = getattr(context, "owner_profile", None)
         return bool(
@@ -40,7 +41,7 @@ def _is_valid_club_context(context) -> bool:
         )
     if role == Role.STAFF:
         staff_profile = getattr(context, "staff_profile", None)
-        return bool(staff_profile and staff_profile.court.club_id == club.pk)
+        return bool(staff_profile and staff_profile.club_id == club.pk)
     return False
 
 
@@ -49,8 +50,9 @@ def _authorized_staff_court_ids(context) -> tuple[Any, ...]:
     if court_ids:
         return court_ids
     staff_profile = getattr(context, "staff_profile", None)
-    court_id = getattr(staff_profile, "court_id", None)
-    return (court_id,) if court_id is not None else ()
+    if staff_profile is not None and hasattr(staff_profile, "court_accesses"):
+        return tuple(access.court_id for access in staff_profile.court_accesses.all())
+    return ()
 
 
 def _require_scope_value(queryset, path: str) -> QuerySet:
@@ -87,7 +89,7 @@ def _apply_court_scope(queryset, *, context, path: str) -> QuerySet:
             return queryset.none()
         return _filter_scope_ids(queryset, path=path, values=court_ids)
 
-    if getattr(context, "is_platform_admin", False) or context.role == Role.OWNER:
+    if context.role in {Role.ADMIN, Role.OWNER}:
         return queryset
     return queryset.none()
 

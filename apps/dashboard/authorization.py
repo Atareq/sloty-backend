@@ -42,15 +42,15 @@ def can_access_court(context: RequestAccessContext, court) -> bool:
 
 def can_view_financial_summary(context: RequestAccessContext) -> bool:
     """Staff see operational summary only; financial fields stay null."""
-    return context.is_platform_admin or context.role == Role.OWNER
+    return context.role in {Role.ADMIN, Role.OWNER}
 
 
 def is_staff_collector(context: RequestAccessContext) -> bool:
-    return context.role == Role.STAFF and not context.is_platform_admin
+    return context.role == Role.STAFF
 
 
 def dashboard_summary_role(context: RequestAccessContext) -> str:
-    if context.is_platform_admin:
+    if context.role == Role.ADMIN:
         return "PLATFORM_ADMIN"
     if context.role == Role.OWNER:
         return "OWNER"

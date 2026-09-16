@@ -9,7 +9,13 @@ from apps.common.authorization.resolver import resolve_club_scope, resolve_globa
 from apps.common.authorization.roles import Role
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
-from apps.profiles.models import AdminProfile, OwnerProfile, Profile, StaffProfile
+from apps.profiles.models import (
+    AdminProfile,
+    OwnerProfile,
+    Profile,
+    StaffCourtAccess,
+    StaffProfile,
+)
 
 
 class ScopeResolverTestCase(APITestCase):
@@ -46,14 +52,18 @@ class ScopeResolverTestCase(APITestCase):
 
     def create_profile_user(self, username, role, *, club=None, court=None):
         user = User.objects.create_user(username=username, password="password")
-        profile = Profile.objects.create(user=user, role=role)
         if role == Profile.Role.ADMIN:
-            AdminProfile.objects.create(profile=profile)
+            profile = AdminProfile.objects.create(user=user, role=role)
         elif role == Profile.Role.OWNER:
-            owner_profile = OwnerProfile.objects.create(profile=profile)
-            owner_profile.clubs.add(club)
+            profile = OwnerProfile.objects.create(user=user, role=role)
+            profile.clubs.add(club)
         else:
-            StaffProfile.objects.create(profile=profile, court=court)
+            target_club = club or (court.club if court else None)
+            profile = StaffProfile.objects.create(
+                user=user, role=role, club=target_club
+            )
+            if court:
+                StaffCourtAccess.objects.create(staff_profile=profile, court=court)
         return user
 
     def request_for(self, user, club):
@@ -73,7 +83,7 @@ class ScopeResolverTestCase(APITestCase):
         )
         self.assertIsInstance(context, RequestAccessContext)
         self.assertEqual(context.role, Role.OWNER)
-        self.assertEqual(context.owner_profile.profile.user_id, self.owner.id)
+        self.assertEqual(context.owner_profile.user_id, self.owner.id)
         self.assertIsNone(context.court)
 
     def test_staff_resolves_from_assigned_court_without_targeting_it(self):
@@ -81,7 +91,8 @@ class ScopeResolverTestCase(APITestCase):
             self.request_for(self.staff, self.club_a), self.club_a.slug
         )
         self.assertEqual(context.role, Role.STAFF)
-        self.assertEqual(context.staff_profile.court_id, self.court_a.id)
+        self.assertEqual(context.staff_profile.club_id, self.club_a.id)
+        self.assertEqual(context.court_ids, (self.court_a.id,))
         self.assertIsNone(context.court)
 
     def test_explicit_court_is_resolved_only_inside_url_club(self):
@@ -116,7 +127,7 @@ class ScopeResolverTestCase(APITestCase):
         context = resolve_club_scope(
             self.request_for(self.admin, self.club_b), self.club_b.slug
         )
-        self.assertTrue(context.is_platform_admin)
+        self.assertEqual(context.role, Profile.Role.ADMIN)
         self.assertEqual(context.role, Role.ADMIN)
 
     def test_context_is_cached_on_request(self):
@@ -129,5 +140,5 @@ class ScopeResolverTestCase(APITestCase):
         request = self.factory.get("/api/v1/users/")
         request.user = self.admin
         context = resolve_global_scope(request)
-        self.assertTrue(context.is_platform_admin)
+        self.assertEqual(context.role, Profile.Role.ADMIN)
         self.assertIsNone(context.club)
