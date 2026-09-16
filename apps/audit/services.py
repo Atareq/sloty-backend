@@ -59,15 +59,16 @@ def settlement_audit_snapshot(settlement):
         "settlement_id": settlement.id,
         "court_id": settlement.court_id,
         "court_name": settlement.court.name if settlement.court_id else "",
-        "collected_by_id": settlement.collected_by_id,
-        "collected_by_name": user_display_name(settlement.collected_by),
-        "period_start": settlement.period_start.isoformat(),
-        "period_end": settlement.period_end.isoformat(),
-        "status": settlement.status,
         "settled_by_id": settlement.settled_by_id,
         "settled_by_name": user_display_name(settlement.settled_by),
-        "settled_at": (
-            settlement.settled_at.isoformat() if settlement.settled_at else None
+        "created_at": (
+            settlement.created_at.isoformat() if settlement.created_at else None
+        ),
+        "period_start": (
+            settlement.period_start.isoformat() if settlement.period_start else None
+        ),
+        "period_end": (
+            settlement.period_end.isoformat() if settlement.period_end else None
         ),
         "total_amount": str(settlement.total_amount),
         "transaction_count": settlement.transaction_count,

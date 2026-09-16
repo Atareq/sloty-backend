@@ -30,7 +30,6 @@ from apps.players.serializers import (
     PlayerProfileWithVersionsSerializer,
 )
 from apps.players.services import (
-    create_club_player_version,
     find_or_create_player_profile,
     get_current_club_player,
     get_or_create_club_player,
@@ -55,7 +54,7 @@ class ClubPlayerViewSet(
     GenericViewSet,
 ):
     """
-    Club-scoped list/create/retrieve for ClubPlayer versions.
+    Club-scoped list/create/retrieve for ClubPlayer records.
 
     Authorization: ClubPlayer.authorization_config declares default_scope="club".
     scoped_queryset() enforces the club boundary — cross-club row access is
@@ -64,12 +63,6 @@ class ClubPlayerViewSet(
 
     The PlayerProfile is found-or-created globally by phone_number during
     perform_create; the club FK is injected from the resolved access context.
-
-    No update/partial_update action is exposed. ClubPlayer is a permanent,
-    versioned historical record — it is never edited in place. POSTing a
-    new display_name/player_number for an existing phone+club records a new
-    current version via create_club_player_version() and keeps the previous
-    row as historical.
     """
 
     authorization_model = ClubPlayer
@@ -99,16 +92,16 @@ class ClubPlayerViewSet(
             full_name=data.get("full_name", ""),
         )
         current = get_current_club_player(club, profile)
-        if current is None:
-            club_player, _player_created = get_or_create_club_player(
+        if (
+            current is not None
+            and current.display_name == display_name
+            and current.player_number == player_number
+        ):
+            club_player = current
+        else:
+            club_player = ClubPlayer.objects.create(
                 club=club,
                 player_profile=profile,
-                display_name=display_name,
-                player_number=player_number,
-            )
-        else:
-            club_player = create_club_player_version(
-                current,
                 display_name=display_name,
                 player_number=player_number,
             )
@@ -175,9 +168,7 @@ class PlayerProfileViewSet(
     def _club_player_prefetch(self, club):
         return Prefetch(
             "club_players",
-            queryset=ClubPlayer.objects.filter(club=club).order_by(
-                "-is_current_version", "-id"
-            ),
+            queryset=ClubPlayer.objects.filter(club=club).order_by("-id"),
             to_attr="club_versions",
         )
 

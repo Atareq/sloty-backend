@@ -37,3 +37,8 @@ class EgyptLocationGovernorateSerializer(serializers.Serializer):
 
 class EgyptLocationPayloadSerializer(serializers.Serializer):
     governorates = EgyptLocationGovernorateSerializer(many=True)
+
+
+class HealthCheckResponseSerializer(serializers.Serializer):
+    status = serializers.CharField(default="ok")
+    database = serializers.CharField(default="connected")

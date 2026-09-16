@@ -1,7 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal
 
-from django.db.models import Count, DecimalField, F, Q, Sum, Value
+from django.db.models import Count, DecimalField, F, Min, Q, Sum, Value
 from django.db.models.functions import Coalesce, TruncDate, TruncMonth, TruncWeek
 from django.utils import timezone
 from rest_framework import serializers
@@ -27,13 +27,6 @@ from apps.dashboard.authorization import (
     scoped_dashboard_courts,
     scoped_dashboard_settlements,
     scoped_dashboard_transactions,
-)
-from apps.settlements.models import Settlement
-from apps.settlements.services import (
-    aggregate_current_custody,
-    build_current_custody_collector_rows,
-    current_custody_aggregate_expressions,
-    get_current_unsettled_transactions,
 )
 from apps.transactions.models import Transaction
 from apps.transactions.services import annotate_booking_paid_amount
@@ -434,6 +427,115 @@ def get_needs_action_breakdown(bookings):
     }
 
 
+def get_current_unsettled_transactions(
+    *,
+    access=None,
+    club=None,
+    collected_by=None,
+    court=None,
+):
+    target_club = club or (access.club if access else None)
+    qs = Transaction.objects.filter(
+        club=target_club,
+        created_by__isnull=False,
+        settlement_line__isnull=True,
+        is_cancelled=False,
+    )
+    if collected_by is not None:
+        qs = qs.filter(created_by=collected_by)
+    if court is not None:
+        qs = qs.filter(court=court)
+    return qs
+
+
+def current_custody_aggregate_expressions():
+    return {
+        "transaction_count": Count("id"),
+        "collector_count": Count("created_by", distinct=True),
+        "net_amount": money_sum("amount"),
+        "booking_payments": money_sum(
+            "amount", filter=Q(transaction_type=Transaction.Type.PAYMENT)
+        ),
+        "booking_refunds": money_sum(
+            "amount", filter=Q(transaction_type=Transaction.Type.REFUND)
+        ),
+    }
+
+
+def aggregate_current_custody(queryset):
+    summary = queryset.order_by().aggregate(
+        **current_custody_aggregate_expressions(),
+        period_start=Min("created"),
+    )
+    summary["net_amount"] = summary["net_amount"] or ZERO
+    summary["booking_payments"] = summary["booking_payments"] or ZERO
+    summary["booking_refunds"] = summary["booking_refunds"] or ZERO
+    summary["period_end"] = timezone.now()
+    return summary
+
+
+def build_current_custody_collector_rows(queryset):
+    period_end = timezone.now()
+    grouped_rows = list(
+        queryset.values(
+            "created_by",
+            "created_by__first_name",
+            "created_by__last_name",
+            "created_by__username",
+        )
+        .annotate(
+            transaction_count=Count("id"),
+            collector_count=Count("created_by", distinct=True),
+            net_amount=money_sum("amount"),
+            booking_payments=money_sum(
+                "amount", filter=Q(transaction_type=Transaction.Type.PAYMENT)
+            ),
+            booking_refunds=money_sum(
+                "amount", filter=Q(transaction_type=Transaction.Type.REFUND)
+            ),
+            period_start=Min("created"),
+        )
+        .order_by("created_by")
+    )
+    collector_ids = [row["created_by"] for row in grouped_rows]
+    method_totals_by_collector = {
+        collector_id: {str(m): ZERO for m, _ in Transaction.PaymentMethod.choices}
+        for collector_id in collector_ids
+    }
+    if collector_ids:
+        for item in (
+            queryset.filter(created_by_id__in=collector_ids)
+            .order_by()
+            .values("created_by", "payment_method")
+            .annotate(total=money_sum("amount"))
+        ):
+            method_totals_by_collector[item["created_by"]][
+                str(item["payment_method"])
+            ] = (item["total"] or ZERO)
+
+    results = []
+    for row in grouped_rows:
+        collector_id = row["created_by"]
+        collector_name = (
+            f"{row['created_by__first_name']} {row['created_by__last_name']}"
+        ).strip() or row["created_by__username"]
+        results.append(
+            {
+                "collected_by": collector_id,
+                "collected_by_name": collector_name,
+                "period_start": row["period_start"],
+                "period_end": period_end,
+                "transaction_count": row["transaction_count"],
+                "total_amount": row["net_amount"] or ZERO,
+                "net_amount": row["net_amount"] or ZERO,
+                "booking_payments": row["booking_payments"] or ZERO,
+                "booking_refunds": row["booking_refunds"] or ZERO,
+                "totals_by_payment_method": method_totals_by_collector[collector_id],
+            }
+        )
+    return results
+
+
 def settled_settlements_queryset(
     *,
     access,
@@ -448,9 +550,9 @@ def settled_settlements_queryset(
     elif courts is not None:
         settlements = settlements.filter(Q(court__in=courts) | Q(court__isnull=True))
 
-    return settlements.filter(status=Settlement.Status.SETTLED).filter(
-        Q(settled_at__gte=date_from, settled_at__lt=date_to)
-        | Q(settled_at__isnull=True, created__gte=date_from, created__lt=date_to)
+    return settlements.filter(
+        created_at__gte=date_from,
+        created_at__lt=date_to,
     )
 
 

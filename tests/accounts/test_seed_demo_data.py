@@ -92,12 +92,7 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertTrue(Transaction.objects.exists())
         self.assertEqual(Settlement.objects.count(), 6)
         self.assertTrue(SettlementTransaction.objects.exists())
-        self.assertTrue(
-            Settlement.objects.filter(status=Settlement.Status.SETTLED).exists()
-        )
-        self.assertTrue(
-            Settlement.objects.filter(status=Settlement.Status.PENDING).exists()
-        )
+        self.assertTrue(Settlement.objects.filter(settled_by=platform_admin).exists())
 
         for slug in DEMO_CLUB_SLUGS:
             self.assertEqual(AuditLog.objects.filter(club__slug=slug).count(), 5)

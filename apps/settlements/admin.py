@@ -16,34 +16,23 @@ class SettlementAdmin(admin.ModelAdmin):
         "id",
         "club",
         "court",
-        "status",
         "total_amount",
-        "transaction_count",
-        "collected_by",
-        "created_by",
         "settled_by",
-        "settled_at",
-        "created",
+        "created_at",
     )
-    list_filter = ("status", "club", "court", "collected_by", "created", "settled_at")
+    list_filter = ("club", "court", "settled_by", "created_at")
     search_fields = (
         "club__slug",
         "club__name",
         "court__name",
-        "collected_by__username",
+        "settled_by__username",
     )
     readonly_fields = (
         "club",
         "court",
-        "status",
         "total_amount",
-        "transaction_count",
-        "collected_by",
-        "created_by",
         "settled_by",
-        "settled_at",
-        "created",
-        "modified",
+        "created_at",
     )
     inlines = (SettlementTransactionInline,)
 
@@ -51,7 +40,7 @@ class SettlementAdmin(admin.ModelAdmin):
 @admin.register(SettlementTransaction)
 class SettlementTransactionAdmin(admin.ModelAdmin):
     list_display = ("id", "settlement", "transaction", "amount", "created")
-    list_filter = ("settlement__status", "settlement__club", "created")
+    list_filter = ("settlement__club", "created")
     search_fields = (
         "settlement__club__slug",
         "settlement__club__name",

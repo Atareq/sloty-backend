@@ -6,7 +6,7 @@ lives in ViewSets and the authorization matrix. Services own transactions,
 multi-model writes, and data integrity invariants.
 """
 
-from django.db import IntegrityError, transaction
+from django.db import transaction
 from django.db.models import OuterRef, Subquery
 
 from apps.common.exceptions import SlotyAPIException
@@ -39,12 +39,32 @@ def find_or_create_player_profile(
 
 
 def get_current_club_player(club, player_profile) -> ClubPlayer | None:
-    """Return the current ClubPlayer version for (club, player_profile), or None."""
+    """
+    Return the current ClubPlayer identity for (club, player_profile).
+
+    The latest Booking.club_player relationship is the source of truth.
+    If no booking exists for that player in that club, falls back to the
+    latest ClubPlayer record for that player/club (or single record).
+    """
+    from apps.bookings.models import Booking
+
+    booking = (
+        Booking.objects.filter(
+            club=club,
+            club_player_id__isnull=False,
+            club_player__player_profile=player_profile,
+        )
+        .select_related("club_player")
+        .order_by("-created", "-id")
+        .first()
+    )
+    if booking is not None:
+        return booking.club_player
+
     return (
         ClubPlayer.objects.filter(
             club=club,
             player_profile=player_profile,
-            is_current_version=True,
         )
         .order_by("-id")
         .first()
@@ -103,19 +123,11 @@ def get_or_create_club_player(
     player_number: int | None = None,
 ) -> tuple[ClubPlayer, bool]:
     """
-    Return the current ClubPlayer version for (club, player_profile), or
-    create the first version.
+    Return the current ClubPlayer for (club, player_profile), or create one.
 
-    Each club's labeling of a player is independent. Two clubs may register
-    the same PlayerProfile with completely different display names.
-
-    If a current version already exists, it is returned unchanged. A
-    different display_name/player_number on this call does NOT create a
-    new version — booking default resolution must use the current version.
-    Identity changes go through create_club_player_version().
-
-    If no current version exists, a first version is created with the given
-    display_name/player_number, is_current_version=True, previous_version=None.
+    If a current identity exists, it is returned unchanged.
+    If none exists, a new ClubPlayer is created with the given
+    display_name/player_number.
 
     Returns:
         (ClubPlayer, created: bool)
@@ -124,94 +136,20 @@ def get_or_create_club_player(
     if current is not None:
         return current, False
 
-    try:
-        with transaction.atomic():
-            club_player = ClubPlayer.objects.create(
-                club=club,
-                player_profile=player_profile,
-                display_name=display_name,
-                player_number=player_number,
-                previous_version=None,
-                is_current_version=True,
-            )
-        return club_player, True
-    except IntegrityError:
-        current = get_current_club_player(club, player_profile)
-        if current is None:
-            raise
-        return current, False
-
-
-def create_club_player_version(
-    club_player: ClubPlayer,
-    display_name: str = "",
-    player_number: int | None = None,
-) -> ClubPlayer:
-    """
-    Replace the current ClubPlayer version with a new one, preserving history.
-
-    Atomic:
-      1. Lock the current row.
-      2. Mark it is_current_version=False.
-      3. Create a new row with previous_version pointing at the old row,
-         is_current_version=True, and the new display_name/player_number.
-
-    Identity fields on the old row are never mutated. Existing Booking FKs
-    keep pointing at the old row. The old row has no updated_at — flipping
-    is_current_version is a lifecycle pointer, not an identity edit.
-
-    If the locked row already has this exact display_name and player_number,
-    no new version is created — the current row is returned. This keeps
-    POSTing the same roster payload idempotent.
-
-    Raises:
-        ValueError: if `club_player` is not the current version.
-    """
     with transaction.atomic():
-        locked = ClubPlayer.objects.select_for_update().get(pk=club_player.pk)
-        if not locked.is_current_version:
-            raise ValueError(
-                "Cannot create a new ClubPlayer version from "
-                f"{locked.pk}: it is not the current version. Pass the "
-                "current ClubPlayer for this (club, player_profile) pair."
-            )
-        if (
-            locked.display_name == display_name
-            and locked.player_number == player_number
-        ):
-            return locked
-
-        locked.is_current_version = False
-        locked.save(update_fields=["is_current_version"])
-
-        new_club_player = ClubPlayer.objects.create(
-            club_id=locked.club_id,
-            player_profile_id=locked.player_profile_id,
+        club_player = ClubPlayer.objects.create(
+            club=club,
+            player_profile=player_profile,
             display_name=display_name,
             player_number=player_number,
-            previous_version=locked,
-            is_current_version=True,
         )
-    return new_club_player
+    return club_player, True
 
 
 def get_preferred_club_player(club, player_profile) -> ClubPlayer | None:
     """
-    Return the recommended ClubPlayer version for (club, player_profile).
-
-    Last-used wins: the club_player on this person's latest Booking at
-    this club (matched via player_profile_id). If they have never been
-    booked here, fall back to the current roster version.
-
-    Bookings are historical events and never rewrite ClubPlayer rows.
-    New booking *creation* still defaults to the current version unless
-    an explicit club_player_id is supplied.
-
-    Returns None if no ClubPlayer exists yet for this pair.
+    Return the current/recommended ClubPlayer identity for (club, player_profile).
     """
-    last_used = get_last_used_club_player(club, player_profile)
-    if last_used is not None:
-        return last_used
     return get_current_club_player(club, player_profile)
 
 

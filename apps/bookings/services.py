@@ -1064,17 +1064,15 @@ def resolve_booking_club_player(
     Resolve the ClubPlayer identity for a booking.
 
     Normal flow (frontend sends only customer_name / customer_phone):
-        phone -> PlayerProfile -> current ClubPlayer version -> Booking
+        phone -> PlayerProfile -> current ClubPlayer -> Booking
 
-    Optional historical selection: if club_player_id is supplied, that exact
-    version is used (including historical rows) provided it belongs to this
-    club and to the PlayerProfile identified by customer_phone. Normal
-    booking creation does not send this id.
+    Optional selection: if club_player_id is supplied, that exact
+    ClubPlayer is used provided it belongs to this club and to the
+    PlayerProfile identified by customer_phone. Normal booking creation
+    does not send this id.
 
-    get_or_create_club_player() returns the current version when one exists
-    and only creates a first version when the club has never labeled this
-    player. A different customer_name on a later booking does not create a
-    new version — that is create_club_player_version()'s job.
+    get_or_create_club_player() returns the current ClubPlayer when one exists
+    and creates one when the club has never labeled this player.
     """
     player_profile, _ = find_or_create_player_profile(
         phone_number=customer_phone,

@@ -84,7 +84,7 @@ class Migration(migrations.Migration):
                     "display_name",
                     models.CharField(
                         blank=True,
-                        help_text="Club-specific name for this version. Independent from PlayerProfile.full_name and never auto-synchronized with it.",
+                        help_text="Club-specific name for this player. Independent from PlayerProfile.full_name and never auto-synchronized with it.",
                         max_length=255,
                     ),
                 ),
@@ -92,19 +92,10 @@ class Migration(migrations.Migration):
                     "player_number",
                     models.PositiveSmallIntegerField(
                         blank=True,
-                        help_text="Club-internal jersey or member number for this version.",
+                        help_text="Club-internal jersey or member number.",
                         null=True,
                     ),
                 ),
-                (
-                    "is_current_version",
-                    models.BooleanField(
-                        db_index=True,
-                        default=True,
-                        help_text="True iff this is the current club-local identity for its (club, player_profile) pair. At most one current version is allowed per pair. Historical versions keep False forever.",
-                    ),
-                ),
-                ("created_at", models.DateTimeField(auto_now_add=True)),
                 (
                     "club",
                     models.ForeignKey(
@@ -119,17 +110,6 @@ class Migration(migrations.Migration):
                         on_delete=django.db.models.deletion.CASCADE,
                         related_name="club_players",
                         to="players.playerprofile",
-                    ),
-                ),
-                (
-                    "previous_version",
-                    models.ForeignKey(
-                        blank=True,
-                        help_text="The ClubPlayer version this row replaced. NULL on the first version for a (club, player_profile) pair.",
-                        null=True,
-                        on_delete=django.db.models.deletion.PROTECT,
-                        related_name="next_versions",
-                        to="players.clubplayer",
                     ),
                 ),
             ],
@@ -158,20 +138,6 @@ class Migration(migrations.Migration):
             model_name="clubplayer",
             index=models.Index(
                 fields=["club", "player_profile"], name="players_clu_club_id_d46971_idx"
-            ),
-        ),
-        migrations.AddIndex(
-            model_name="clubplayer",
-            index=models.Index(
-                fields=["is_current_version"], name="players_clu_is_curr_5458e9_idx"
-            ),
-        ),
-        migrations.AddConstraint(
-            model_name="clubplayer",
-            constraint=models.UniqueConstraint(
-                condition=models.Q(("is_current_version", True)),
-                fields=("club", "player_profile"),
-                name="unique_current_club_player_profile",
             ),
         ),
     ]

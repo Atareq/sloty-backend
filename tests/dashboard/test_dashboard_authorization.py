@@ -29,7 +29,7 @@ from apps.dashboard.views import (
     DashboardRevenueAPIView,
     DashboardSummaryAPIView,
 )
-from apps.settlements.services import build_custody
+from apps.settlements.services import preview as preview_settlement
 from tests.dashboard.test_dashboard_api import DashboardAPITestCase
 from tests.profile_factories import grant_owner_club, grant_staff_court
 
@@ -161,8 +161,8 @@ class DashboardAuthorizationSpineTests(DashboardAPITestCase):
         tx_ids = {row["id"] for row in tx_list.data["results"]}
         self.assertIn(self.tx_staff_assigned.id, tx_ids)
         self.assertNotIn(self.tx_staff_unassigned_court.id, tx_ids)
-        custody = build_custody(club=self.club_a, collector=self.staff_a)
-        custody_ids = {tx.id for tx in custody["transactions"]}
+        preview_res = preview_settlement(club=self.club_a, user=self.staff_a)
+        custody_ids = {tx["id"] for tx in preview_res["transactions"]}
         self.assertIn(self.tx_staff_assigned.id, custody_ids)
         self.assertIn(self.tx_staff_unassigned_court.id, custody_ids)
         self.client.force_authenticate(user=self.owner_a)

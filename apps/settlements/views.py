@@ -1,3 +1,4 @@
+from django.db.models import Count, Max, Min
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import status
@@ -26,7 +27,6 @@ from apps.settlements.serializers import (
     SettlementUnsettledSummaryRequestSerializer,
     SettlementUnsettledSummaryResponseSerializer,
 )
-from apps.settlements.services import mark_settlement_settled
 
 
 @extend_schema_view(
@@ -75,7 +75,12 @@ class SettlementViewSet(
 
     def filter_scoped_queryset(self, queryset):
         queryset = apply_collector_scope(self.get_access_context(), queryset)
-        return queryset.order_by("-created", "-id")
+        queryset = queryset.annotate(
+            annotated_transaction_count=Count("lines", distinct=True),
+            annotated_period_start=Min("lines__transaction__created"),
+            annotated_period_end=Max("lines__transaction__created"),
+        )
+        return queryset.order_by("-created_at", "-id")
 
     def check_object_permission(self, request, obj) -> bool:
         return can_access_settlement(self.access_context, obj)
@@ -151,23 +156,3 @@ class SettlementViewSet(
             serializer.get_summary()
         )
         return Response(response_serializer.data)
-
-    @extend_schema(
-        tags=["Settlements"],
-        request=None,
-        responses=SettlementDetailSerializer,
-    )
-    @action(detail=True, methods=["post"], url_path="mark-settled")
-    def mark_settled(self, request, *args, **kwargs):
-        if not can_manage_settlements(self.access_context):
-            raise PermissionDenied("You cannot manage settlements for this club.")
-        settlement = self.get_object()
-        settled_settlement = mark_settlement_settled(
-            settlement=settlement,
-            actor=request.user,
-        )
-        serializer = SettlementDetailSerializer(
-            settled_settlement,
-            context=self.get_serializer_context(),
-        )
-        return Response(serializer.data)

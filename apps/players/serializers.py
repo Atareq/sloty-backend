@@ -6,13 +6,6 @@ should not need to know which User account a player is linked to).
 Write serializers use phone_number as the player identity key; the club and
 player_profile FKs are always injected by the view layer, never accepted from
 request bodies.
-
-ClubPlayer has no update/partial_update write serializer. It is a
-permanent, versioned historical identity record — a new display_name/
-player_number is recorded by POSTing a new version (see
-apps.players.services.create_club_player_version()), not by an in-place
-PATCH. See apps/players/AGENTS.md "ClubPlayer Lifecycle (Versioned,
-Append-Only)".
 """
 
 from rest_framework import serializers
@@ -76,7 +69,7 @@ class PlayerProfileCreateSerializer(serializers.Serializer):
 
 
 class ClubPlayerVersionSerializer(serializers.ModelSerializer):
-    """Slim read serializer for a ClubPlayer version nested under a profile."""
+    """Slim read serializer for a ClubPlayer nested under a profile."""
 
     class Meta:
         model = ClubPlayer
@@ -84,9 +77,6 @@ class ClubPlayerVersionSerializer(serializers.ModelSerializer):
             "id",
             "display_name",
             "player_number",
-            "previous_version",
-            "is_current_version",
-            "created_at",
         )
         read_only_fields = fields
 
@@ -105,9 +95,6 @@ class ClubPlayerSerializer(serializers.ModelSerializer):
             "player_profile",
             "display_name",
             "player_number",
-            "previous_version",
-            "is_current_version",
-            "created_at",
         )
         read_only_fields = fields
 
@@ -187,7 +174,6 @@ class PlayerProfileWithVersionsSerializer(PlayerProfileSerializer):
         if last_used_id is not None:
             return last_used_id
         versions = getattr(obj, "club_versions", None)
-        if versions is None:
-            return None
-        current = next((v for v in versions if v.is_current_version), None)
-        return current.id if current is not None else None
+        if versions:
+            return versions[0].id
+        return None

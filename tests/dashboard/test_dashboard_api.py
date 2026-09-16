@@ -102,18 +102,24 @@ class DashboardAPITestCase(ProfileIdentityMixin, APITestCase):
         return transaction_obj
 
     def create_settlement(self, club: Club, **extra_fields) -> Settlement:
-        created = extra_fields.pop("created", self.time_at(14))
+        created = extra_fields.pop("created", None) or extra_fields.pop(
+            "created_at", self.time_at(14)
+        )
+        extra_fields.pop("period_start", None)
+        extra_fields.pop("period_end", None)
+        extra_fields.pop("status", None)
+        extra_fields.pop("transaction_count", None)
+        extra_fields.pop("settled_at", None)
+        extra_fields.pop("modified", None)
+        extra_fields.pop("collected_by", None)
+        extra_fields.pop("created_by", None)
         data = {
             "club": club,
-            "period_start": self.time_at(8),
-            "period_end": self.time_at(14),
-            "status": Settlement.Status.PENDING,
             "total_amount": Decimal("100.00"),
-            "transaction_count": 1,
         }
         data.update(extra_fields)
         settlement = Settlement.objects.create(**data)
-        Settlement.objects.filter(pk=settlement.pk).update(created=created)
+        Settlement.objects.filter(pk=settlement.pk).update(created_at=created)
         settlement.refresh_from_db()
         return settlement
 
@@ -255,28 +261,17 @@ class DashboardDataMixin:
             created_by=self.staff,
             created=self.time_at(13, 20),
         )
-        self.pending_settlement = self.create_settlement(
-            self.club,
-            court=self.court,
-            status=Settlement.Status.PENDING,
-            total_amount=Decimal("100.00"),
-            transaction_count=1,
-            created=self.time_at(14),
-        )
-        SettlementTransaction.objects.create(
-            settlement=self.pending_settlement,
-            transaction=self.pending_transaction,
-            amount=self.pending_transaction.amount,
-        )
         self.settled_settlement = self.create_settlement(
             self.club,
             court=self.court,
-            status=Settlement.Status.SETTLED,
-            total_amount=Decimal("300.00"),
-            transaction_count=1,
+            total_amount=Decimal("400.00"),
             settled_by=self.platform_admin,
-            settled_at=self.time_at(15),
             created=self.time_at(14, 10),
+        )
+        SettlementTransaction.objects.create(
+            settlement=self.settled_settlement,
+            transaction=self.pending_transaction,
+            amount=self.pending_transaction.amount,
         )
         SettlementTransaction.objects.create(
             settlement=self.settled_settlement,
@@ -438,15 +433,23 @@ class CalendarTests(DashboardDataMixin, DashboardAPITestCase):
         )
 
     def test_calendar_keeps_club_player_version_after_roster_change(self):
-        from apps.players.services import create_club_player_version
+        from apps.players.models import ClubPlayer
 
         self.client.force_authenticate(user=self.platform_admin)
-        v1 = create_club_player_version(
-            self.confirmed.club_player, display_name="Ahmed Ali", player_number=7
+        v1 = ClubPlayer.objects.create(
+            club=self.club,
+            player_profile=self.confirmed.club_player.player_profile,
+            display_name="Ahmed Ali",
+            player_number=7,
         )
         self.confirmed.club_player = v1
         self.confirmed.save(update_fields=["club_player"])
-        create_club_player_version(v1, display_name="Ahmed Salah", player_number=10)
+        ClubPlayer.objects.create(
+            club=self.club,
+            player_profile=self.confirmed.club_player.player_profile,
+            display_name="Ahmed Salah",
+            player_number=10,
+        )
         response = self.client.get(self.calendar_url(self.club), {"date": "2026-07-06"})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         item = next(
@@ -480,7 +483,7 @@ class DashboardOverviewTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(response.data["unsettled_transaction_total_amount"], "80.00")
         self.assertEqual(response.data["staff_with_unsettled_transactions_count"], 1)
         self.assertEqual(response.data["settled_amount"], "400.00")
-        self.assertEqual(response.data["settled_settlement_amount"], "300.00")
+        self.assertEqual(response.data["settled_settlement_amount"], "400.00")
         self.assertEqual(response.data["court_count"], 2)
         self.assertEqual(response.data["active_court_count"], 2)
         self.assertNotIn("unsettled_transaction_amount", response.data)
@@ -641,9 +644,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         other_club_settlement = self.create_settlement(
             self.other_club,
             court=self.cross_club_court,
-            status=Settlement.Status.PENDING,
             total_amount=Decimal("999.00"),
-            transaction_count=1,
             created=self.time_at(14),
         )
         self.client.force_authenticate(user=self.platform_admin)
@@ -670,7 +671,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(summary["settled_transaction_count"], 2)
         self.assertEqual(summary["settled_transaction_amount"], "400.00")
         self.assertEqual(summary["settled_settlement_count"], 1)
-        self.assertEqual(summary["settled_settlement_amount"], "300.00")
+        self.assertEqual(summary["settled_settlement_amount"], "400.00")
         self.assertNotIn("unsettled_transaction_amount", summary)
         self.assertNotIn("pending_settlement_count", summary)
         self.assertNotIn("pending_settlement_amount", summary)
@@ -886,12 +887,9 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         settlement = self.create_settlement(
             self.club,
             court=self.court,
-            collected_by=mohamed,
-            status=Settlement.Status.SETTLED,
             total_amount=settled_payment.amount,
-            transaction_count=1,
             settled_by=self.platform_admin,
-            settled_at=self.time_at(14),
+            created=self.time_at(13, 30),
         )
         SettlementTransaction.objects.create(
             settlement=settlement,
@@ -977,11 +975,8 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         settled_only_settlement = self.create_settlement(
             self.club,
             court=self.court,
-            status=Settlement.Status.SETTLED,
             total_amount=settled_only_transaction.amount,
-            transaction_count=1,
             settled_by=self.platform_admin,
-            settled_at=self.time_at(15, 10),
             created=self.time_at(14, 20),
         )
         SettlementTransaction.objects.create(

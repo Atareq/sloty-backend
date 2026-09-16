@@ -32,7 +32,7 @@ from apps.common.authorization.querysets import scoped_queryset
 from apps.common.authorization.resolver import resolve_club_scope
 from apps.common.authorization.roles import Role
 from apps.common.authorization.scopes import ResourceScope
-from apps.settlements.services import build_custody
+from apps.settlements.services import preview as preview_settlement
 from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.views import TransactionAttemptViewSet, TransactionViewSet
 from tests.profile_factories import grant_owner_club, grant_staff_court
@@ -358,12 +358,12 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
         tx_list = self.client.get(self.transaction_list_url(self.club))
         self.assertIn(self.tx_court_a_staff.id, self.list_ids(tx_list))
         self.assertNotIn(tx_court_b_staff.id, self.list_ids(tx_list))
-        custody = build_custody(club=self.club, collector=self.staff)
-        candidate_ids = {tx.id for tx in custody["transactions"]}
+        preview_res = preview_settlement(club=self.club, user=self.staff)
+        candidate_ids = {tx["id"] for tx in preview_res["transactions"]}
         self.assertIn(self.tx_court_a_staff.id, candidate_ids)
         self.assertIn(tx_court_b_staff.id, candidate_ids)
         self.assertEqual(
-            custody["net_amount"],
+            preview_res["net_amount"],
             self.tx_court_a_staff.amount + tx_court_b_staff.amount,
         )
 

@@ -6,6 +6,13 @@ This file is the root engineering guide and documentation router for AI coding a
 
 **Sloty** is a sports court rental management system (starting with football courts in Assiut and Upper Egypt). The backend is built with Django and Django REST Framework (DRF) as a modular monolith.
 
+### Core Rule: SIMPLICITY WINS
+
+Keep the implementation direct, minimal, and clean.
+- Do not introduce abstractions unless they solve a demonstrated, active problem.
+- Do not store synthetic lifecycle flags or version chains when domain entities (e.g. Booking relationships, immutable transaction records) already serve as the single source of truth.
+- Do not preserve complexity merely because a previous implementation had it.
+
 ---
 
 ## 2. Source-of-Truth Hierarchy

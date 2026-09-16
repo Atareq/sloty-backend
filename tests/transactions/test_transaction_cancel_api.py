@@ -145,10 +145,8 @@ class TransactionCancelAPITests(TransactionAPITestCase):
         settlement = Settlement.objects.create(
             club=self.club,
             court=self.court,
-            period_start=self.time_at(1),
-            period_end=self.time_at(2),
             total_amount=transaction_obj.amount,
-            transaction_count=1,
+            settled_by=self.owner,
         )
         SettlementTransaction.objects.create(
             settlement=settlement,
