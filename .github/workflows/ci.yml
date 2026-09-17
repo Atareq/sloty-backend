@@ -16,6 +16,7 @@ permissions:
 
 jobs:
   test:
+    name: Test
     runs-on: ubuntu-latest
 
     env:
@@ -23,10 +24,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -52,3 +53,33 @@ jobs:
       - name: Run tests
         run: |
           pytest
+
+  deploy:
+    name: Deploy Production
+    needs: test
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure SSH
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          PROD_HOST: ${{ vars.PROD_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$PROD_SSH_KEY" > ~/.ssh/sloty_github_actions
+          chmod 600 ~/.ssh/sloty_github_actions
+          ssh-keyscan -H "$PROD_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy production
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+          PROD_USER: ${{ vars.PROD_USER }}
+        run: |
+          ssh \
+            -i ~/.ssh/sloty_github_actions \
+            -o IdentitiesOnly=yes \
+            "$PROD_USER@$PROD_HOST" \
+            "sudo /usr/local/sbin/deploy-sloty-backend ${{ github.sha }}"
