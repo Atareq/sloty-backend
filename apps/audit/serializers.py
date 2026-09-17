@@ -44,11 +44,10 @@ class AuditLogPresentationMixin:
             )
         elif obj.entity_type == "Settlement":
             keys = (
-                "collected_by_name",
+                "settled_by_name",
                 "total_amount",
                 "transaction_count",
-                "settled_by_name",
-                "settled_at",
+                "created_at",
             )
         else:
             keys = ()

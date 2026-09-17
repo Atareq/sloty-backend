@@ -19,7 +19,6 @@ class ClubPlayerFilterSet(django_filters.FilterSet):
     search — case-insensitive substring match across display_name,
               player_profile.phone_number, and player_profile.full_name.
     player_number — exact match on the club-internal number.
-    is_current_version — restrict to current or historical versions.
     """
 
     search = django_filters.CharFilter(method="filter_search", label="Search")
@@ -28,14 +27,10 @@ class ClubPlayerFilterSet(django_filters.FilterSet):
         lookup_expr="exact",
         label="Player number",
     )
-    is_current_version = django_filters.BooleanFilter(
-        field_name="is_current_version",
-        label="Current version only",
-    )
 
     class Meta:
         model = ClubPlayer
-        fields = ["player_number", "is_current_version"]
+        fields = ["player_number"]
 
     def filter_search(self, queryset, name, value):
         if not value:

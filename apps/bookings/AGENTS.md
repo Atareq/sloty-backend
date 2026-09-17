@@ -42,6 +42,7 @@
   - Future recurring slots are virtual arithmetic matches (`slot_status=RECURRING_RESERVED`).
   - Completion with `continue_recurring=true` creates the next weekly occurrence atomically and marks the anchor `RENEWED`.
   - **Identity propagation (Sprint 2 — Booking Identity Enforcement):** the next occurrence created by `complete_booking()` copies `club_player` directly from the anchor booking — it is the *same customer's continuation of the same series*, not a new identity interaction, so it is never re-resolved via `resolve_booking_club_player()`. `previous_recurring_booking` and `club_player` therefore always agree on identity across an entire recurrence chain.
+  - **Identity propagation:** the next occurrence created by `complete_booking()` copies `club_player` directly from the anchor booking — it is the *same customer's continuation of the same series*, not a new identity interaction, so it is never re-resolved via `resolve_booking_club_player()`.
   - Cancelling, no-showing, or expiring an active recurrence sets `recurrence_status=ENDED`. Active recurring bookings cannot be rescheduled.
 - **Offline / PWA Sync & Idempotency**:
   - `client_request_id` is an optional UUID idempotency key scoped to the Club. Retries with the same key and payload return HTTP 200; mismatched payloads return `BOOKING_CLIENT_REQUEST_MISMATCH` (409 Conflict).
@@ -52,6 +53,7 @@
 
 - [`Booking`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/bookings/models.py):
   - `club_player` (required FK to the exact ClubPlayer version used at booking time), `start_time`, `end_time`, `total_price`.
+  - `club_player` (required FK to ClubPlayer record), `start_time`, `end_time`, `total_price`.
   - There is no `Booking.customer_name` / `Booking.customer_phone` column and no `Booking.player_profile` FK.
   - `source`: `MANUAL`, `ADMIN_CORRECTION`, `RECURRING`.
   - `recurrence_status`: `ACTIVE`, `RENEWED`, `ENDED` (null for non-recurring).
@@ -61,8 +63,15 @@
   - Preserves requested parameters, `outcome` (`SUCCESS`/`REJECTED`), `failure_code`, `failure_details`, and `resolution` (`UNRESOLVED`, `DISMISSED`, `RESOLVED`).
 
 ## Customer Identity Architecture (Locked — Sprint 3 Integration Complete)
+### Customer Identity Architecture
+## Customer Identity Architecture
 
 Final identity model:
+### Core Principle: SIMPLICITY WINS
+- The latest `Booking.club_player` relationship is the source of truth for current customer identity.
+- No version chains, stored version pointers, or current-version flags.
+
+Identity model:
 
 ```text
 Phone Number
@@ -72,10 +81,13 @@ PlayerProfile
       │
       ▼
 ClubPlayer versions  (is_current_version, previous_version, created_at)
+ClubPlayer (club, player_profile, display_name, player_number)
       │
       ▼
 Booking.club_player_id   ← exact version used at creation time
                            also the source of last-used recency
+Booking.club_player_id   ← exact customer record used at booking time
+                            also the source of truth for current identity
 ```
 
 **`Booking` belongs to a `ClubPlayer`. It does NOT hold a direct `PlayerProfile` FK.**
@@ -84,10 +96,14 @@ Booking.club_player_id   ← exact version used at creation time
 - `ClubPlayer` — immutable club-local version. No soft delete. No `last_used_at`. No `updated_at`. `create_club_player_version()` marks the old row historical and inserts a new current row. See `apps/players/AGENTS.md`.
 - `Booking.club_player` — required FK (`on_delete=PROTECT`). Default resolution uses the **current** version. Optional write-only `club_player_id` on create selects a historical version (same club + same phone's profile). Recurring continuation copies the anchor version.
 - **Last-used version** — `club_player` on the latest Booking for this `player_profile_id` at this club (`Booking.created` desc). Used for search recommendation. Never written back onto ClubPlayer.
+- `ClubPlayer` — club-local customer record. No versioning metadata, no soft delete. See `apps/players/AGENTS.md`.
+- `Booking.club_player` — required FK (`on_delete=PROTECT`). Default resolution uses the current `ClubPlayer` (from latest booking or latest record). Optional write-only `club_player_id` on create selects a specific record (same club + same phone's profile). Recurring continuation copies the anchor record.
+- **Current identity** — derived from the latest Booking for this `player_profile_id` at this club (`Booking.created` desc, `id` desc), falling back to the latest `ClubPlayer` record.
 
 ### Why Booking snapshot columns are gone
 
 `ClubPlayer` versions are the historical identity. `Booking.club_player_id` points at the exact version used at booking time, so denormalized `customer_name` / `customer_phone` columns on Booking were redundant operational copies.
+`ClubPlayer` rows represent customer identity at the club level. `Booking.club_player_id` points at the exact customer record used at booking time, so denormalized `customer_name` / `customer_phone` columns on Booking were redundant operational copies.
 
 Shared helper: [`apps/bookings/identity.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/bookings/identity.py) (`booking_customer_display_name`, `booking_customer_display_phone`, `booking_identity_search_q`). There is no snapshot fallback.
 
@@ -121,6 +137,7 @@ A booking from Club A must never reference a Club B `ClubPlayer`. Enforced at th
 ### Player Resolution Flow (Backend-Owned, Frontend-Opaque)
 
 Normal booking creation still sends only `customer_name` / `customer_phone`. Optional write-only `club_player_id` selects a historical version.
+Normal booking creation still sends only `customer_name` / `customer_phone`. Optional write-only `club_player_id` selects a specific record.
 
 ```text
 create_booking(customer_name, customer_phone, club_player_id=optional)
@@ -131,14 +148,17 @@ find_or_create_player_profile(phone) ──► PlayerProfile (global, by phone)
         ▼
 if club_player_id:
     use that ClubPlayer version (must match club + this profile)
+    use that ClubPlayer record (must match club + this profile)
 else:
     get_or_create_club_player(...) ──► current ClubPlayer version
+    get_or_create_club_player(...) ──► current ClubPlayer record
         │
         ▼
 Booking.objects.create(club_player=..., ...)
 ```
 
 Walk-in phones still create a first current version. A later booking with the same phone uses the current version even if `customer_name` differs; name changes are `create_club_player_version()` / `POST /players/`, not booking create.
+Walk-in phones create a `PlayerProfile` and initial `ClubPlayer` record if none exists. A later booking with the same phone resolves the current identity from the latest booking or latest record.
 
 `complete_booking()` recurrence copies the anchor `club_player`. Seed data uses `resolve_booking_club_player()`. Create API still accepts walk-in `customer_name` / `customer_phone` as resolution inputs only.
 

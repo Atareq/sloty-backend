@@ -4,7 +4,7 @@
 
 `apps/players/` owns the **customer identity layer**:
 
-- [`PlayerProfile`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/models.py) — global customer identity, keyed by phone number. A player does not need a user account.
+- [`PlayerProfile`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/models.py) — global customer identity and real `Profile` child, keyed by phone number. A player does not need a user account.
 - [`ClubPlayer`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/models.py) — club-local representation of a player (display name, jersey number). Each club labels and numbers players independently.
 
 **Read the security architecture and architectural decisions for the full identity boundary:**
@@ -20,37 +20,51 @@
 ```text
 Authentication Identity
         │
-       User (apps/accounts)
+       User (apps/accounts, optional for players)
         │
-        ├── Operational Profile ──► Profile (apps/profiles)
-        │
-        └── Customer Identity ──► PlayerProfile ──► ClubPlayer  ← THIS APP
+        ▼
+Profile (apps/profiles)
+        ├── OwnerProfile / StaffProfile / AdminProfile  (management)
+        └── PlayerProfile ──► ClubPlayer  ← THIS APP
 ```
 
 | Model | Boundary | Authorization |
 |---|---|---|
-| `PlayerProfile` | **Global** — no club boundary | No `authorization_config`. The enabled operational Profile's club scope gates API access but the row itself is shared. |
+| `PlayerProfile` | **Global** — no club boundary | No `authorization_config`. It has `Profile.role == PLAYER`, but `PLAYER` is not granted management permissions. Owner/Staff/Admin club scope gates the management APIs that create or view rows. |
 | `ClubPlayer` | **Club-scoped** | `authorization_config` with `default_scope="club"` (Spine v2). |
+
+---
+
+### Core Principle: SIMPLICITY WINS
+
+Keep the implementation direct, minimal, and clean.
+- The latest `Booking.club_player` relationship is the single source of truth for the current `ClubPlayer` identity.
+- No version chains, no stored version pointers (`previous_version`), and no current version flags (`is_current_version`).
+- Direct customer record model (`display_name`, `player_number`).
 
 ---
 
 ## Domain Invariants
 
 1. **Phone uniqueness**: `PlayerProfile.phone_number` is globally unique. It is the identity key.
-2. **Player ≠ account**: `PlayerProfile.user` is nullable. A player can exist with `user=NULL` and `verified=False`.
+2. **Player ≠ account**: `PlayerProfile` inherits nullable `Profile.user`. A player can exist with `user=NULL`, `role=PLAYER`, and `verified=False`.
 3. **Club controls its own naming**: Two clubs may have different `display_name` and `player_number` for the same `PlayerProfile`. Both are correct.
 4. **Cross-club isolation**: `ClubPlayer` rows are invisible across clubs. The Spine v2 `scoped_queryset()` enforces this structurally — clubs cannot read or write each other's `ClubPlayer` rows.
 5. **Unique current version per club+profile**: `UNIQUE(club, player_profile) WHERE is_current_version=True` — at most one **current** `ClubPlayer` row per pair. Historical versions (`is_current_version=False`) may coexist. There is no `deleted_at` / soft delete.
+5. **Identity Source of Truth**: The latest `Booking.club_player` relationship is the source of truth for current `ClubPlayer` identity. If no booking exists for that player in that club, fallback to the latest `ClubPlayer` record for that player/club (`order_by("-id").first()`).
 6. **Phone is the only merge key**: same phone = same `PlayerProfile`. Different phone = different `PlayerProfile`. No name-based matching, no automatic merging, no identity transfer.
 7. **`PlayerProfile.full_name` is the player's preferred personal name.** Clubs do not control it. It is never auto-synchronized with `ClubPlayer.display_name`.
 8. **Identity fields are immutable after create**: `club`, `player_profile`, `display_name`, `player_number`, `previous_version`. The only allowed post-create update is `is_current_version` (current → historical pointer). No `last_used_at`. No `updated_at`. No PATCH endpoint.
-9. **Separate identity boundaries**: Do not create or modify operational Profile tables here. `apps/profiles` owns owner/staff/admin authority; this app is purely for customer identity.
+8. **Historical booking integrity**: Historical `Booking.club_player` relationships remain intact. No soft delete. No `previous_version`, `is_current_version`, or `created_at` metadata fields on `ClubPlayer`.
+9. **Separate identity boundaries**: Do not merge `User`, `Profile`, `PlayerProfile`, `ClubPlayer`, or `Booking`. `PlayerProfile` is the customer identity child of `Profile`; `ClubPlayer` is still the club-local customer record.
 
 ---
 
 ## ClubPlayer Lifecycle (Versioned, Append-Only) — Sprint 3 (Locked)
+## ClubPlayer & Customer Identity Architecture
 
 **`ClubPlayer` is an immutable historical version, not a normal editable entity and not a soft-deleted row.** A row is one version of "how this club knew this player." When club-local `display_name`/`player_number` changes, the existing row is never updated and never deleted.
+**`ClubPlayer` is a direct club-local customer identity record (`display_name`, `player_number`).**
 
 ```text
 Before:
@@ -61,9 +75,25 @@ create_club_player_version(#10, display_name="Ahmed Salah", player_number=10)
 After:
   ClubPlayer #10  is_current_version=False  display_name="Ahmed Ali"   player_number=7    ← historical, unchanged
   ClubPlayer #20  is_current_version=True   display_name="Ahmed Salah" player_number=10  previous_version=#10
+Phone Number
+      │
+      ▼
+PlayerProfile (global)
+      │
+      ▼
+ClubPlayer (club, player_profile, display_name, player_number)
+      │
+      ▼
+Booking.club_player  ← historical booking anchor & source of truth for current identity
 ```
 
 Any `Booking.club_player_id` that already pointed at `#10` **keeps pointing at `#10`**. Bookings are historical events. They do **not** decide which version is current (`is_current_version`). They **do** decide which version was last used.
+- **No stored versioning metadata**: `ClubPlayer` does NOT have `previous_version`, `is_current_version`, or `created_at`.
+- **Current identity resolution**:
+  1. Primary: Latest `Booking.club_player` for `(club, player_profile)` ordered by `-created`, `-id`.
+  2. Fallback: Latest `ClubPlayer` record for `(club, player_profile)` ordered by `-id`.
+- **Historical bookings**: Bookings preserve the exact `ClubPlayer` row they were created with.
+- **Roster creation & updates**: POSTing to `/players/` checks for an existing identical `(club, player_profile, display_name, player_number)` row to reuse; if any field differs, a new row is inserted.
 
 ### Version fields
 
@@ -127,16 +157,21 @@ All service functions are **pure** — no role checks. Role enforcement lives in
 
 | Function | Behavior |
 |---|---|
-| `find_or_create_player_profile(phone_number, full_name="")` | `get_or_create` by phone. Does **not** overwrite `full_name` on existing profiles. No merging. |
+| `find_or_create_player_profile(phone_number, full_name="")` | `get_or_create` by phone with `role=PLAYER` and `user=NULL` for new rows. Does **not** create a User and does **not** overwrite `full_name` on existing profiles. No merging. |
 | `get_current_club_player(club, player_profile)` | Current version or `None`. |
 | `get_or_create_club_player(club, player_profile, display_name="", player_number=None)` | Current version, or first version if none exists. Does not version on name change. |
 | `create_club_player_version(club_player, display_name="", player_number=None)` | Marks current historical, creates new current with `previous_version`. |
 | `get_last_used_club_player(club, player_profile)` | ClubPlayer on the latest Booking for this profile at this club, or `None`. |
 | `get_preferred_club_player(club, player_profile)` | Last-used version, else current roster version. |
-| `link_player_to_user(player_profile, user)` | Sets `player_profile.user`. Raises `PLAYER_ALREADY_LINKED` on conflict. |
+| `get_current_club_player(club, player_profile)` | Primary lookup from latest `Booking.club_player`, fallback to latest `ClubPlayer` row (`order_by("-id").first()`). |
+| `get_or_create_club_player(club, player_profile, display_name="", player_number=None)` | Returns current `ClubPlayer` if one exists, otherwise creates a new `ClubPlayer`. |
+| `get_last_used_club_player(club, player_profile)` | `ClubPlayer` on the latest Booking for this profile at this club, or `None`. |
+| `get_preferred_club_player(club, player_profile)` | Last-used `ClubPlayer` from bookings, else latest `ClubPlayer` row. |
+| `link_player_to_user(player_profile, user)` | Sets the inherited `Profile.user` for future account-linking flows. Raises on conflicting links or users that already have another profile. This is not used during normal player creation. |
 
 All write functions wrap their DB writes in `transaction.atomic()`.
 
+---
 
 ## Authorization
 
@@ -173,8 +208,10 @@ Entries in [`apps/common/authorization/matrix.py`](file:///home/tarek/Desktop/sl
 | STAFF | list, retrieve, create | list, retrieve, create |
 
 No `update`/`partial_update` for any role. See "ClubPlayer Lifecycle (Versioned, Append-Only)" above.
+No `update`/`partial_update` for any role.
 
 No `destroy` action either. ClubPlayer versions are never deleted.
+No `destroy` action either. ClubPlayer rows are never deleted.
 
 ---
 
@@ -203,8 +240,10 @@ All endpoints are club-scoped under `/api/v1/clubs/{club_slug}/`.
 ```
 
 There is no PATCH payload. POSTing a new `display_name`/`player_number` for an existing current version records a new current version via `create_club_player_version()`. Same content is idempotent.
+There is no PATCH payload. POSTing a new `display_name`/`player_number` for a player reuses an existing identical record or creates a new one.
 
 List/retrieve include `is_current_version`, `previous_version`, and `created_at`. They do **not** include `last_used_at` or `updated_at`. Filter `is_current_version=true` to see only current roster rows.
+List/retrieve include `id`, `club`, `player_profile`, `display_name`, and `player_number`.
 
 ### PlayerProfile search/list response shape
 
@@ -220,6 +259,8 @@ List/retrieve include `is_current_version`, `previous_version`, and `created_at`
   "club_player_versions": [
     {"id": 10, "display_name": "Ahmed Ali", "player_number": 7, "is_current_version": false, "previous_version": null, "created_at": "..."},
     {"id": 20, "display_name": "Ahmed Salah", "player_number": 10, "is_current_version": true, "previous_version": 10, "created_at": "..."}
+    {"id": 10, "display_name": "Ahmed Ali", "player_number": 7},
+    {"id": 20, "display_name": "Ahmed Salah", "player_number": 10}
   ],
   "recommended_club_player_id": 10
 }
@@ -228,6 +269,7 @@ List/retrieve include `is_current_version`, `previous_version`, and `created_at`
 > [!NOTE]
 > `has_account` is a computed bool. The raw `user_id` is **never** exposed (privacy boundary between authentication identity and customer identity).
 > `recommended_club_player_id` is last-used (latest booking's `club_player` for this `player_profile_id` at this club). The example above is `10` because that version was on the latest booking even though `#20` is current. With no bookings it would be `20`.
+> `recommended_club_player_id` is last-used (latest booking's `club_player` for this `player_profile_id` at this club). The example above is `10` because that record was on the latest booking. With no bookings it falls back to the latest `ClubPlayer` record (`20`).
 
 ---
 
@@ -236,10 +278,14 @@ List/retrieve include `is_current_version`, `previous_version`, and `created_at`
 `Booking.club_player` is required. There is no `Booking.customer_name` / `Booking.customer_phone` column and no `Booking → PlayerProfile` FK.
 
 Walk-in create still sends `customer_name` / `customer_phone`; the backend resolves `PlayerProfile` (by phone) and the current `ClubPlayer` version unless `club_player_id` selects a historical version.
+Walk-in create still sends `customer_name` / `customer_phone`; the backend resolves `PlayerProfile` (by phone) and the current `ClubPlayer` record unless `club_player_id` selects a specific record.
 
 - **Identity Foundation (Completed):** `PlayerProfile` and `ClubPlayer` exist.
 - **ClubPlayer versioning (Completed):** immutable versions; last-used derived from latest booking; no `last_used_at`.
 - **Booking identity finalization (Completed):** `club_player` NOT NULL, `on_delete=PROTECT`; snapshot columns removed; operational reads and new audit JSON use ClubPlayer; BookingAttempt payload fields remain; PATCH is notes-only.
+- **Identity Foundation:** `PlayerProfile` and `ClubPlayer` exist.
+- **ClubPlayer simplification:** direct customer model; latest `Booking.club_player` is the source of truth for current identity; no version chain or stored version metadata.
+- **Booking identity finalization:** `club_player` NOT NULL, `on_delete=PROTECT`; snapshot columns removed; operational reads and new audit JSON use ClubPlayer; BookingAttempt payload fields remain; PATCH is notes-only.
 
 ---
 
@@ -248,6 +294,7 @@ Walk-in create still sends `customer_name` / `customer_phone`; the backend resol
 [`apps/players/filters.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/filters.py)
 
 `ClubPlayerFilterSet`: `search`, `player_number`, `is_current_version`.
+`ClubPlayerFilterSet`: `search`, `player_number`.
 
 `PlayerProfileFilterSet`: `search` across preferred name, phone, and this club's `ClubPlayer.display_name`.
 
@@ -263,8 +310,11 @@ Test suite: [`tests/players/`](file:///home/tarek/Desktop/sloty/sloty-backend/te
 |---|---|
 | `test_player_model.py` | Phone uniqueness/no merging, current-version uniqueness, `create_club_player_version()`, last-used from latest booking, immutability |
 | `test_player_api.py` | list/create/retrieve, versioning POST, PATCH 403, profile versions + recommended id |
+| `test_player_model.py` | Phone uniqueness/no merging, current identity from latest booking, latest record fallback |
+| `test_player_api.py` | list/create/retrieve, POST reuse/create, PATCH 403, profile club_player_versions + recommended id |
 | `test_player_authorization.py` | Spine v2 club isolation |
 | `tests/bookings/test_booking_player_identity.py` | Current-version booking default, historical `club_player_id` selection, history preservation, recurrence copy |
+| `tests/bookings/test_booking_player_identity.py` | Current booking identity source of truth, historical booking preservation, recurrence copy |
 
 ---
 

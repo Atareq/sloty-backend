@@ -71,7 +71,6 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
             "create",
             "preview",
             "unsettled_summary",
-            "mark_settled",
         },
         "AuditLogViewSet": {"list", "retrieve"},
         "DashboardViewSet": {
@@ -123,7 +122,6 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
             "create",
             "preview",
             "unsettled_summary",
-            "mark_settled",
         },
         "AuditLogViewSet": {"list", "retrieve"},
         "DashboardViewSet": {
@@ -160,6 +158,7 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         "PlayerProfileViewSet": {"list", "retrieve", "create"},
         "ClubPlayerViewSet": {"list", "retrieve", "create"},
     },
+    Role.PLAYER: {},
 }
 
 

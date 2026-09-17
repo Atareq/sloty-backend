@@ -1,39 +1,8 @@
-"""
-Settlements & Current Custody Domain Services.
-
-ARCHITECTURAL INVARIANTS:
-1. Financial custody scope is strictly Club + optional Collector.
-   Court is NEVER part of Current Custody or Settlement financial scope.
-   Why: A collector's cash custody comprises all money collected by that individual
-   within the club, regardless of which court's booking generated the payment.
-   Filtering by court fragments physical cash tracking and causes discrepancies.
-2. The financial layer has ZERO knowledge of authorization.
-   Authorization is evaluated at the boundary before calling financial services.
-   These pure financial functions do NOT inspect roles, permissions, court assignments,
-   or RequestAccessContext.
-3. Preview and Settlement derive candidate transactions from the exact same
-   unsettled transaction query (get_unsettled_transactions_queryset).
-   This guarantees complete mathematical and transactional parity.
-4. Operational Transaction authorization (which is Court-scoped for Staff)
-   must NOT be reused for financial custody, and custody rules must NOT leak
-   into operational transaction viewing.
-
-Authoritative Pure Financial Operations:
-- get_unsettled_transactions_queryset(*, club, collector=None, lock=False)
-- build_custody(*, club, collector=None, period_end=None, lock=False)
-- build_current_custody_collector_rows(queryset, *, period_end=None)
-- settle_custody(*, club, collector, actor, notes="")
-- mark_settlement_settled(*, settlement, actor)
-"""
-
 from decimal import Decimal
 
 from django.db import IntegrityError, transaction
-from django.db.models import Count, DecimalField, Min, Q, Sum, Value
-from django.db.models.functions import Coalesce
-from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
-from rest_framework import serializers, status
+from rest_framework import status
 
 from apps.audit.services import record_audit_log, settlement_audit_snapshot
 from apps.bookings.identity import (
@@ -44,677 +13,162 @@ from apps.common.exceptions import SlotyAPIException
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
+ZERO = Decimal("0.00")
 NO_UNSETTLED_TRANSACTIONS_MESSAGE = _(
     "There are no unsettled transactions for this user."
 )
 DOUBLE_SETTLEMENT_MESSAGE = _(
     "One or more transactions were already settled. Please retry."
 )
-SELF_APPROVAL_MESSAGE = _("You cannot approve your own settlement.")
-ALREADY_SETTLED_MESSAGE = _("This settlement is already settled.")
-INVALID_SETTLEMENT_STATUS_MESSAGE = _(
-    "Only pending settlements can be marked as settled."
-)
-ZERO = Decimal("0.00")
-MONEY_FIELD = DecimalField(max_digits=10, decimal_places=2)
 
 
-def validate_period(period_start, period_end):
-    if period_start >= period_end:
-        raise serializers.ValidationError(
-            {"period_end": "period_end must be after period_start."}
-        )
-
-
-def get_user_display_name(user):
+def _user_display_name(user) -> str:
+    if user is None:
+        return ""
     full_name = user.get_full_name().strip()
     return full_name or user.username
 
 
-def validate_collected_by_profile(*, access, collected_by, actor):
-    from apps.settlements.authorization import (
-        validate_collected_by_profile as auth_validate_collected_by,
-    )
-
-    auth_validate_collected_by(context=access, collector=collected_by)
-
-
-# =============================================================================
-# RESPONSIBILITY 1: AUTHORIZATION / SCOPE GUARD
-# =============================================================================
-
-
-def validate_preview_authority(*, access, actor, collector):
-    """
-    Authorization guard for current custody preview.
-
-    Validates whether caller (actor) is authorized to preview custody
-    for `collector` in `access.club`.
-
-    Rules:
-    - Staff may ONLY preview themselves (actor.id == collector.id).
-    - Owner and Platform Admin may preview any collector.
-    - Collector must have enabled Profile scope in the club (except Platform Admin
-      self-preview).
-
-    This function only performs authorization. It does NOT query transactions
-    or calculate custody.
-    """
-    from apps.settlements.authorization import (
-        validate_preview_authority as auth_validate_preview,
-    )
-
-    auth_validate_preview(context=access, collector=collector)
-
-
-def validate_settlement_authority(*, access, actor, collector, court=None):
-    """
-    Authorization guard for settlement mutation.
-
-    Validates whether caller (actor) is authorized to settle custody
-    for `collector` in `access.club`.
-
-    Rules:
-    - Actor must have settlement creation permission in the club.
-    - Staff cannot settle.
-    - Self-settlement approval is forbidden unless Owner or Platform Admin.
-    - Collector must have enabled Profile scope in the club.
-    """
-    from apps.settlements.authorization import (
-        validate_settlement_authority as auth_validate_settlement,
-    )
-
-    if court is not None and court.club_id != access.club.id:
-        raise serializers.ValidationError(
-            {"court": "Court must belong to the selected club."}
-        )
-    auth_validate_settlement(context=access, collector=collector)
-
-
-# =============================================================================
-# RESPONSIBILITY 2: AUTHORITATIVE CUSTODY RESOLUTION
-# =============================================================================
-
-
-def get_unsettled_transactions_queryset(
-    *,
-    club,
-    collector=None,
-    lock=False,
-):
-    """
-    Authoritative financial query resolving unsettled transactions.
-
-    ARCHITECTURAL INVARIANT:
-    Current Custody is a financial scope, not an operational Court scope.
-    Financial scope = Club + optional Collector + unsettled transactions.
-
-    Why Court must NOT be used:
-    Custody represents real-world physical or accounted money held by a
-    collector for the Club. A collector holding cash holds it for the entire
-    club, regardless of which court's booking generated the payment.
-    Filtering custody by court would fragment physical cash tracking and
-    cause staff self-preview to diverge from owner preview.
-
-    Why normal Transaction authorization must NOT be reused:
-    Operational Transaction authorization (Authorization Spine court scope
-    plus Staff created_by narrowing) intentionally applies court-level
-    scoping. Reusing that operational queryset here leaked court restrictions
-    into financial calculation, causing staff to miss their own cross-court
-    collections.
-
-    Why preview and settlement must share the same resolver:
-    Preview and settlement must originate from the exact same transaction
-    set query so that what is previewed is exactly what is settled without
-    drift or discrepancy.
-
-    Semantics:
-    - collector=None: All unsettled transactions in the Club (e.g. club-wide
-      unsettled custody).
-    - collector=User: All unsettled transactions in the Club where
-      created_by=collector, across EVERY court in the club.
-    """
+def _calculate(club, user=None, court=None, lock=False) -> dict:
     queryset = Transaction.objects.filter(
         club=club,
-        created_by__isnull=False,
         settlement_line__isnull=True,
         is_cancelled=False,
     )
-    if collector is not None:
-        queryset = queryset.filter(created_by=collector)
+    if user is not None:
+        queryset = queryset.filter(created_by=user)
     if lock:
         queryset = queryset.select_for_update(of=("self",))
-    return queryset.select_related(
-        "booking",
-        "booking__club_player__player_profile",
-        "club",
-        "court",
-        "created_by",
-    ).order_by("created", "id")
 
-
-def get_current_unsettled_transactions(
-    *,
-    access=None,
-    club=None,
-    collected_by=None,
-    collector=None,
-    court=None,
-    lock=False,
-):
-    """
-    Query helper for unsettled transactions.
-
-    Current Custody and Settlement use get_unsettled_transactions_queryset,
-    which is strictly scoped by Club + optional Collector (NOT Court).
-
-    This helper accepts optional `court` for callers (such as court-filtered
-    dashboard metrics) that explicitly request court-specific transaction metrics.
-    """
-    target_club = club or (access.club if access else None)
-    target_collector = collector if collector is not None else collected_by
-    queryset = get_unsettled_transactions_queryset(
-        club=target_club,
-        collector=target_collector,
-        lock=lock,
+    candidates = list(
+        queryset.select_related(
+            "booking",
+            "booking__club_player__player_profile",
+            "court",
+            "created_by",
+        ).order_by("created", "id")
     )
-    if court is not None:
-        queryset = queryset.filter(court=court)
-    return queryset
-
-
-def serialize_preview_transactions(transactions):
-    return [
-        {
-            "id": transaction_obj.id,
-            "kind": transaction_obj.transaction_type,
-            "booking": transaction_obj.booking_id,
-            "booking_customer_name": booking_customer_display_name(
-                transaction_obj.booking
-            ),
-            "booking_customer_phone": booking_customer_display_phone(
-                transaction_obj.booking
-            ),
-            "booking_start_time": transaction_obj.booking.start_time,
-            "booking_end_time": transaction_obj.booking.end_time,
-            "court": transaction_obj.court_id,
-            "court_name": transaction_obj.court.name,
-            "amount": transaction_obj.amount,
-            "payment_method": transaction_obj.payment_method,
-            "payment_reference": transaction_obj.payment_reference,
-            "created": transaction_obj.created,
-        }
-        for transaction_obj in transactions
-    ]
-
-
-def empty_payment_method_totals():
-    return {
-        str(payment_method): ZERO
-        for payment_method, _label in Transaction.PaymentMethod.choices
-    }
-
-
-def summarize_current_custody_transactions(transactions, *, period_end=None):
-    transactions = list(transactions)
-    booking_payments = ZERO
-    booking_refunds = ZERO
-    totals_by_payment_method = empty_payment_method_totals()
-    for transaction_obj in transactions:
-        if transaction_obj.transaction_type == Transaction.Type.PAYMENT:
-            booking_payments += transaction_obj.amount
-        elif transaction_obj.transaction_type == Transaction.Type.REFUND:
-            booking_refunds += transaction_obj.amount
-        totals_by_payment_method[
-            str(transaction_obj.payment_method)
-        ] += transaction_obj.amount
-    return {
-        "transaction_count": len(transactions),
-        "booking_payments": booking_payments,
-        "booking_refunds": booking_refunds,
-        "net_amount": booking_payments + booking_refunds,
-        "totals_by_payment_method": totals_by_payment_method,
-        "period_start": min(
-            (transaction_obj.created for transaction_obj in transactions),
-            default=None,
-        ),
-        "period_end": period_end or timezone.now(),
-    }
-
-
-def money_total(expression, *, filter=None):
-    return Coalesce(
-        Sum(expression, filter=filter),
-        Value(ZERO),
-        output_field=MONEY_FIELD,
-    )
-
-
-def current_custody_aggregate_expressions():
-    return {
-        "transaction_count": Count("id"),
-        "collector_count": Count("created_by", distinct=True),
-        "net_amount": money_total("amount"),
-        "booking_payments": money_total(
-            "amount",
-            filter=Q(transaction_type=Transaction.Type.PAYMENT),
-        ),
-        "booking_refunds": money_total(
-            "amount",
-            filter=Q(transaction_type=Transaction.Type.REFUND),
-        ),
-        "period_start": Min("created"),
-    }
-
-
-def aggregate_current_custody(queryset, *, period_end=None):
-    summary = queryset.order_by().aggregate(**current_custody_aggregate_expressions())
-    summary["net_amount"] = summary["net_amount"] or ZERO
-    summary["booking_payments"] = summary["booking_payments"] or ZERO
-    summary["booking_refunds"] = summary["booking_refunds"] or ZERO
-    summary["period_end"] = period_end or timezone.now()
-    return summary
-
-
-def build_settlement_summary(
-    *,
-    access,
-    collected_by,
-    actor,
-    queryset,
-    court=None,
-):
-    from apps.settlements.authorization import can_approve_collector
-
-    transactions = list(queryset)
-    custody = summarize_current_custody_transactions(transactions)
-    can_approve = can_approve_collector(access, collected_by.id)
-    return {
-        "club": access.club.id,
-        "collected_by": collected_by.id,
-        "collected_by_name": get_user_display_name(collected_by),
-        "court": court.id if court else None,
-        "court_name": court.name if court else "",
-        "is_self_preview": bool(actor and collected_by.id == actor.id),
-        "can_approve": can_approve,
-        "approval_required": not can_approve,
-        "period_start": custody["period_start"],
-        "period_end": custody["period_end"],
-        "transaction_count": custody["transaction_count"],
-        "total_amount": custody["net_amount"],
-        "booking_payments": custody["booking_payments"],
-        "booking_refunds": custody["booking_refunds"],
-        "net_amount": custody["net_amount"],
-        "totals_by_payment_method": custody["totals_by_payment_method"],
-        "transactions": serialize_preview_transactions(transactions),
-    }
-
-
-def build_custody(
-    *,
-    club,
-    collector=None,
-    period_end=None,
-    lock=False,
-):
-    """
-    Authoritative, side-effect-free Current Custody calculation.
-
-    ARCHITECTURAL INVARIANTS:
-    1. Financial custody scope is strictly Club + optional Collector.
-       Court is never part of custody scope.
-    2. Authorization is resolved BEFORE this function is called.
-       This function must NOT perform authorization, inspect roles,
-       or check permissions.
-    3. Both preview and settlement query the identical candidates via
-       get_unsettled_transactions_queryset to guarantee mathematical parity.
-
-    Why Court must NOT be used:
-    A collector's custody contains every unsettled transaction collected by
-    that user in this Club, regardless of which Court generated the
-    transaction. Filtering by Court fragments cash responsibility and causes
-    discrepancies between Staff self-preview and Owner preview.
-
-    Why operational Transaction authorization must NOT be reused:
-    Operational Transaction authorization intentionally applies Court-level
-    restrictions (e.g., staff assigned to Court 1 cannot view Court 2
-    transactions). Reusing it for custody leaked those restrictions, making
-    staff self-preview exclude legitimate collections.
-
-    Why preview and settlement must share this resolver:
-    Both preview and settlement query the identical candidates via
-    get_unsettled_transactions_queryset to guarantee mathematical and
-    transactional consistency.
-
-    Semantics:
-    - collector=None: All unsettled transactions in the Club across all courts.
-    - collector=User: All unsettled transactions in the Club created by that user
-      across all courts.
-    """
-    queryset = get_unsettled_transactions_queryset(
-        club=club,
-        collector=collector,
-        lock=lock,
-    )
-    transactions = list(queryset)
-    summary = summarize_current_custody_transactions(
-        transactions,
-        period_end=period_end,
-    )
-    return summary | {
-        "club": club.id if hasattr(club, "id") else club,
-        "collected_by": collector.id if collector else None,
-        "collected_by_name": get_user_display_name(collector) if collector else "",
-        "transactions": transactions,
-    }
-
-
-def preview_custody(
-    *,
-    access,
-    actor,
-    collector,
-    court=None,
-):
-    """
-    Current Custody preview operation.
-
-    1. Authorization / Scope Guard: validates caller authority for this
-       collector.
-    2. Authoritative Custody: resolves candidate transactions (Club +
-       Collector, NOT Court).
-    3. Return calculated preview without side effects.
-    """
-    validate_preview_authority(
-        access=access,
-        actor=actor,
-        collector=collector,
-    )
-    custody = build_custody(
-        club=access.club,
-        collector=collector,
-        lock=False,
-    )
-    if not custody["transactions"]:
+    if not candidates:
         raise SlotyAPIException(
             status_code=status.HTTP_409_CONFLICT,
             code="NO_UNSETTLED_TRANSACTIONS",
             message=NO_UNSETTLED_TRANSACTIONS_MESSAGE,
         )
-    from apps.settlements.authorization import can_approve_collector
 
-    can_approve = can_approve_collector(access, collector.id)
+    booking_payments = sum(
+        (
+            t.amount
+            for t in candidates
+            if t.transaction_type == Transaction.Type.PAYMENT
+        ),
+        ZERO,
+    )
+    booking_refunds = sum(
+        (t.amount for t in candidates if t.transaction_type == Transaction.Type.REFUND),
+        ZERO,
+    )
+    total_amount = booking_payments + booking_refunds
+
+    totals_by_method = {
+        str(method): ZERO for method, _ in Transaction.PaymentMethod.choices
+    }
+    for t in candidates:
+        totals_by_method[str(t.payment_method)] += t.amount
+
+    serialized_transactions = [
+        {
+            "id": t.id,
+            "kind": t.transaction_type,
+            "booking": t.booking_id,
+            "booking_customer_name": booking_customer_display_name(t.booking),
+            "booking_customer_phone": booking_customer_display_phone(t.booking),
+            "booking_start_time": t.booking.start_time if t.booking else None,
+            "booking_end_time": t.booking.end_time if t.booking else None,
+            "court": t.court_id,
+            "court_name": t.court.name if t.court else "",
+            "amount": t.amount,
+            "payment_method": t.payment_method,
+            "payment_reference": t.payment_reference,
+            "created": t.created,
+        }
+        for t in candidates
+    ]
+
+    club_id = club.id if hasattr(club, "id") else club
+    court_id = court.id if court and hasattr(court, "id") else court
+    court_name = court.name if court and hasattr(court, "name") else ""
+    user_id = user.id if user and hasattr(user, "id") else user
+    user_name = _user_display_name(user)
+
     return {
-        "club": access.club.id,
-        "collected_by": collector.id,
-        "collected_by_name": get_user_display_name(collector),
-        "court": court.id if court else None,
-        "court_name": court.name if court else "",
-        "is_self_preview": bool(actor and collector.id == actor.id),
-        "can_approve": can_approve,
-        "approval_required": not can_approve,
-        "period_start": custody["period_start"],
-        "period_end": custody["period_end"],
-        "transaction_count": custody["transaction_count"],
-        "total_amount": custody["net_amount"],
-        "booking_payments": custody["booking_payments"],
-        "booking_refunds": custody["booking_refunds"],
-        "net_amount": custody["net_amount"],
-        "totals_by_payment_method": custody["totals_by_payment_method"],
-        "transactions": serialize_preview_transactions(custody["transactions"]),
+        "club": club_id,
+        "court": court_id,
+        "court_name": court_name,
+        "collected_by": user_id,
+        "collected_by_name": user_name,
+        "user": user_id,
+        "user_name": user_name,
+        "period_start": candidates[0].created,
+        "period_end": candidates[-1].created,
+        "transaction_count": len(candidates),
+        "total_amount": total_amount,
+        "net_amount": total_amount,
+        "booking_payments": booking_payments,
+        "booking_refunds": booking_refunds,
+        "totals_by_payment_method": totals_by_method,
+        "transactions": serialized_transactions,
+        "_candidates": candidates,
     }
 
 
-def build_settlement_preview(*, access, collected_by, actor, court=None):
-    """Legacy alias for preview_custody."""
-    return preview_custody(
-        access=access,
-        actor=actor,
-        collector=collected_by,
-        court=court,
-    )
+def preview(club, user=None, court=None) -> dict:
+    calc = _calculate(club, user=user, court=court, lock=False)
+    calc.pop("_candidates", None)
+    return calc
 
 
-def preview_settlement(*, access, collected_by, actor, court=None):
-    """Legacy alias for preview_custody."""
-    return preview_custody(
-        access=access,
-        actor=actor,
-        collector=collected_by,
-        court=court,
-    )
-
-
-def build_current_custody_collector_rows(queryset, *, period_end=None):
-    period_end = period_end or timezone.now()
-    grouped_rows = list(
-        queryset.values(
-            "created_by",
-            "created_by__first_name",
-            "created_by__last_name",
-            "created_by__username",
-        )
-        .annotate(**current_custody_aggregate_expressions())
-        .order_by("created_by")
-    )
-    collector_ids = [row["created_by"] for row in grouped_rows]
-    method_totals_by_collector = {
-        collector_id: empty_payment_method_totals() for collector_id in collector_ids
-    }
-    if collector_ids:
-        for item in (
-            queryset.filter(created_by_id__in=collector_ids)
-            .order_by()
-            .values("created_by", "payment_method")
-            .annotate(total=money_total("amount"))
-        ):
-            method_totals_by_collector[item["created_by"]][
-                str(item["payment_method"])
-            ] = (item["total"] or ZERO)
-
-    results = []
-    for row in grouped_rows:
-        collector_id = row["created_by"]
-        collector_name = (
-            f"{row['created_by__first_name']} {row['created_by__last_name']}"
-        ).strip() or row["created_by__username"]
-        results.append(
-            {
-                "collected_by": collector_id,
-                "collected_by_name": collector_name,
-                "period_start": row["period_start"],
-                "period_end": period_end,
-                "transaction_count": row["transaction_count"],
-                "total_amount": row["net_amount"] or ZERO,
-                "net_amount": row["net_amount"] or ZERO,
-                "booking_payments": row["booking_payments"] or ZERO,
-                "booking_refunds": row["booking_refunds"] or ZERO,
-                "totals_by_payment_method": method_totals_by_collector[collector_id],
-            }
-        )
-    return results
-
-
-# =============================================================================
-# RESPONSIBILITY 3: SETTLEMENT MUTATION
-# =============================================================================
-
-
-def settle_custody(
-    *,
-    club,
-    collector,
-    actor,
-    notes="",
-):
-    """
-    Consumes the exact same authoritative custody query
-    (get_unsettled_transactions_queryset), locking candidate transactions
-    and creating Settlement and SettlementTransaction lines atomically.
-
-    ARCHITECTURAL INVARIANTS:
-    1. Financial custody scope is strictly Club + Collector.
-       Court is never part of custody scope.
-    2. Authorization is evaluated at the boundary BEFORE this service is reached.
-       This function does NOT inspect roles, permissions, court assignments, or
-       RequestAccessContext.
-    3. Preview and settlement derive candidate transactions from the exact same
-       query (get_unsettled_transactions_queryset) to guarantee mathematical parity.
-    """
+def create(club, user=None, *, settled_by, notes="", court=None) -> Settlement:
     try:
         with transaction.atomic():
-            candidates = list(
-                get_unsettled_transactions_queryset(
-                    club=club,
-                    collector=collector,
-                    lock=True,
-                )
-            )
-            if not candidates:
-                raise SlotyAPIException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    code="NO_UNSETTLED_TRANSACTIONS",
-                    message=NO_UNSETTLED_TRANSACTIONS_MESSAGE,
-                )
-
-            custody = summarize_current_custody_transactions(candidates)
-            settled_at = timezone.now()
-            created_settlement = Settlement.objects.create(
+            calc = _calculate(club, user=user, court=court, lock=True)
+            settlement = Settlement.objects.create(
                 club=club,
-                court=None,
-                collected_by=collector,
-                period_start=custody["period_start"],
-                period_end=custody["period_end"],
-                status=Settlement.Status.SETTLED,
-                total_amount=custody["net_amount"],
-                transaction_count=custody["transaction_count"],
+                court=court,
+                total_amount=calc["total_amount"],
                 notes=notes,
-                created_by=actor,
-                settled_by=actor,
-                settled_at=settled_at,
+                settled_by=settled_by,
             )
             SettlementTransaction.objects.bulk_create(
                 [
                     SettlementTransaction(
-                        settlement=created_settlement,
-                        transaction=transaction_obj,
-                        amount=transaction_obj.amount,
+                        settlement=settlement,
+                        transaction=t,
+                        amount=t.amount,
                     )
-                    for transaction_obj in candidates
+                    for t in calc["_candidates"]
                 ]
             )
+
             from apps.audit.models import AuditLog
 
             record_audit_log(
-                club=created_settlement.club,
-                court=created_settlement.court,
-                actor=actor,
+                club=settlement.club,
+                court=settlement.court,
+                actor=settled_by,
                 action=AuditLog.Action.SETTLEMENT_CREATED,
                 entity_type="Settlement",
-                entity_id=created_settlement.id,
-                after_data=settlement_audit_snapshot(created_settlement)
+                entity_id=settlement.id,
+                after_data=settlement_audit_snapshot(settlement)
                 | {
-                    "booking_payments": str(custody["booking_payments"]),
-                    "booking_refunds": str(custody["booking_refunds"]),
-                    "transaction_ids": [
-                        transaction_obj.id for transaction_obj in candidates
-                    ],
+                    "booking_payments": str(calc["booking_payments"]),
+                    "booking_refunds": str(calc["booking_refunds"]),
+                    "transaction_ids": [t.id for t in calc["_candidates"]],
                 },
             )
-            return created_settlement
+            return settlement
     except IntegrityError as exc:
         raise SlotyAPIException(
             status_code=status.HTTP_409_CONFLICT,
             code="SETTLEMENT_CONFLICT",
             message=DOUBLE_SETTLEMENT_MESSAGE,
         ) from exc
-
-
-def create_approved_settlement(
-    *,
-    club=None,
-    access=None,
-    collected_by=None,
-    collector=None,
-    notes="",
-    actor=None,
-    created_by=None,
-    court=None,
-):
-    """Legacy backward-compatibility wrapper for settle_custody."""
-    target_club = club or (access.club if access else None)
-    target_collector = collector if collector is not None else collected_by
-    target_actor = actor or created_by
-    if access is not None:
-        validate_settlement_authority(
-            access=access,
-            actor=target_actor,
-            collector=target_collector,
-            court=court,
-        )
-    return settle_custody(
-        club=target_club,
-        collector=target_collector,
-        actor=target_actor,
-        notes=notes,
-    )
-
-
-process_settlement_request = create_approved_settlement
-create_settlement = create_approved_settlement
-
-
-def mark_settlement_settled(*, settlement, actor):
-    """
-    Transition a PENDING settlement to SETTLED atomically.
-
-    ARCHITECTURAL INVARIANT:
-    Authorization is evaluated at the view/boundary layer before this
-    financial function is reached. This function does NOT perform authorization,
-    inspect roles, or evaluate permissions.
-    """
-    with transaction.atomic():
-        locked_settlement = (
-            Settlement.objects.select_for_update(of=("self",))
-            .select_related(
-                "club",
-                "court",
-                "collected_by",
-                "created_by",
-                "settled_by",
-            )
-            .get(pk=settlement.pk)
-        )
-        if locked_settlement.status == Settlement.Status.SETTLED:
-            raise SlotyAPIException(
-                status_code=status.HTTP_409_CONFLICT,
-                code="SETTLEMENT_ALREADY_SETTLED",
-                message=ALREADY_SETTLED_MESSAGE,
-            )
-        if locked_settlement.status != Settlement.Status.PENDING:
-            raise SlotyAPIException(
-                status_code=status.HTTP_409_CONFLICT,
-                code="SETTLEMENT_INVALID_STATUS",
-                message=INVALID_SETTLEMENT_STATUS_MESSAGE,
-            )
-
-        before_data = settlement_audit_snapshot(locked_settlement)
-        locked_settlement.status = Settlement.Status.SETTLED
-        locked_settlement.settled_by = actor
-        locked_settlement.settled_at = timezone.now()
-        locked_settlement.save(
-            update_fields=["status", "settled_by", "settled_at", "modified"]
-        )
-        from apps.audit.models import AuditLog
-
-        record_audit_log(
-            club=locked_settlement.club,
-            court=locked_settlement.court,
-            actor=actor,
-            action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
-            entity_type="Settlement",
-            entity_id=locked_settlement.id,
-            before_data=before_data,
-            after_data=settlement_audit_snapshot(locked_settlement),
-        )
-        return locked_settlement

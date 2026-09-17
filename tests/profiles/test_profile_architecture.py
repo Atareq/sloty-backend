@@ -13,6 +13,7 @@ from apps.common.authorization.querysets import scoped_queryset
 from apps.common.authorization.resolver import resolve_club_scope, resolve_global_scope
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court
+from apps.players.models import PlayerProfile
 from apps.profiles.models import (
     AdminProfile,
     OwnerProfile,
@@ -63,12 +64,24 @@ def request_for(user):
 
 
 @pytest.mark.parametrize(
-    "child,role",
-    [(OwnerProfile, "OWNER"), (StaffProfile, "STAFF"), (AdminProfile, "ADMIN")],
+    "child,role,kwargs",
+    [
+        (OwnerProfile, "OWNER", {}),
+        (StaffProfile, "STAFF", {"club": "club"}),
+        (AdminProfile, "ADMIN", {}),
+        (PlayerProfile, "PLAYER", {"phone_number": "+201011112222"}),
+    ],
 )
-def test_children_have_real_parent_link_and_shared_identity(child, role, user, club):
+def test_children_have_real_parent_link_and_shared_identity(
+    child, role, kwargs, user, club
+):
+    create_kwargs = {
+        key: (club if value == "club" else value) for key, value in kwargs.items()
+    }
     instance = child.objects.create(
-        user=user, role=role, **({"club": club} if child is StaffProfile else {})
+        user=user,
+        role=role,
+        **create_kwargs,
     )
     link = child._meta.parents[Profile]
     assert link.remote_field.parent_link and link.primary_key
@@ -81,6 +94,37 @@ def test_children_have_real_parent_link_and_shared_identity(child, role, user, c
     assert child.clean is Profile.clean
     assert child.save is Profile.save
     assert Profile.objects.filter(user=user).count() == 1
+
+
+@pytest.mark.parametrize(
+    "child,role,kwargs",
+    [
+        (OwnerProfile, Profile.Role.OWNER, {}),
+        (StaffProfile, Profile.Role.STAFF, {"club": "club"}),
+        (AdminProfile, Profile.Role.ADMIN, {}),
+    ],
+)
+def test_management_profiles_require_user(child, role, kwargs, club):
+    create_kwargs = {
+        key: (club if value == "club" else value) for key, value in kwargs.items()
+    }
+    with pytest.raises(ValidationError):
+        child.objects.create(role=role, **create_kwargs)
+
+
+def test_player_profile_user_is_optional_or_linked(user):
+    anonymous_player = PlayerProfile.objects.create(
+        role=Profile.Role.PLAYER,
+        phone_number="+201011113333",
+    )
+    linked_player = PlayerProfile.objects.create(
+        user=user,
+        role=Profile.Role.PLAYER,
+        phone_number="+201011114444",
+    )
+    assert anonymous_player.user_id is None
+    assert linked_player.user_id == user.pk
+    assert linked_player.user.profile.role == Profile.Role.PLAYER
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -97,10 +141,23 @@ def test_user_cannot_have_second_profile_even_if_disabled(user, enabled):
     assert isinstance(Profile._meta.get_field("user"), models.OneToOneField)
 
 
-@pytest.mark.parametrize("child", [OwnerProfile, StaffProfile, AdminProfile])
-def test_child_save_validates_inherited_role(child, user, club):
+@pytest.mark.parametrize(
+    "child,kwargs",
+    [
+        (OwnerProfile, {}),
+        (StaffProfile, {"club": "club"}),
+        (AdminProfile, {}),
+        (PlayerProfile, {"phone_number": "+201011115555"}),
+    ],
+)
+def test_child_save_validates_inherited_role(child, kwargs, user, club):
+    create_kwargs = {
+        key: (club if value == "club" else value) for key, value in kwargs.items()
+    }
     obj = child(
-        user=user, role="INVALID", **({"club": club} if child is StaffProfile else {})
+        user=user,
+        role="INVALID",
+        **create_kwargs,
     )
     with pytest.raises(ValidationError):
         obj.save()
@@ -109,11 +166,22 @@ def test_child_save_validates_inherited_role(child, user, club):
 
 @pytest.mark.parametrize(
     "child,role",
-    [(OwnerProfile, "STAFF"), (StaffProfile, "ADMIN"), (AdminProfile, "OWNER")],
+    [
+        (OwnerProfile, "STAFF"),
+        (StaffProfile, "ADMIN"),
+        (AdminProfile, "OWNER"),
+        (PlayerProfile, "OWNER"),
+    ],
 )
 def test_child_type_cannot_contradict_stored_role(child, role, user, club):
     obj = child(
-        user=user, role=role, **({"club": club} if child is StaffProfile else {})
+        user=user,
+        role=role,
+        **(
+            {"club": club}
+            if child is StaffProfile
+            else {"phone_number": "+201011116666"} if child is PlayerProfile else {}
+        ),
     )
     with pytest.raises(ValidationError, match="requires role"):
         obj.clean()

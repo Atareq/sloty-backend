@@ -20,10 +20,7 @@ from apps.bookings.models import Booking
 from apps.clubs.models import Club
 from apps.courts.models import Court
 from apps.settlements.models import Settlement, SettlementTransaction
-from apps.settlements.services import (
-    get_current_unsettled_transactions,
-    summarize_current_custody_transactions,
-)
+from apps.settlements.services import preview as preview_settlement
 from apps.transactions.filters import TransactionFilter
 from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.services import (
@@ -384,7 +381,7 @@ class TransactionClubPlayerIdentityTests(TransactionAPITestCase):
 
         from apps.bookings.services import create_booking
         from apps.courts.models import CourtWorkingHour, CourtWorkingHourPricePeriod
-        from apps.players.services import create_club_player_version
+        from apps.players.models import ClubPlayer
 
         admin = self.create_platform_admin("identity-tx-admin")
         club = self.create_club("Identity Tx Club", slug="identity-tx-club")
@@ -404,8 +401,11 @@ class TransactionClubPlayerIdentityTests(TransactionAPITestCase):
             customer_name="Ahmed Ali",
             customer_phone="+201088880020",
         )
-        create_club_player_version(
-            booking.club_player, display_name="Ahmed Salah", player_number=10
+        ClubPlayer.objects.create(
+            club=club,
+            player_profile=booking.club_player.player_profile,
+            display_name="Ahmed Salah",
+            player_number=10,
         )
         transaction_obj = self.create_transaction(booking, created_by=admin)
         self.client.force_authenticate(user=admin)
@@ -637,16 +637,13 @@ class TransactionCreateTests(TransactionAPITestCase):
             amount="125.00",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        access = self.club_access_for(self.staff, self.club)
-        custody_transactions = list(
-            get_current_unsettled_transactions(access=access, collected_by=self.staff)
-        )
-        summary = summarize_current_custody_transactions(custody_transactions)
+        preview_res = preview_settlement(club=self.club, user=self.staff)
         transaction_obj = Transaction.objects.get(id=response.data["id"])
-        self.assertEqual(custody_transactions, [transaction_obj])
-        self.assertEqual(summary["net_amount"], Decimal("125.00"))
-        self.assertEqual(summary["period_start"], transaction_obj.created)
-        self.assertNotEqual(summary["period_start"], transaction_obj.occurred_at)
+        self.assertEqual(len(preview_res["transactions"]), 1)
+        self.assertEqual(preview_res["transactions"][0]["id"], transaction_obj.id)
+        self.assertEqual(preview_res["net_amount"], Decimal("125.00"))
+        self.assertEqual(preview_res["period_start"], transaction_obj.created)
+        self.assertNotEqual(preview_res["period_start"], transaction_obj.occurred_at)
 
     def test_revoked_staff_access_cannot_sync_transaction(self):
         self.staff.profile.delete()
@@ -745,22 +742,19 @@ class TransactionAttemptTraceabilityAPITests(TransactionAPITestCase):
             payment_reference="ACCEPTED-FINANCIAL-STATE",
         )
         transaction_obj = Transaction.objects.get(pk=create_response.data["id"])
-        access = self.club_access_for(self.owner, self.club)
-        custody_transactions = list(
-            get_current_unsettled_transactions(access=access, collected_by=self.staff)
-        )
-        custody = summarize_current_custody_transactions(custody_transactions)
+        preview_res = preview_settlement(club=self.club, user=self.staff)
         self.client.force_authenticate(user=self.owner)
         preview_response = self.client.get(
             reverse("club-settlement-preview", kwargs={"club_slug": self.club.slug}),
-            {"collected_by": self.staff.id},
+            {"user": self.staff.id},
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
         self.booking.refresh_from_db()
         self.assertEqual(self.booking.status, Booking.Status.CONFIRMED)
         self.assertEqual(get_booking_paid_amount(self.booking), Decimal("100.00"))
-        self.assertEqual(custody_transactions, [transaction_obj])
-        self.assertEqual(custody["net_amount"], Decimal("100.00"))
+        self.assertEqual(len(preview_res["transactions"]), 1)
+        self.assertEqual(preview_res["transactions"][0]["id"], transaction_obj.id)
+        self.assertEqual(preview_res["net_amount"], Decimal("100.00"))
         self.assertEqual(preview_response.status_code, status.HTTP_200_OK)
         self.assertEqual(preview_response.data["transaction_count"], 1)
         self.assertEqual(preview_response.data["total_amount"], "100.00")
@@ -1056,31 +1050,30 @@ class TransactionAttemptTraceabilityAPITests(TransactionAPITestCase):
             amount=Decimal("500.00"),
             payment_reference="REJECTED-CUSTODY",
         )
-        access = self.club_access_for(self.owner, self.club)
         self.client.force_authenticate(user=self.owner)
-        custody_transactions = list(
-            get_current_unsettled_transactions(access=access, collected_by=self.staff)
-        )
-        custody = summarize_current_custody_transactions(custody_transactions)
+        preview_res = preview_settlement(club=self.club, user=self.staff)
         preview_response = self.client.get(
             reverse("club-settlement-preview", kwargs={"club_slug": self.club.slug}),
-            {"collected_by": self.staff.id},
+            {"user": self.staff.id},
         )
         settlement_response = self.client.post(
             reverse("club-settlement-list", kwargs={"club_slug": self.club.slug}),
-            {"collected_by": self.staff.id},
+            {"user": self.staff.id},
             format="json",
         )
         self.assertEqual(TransactionAttempt.objects.count(), 1)
         self.assertEqual(rejected_attempt.transaction, None)
-        self.assertEqual(custody_transactions, [real_payment])
-        self.assertEqual(custody["net_amount"], Decimal("300.00"))
+        self.assertEqual(len(preview_res["transactions"]), 1)
+        self.assertEqual(preview_res["transactions"][0]["id"], real_payment.id)
+        self.assertEqual(preview_res["net_amount"], Decimal("300.00"))
         self.assertEqual(get_booking_paid_amount(self.booking), Decimal("300.00"))
         self.assertEqual(preview_response.status_code, status.HTTP_200_OK)
         self.assertEqual(preview_response.data["transaction_count"], 1)
         self.assertEqual(preview_response.data["total_amount"], "300.00")
         self.assertEqual(settlement_response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(settlement_response.data["transaction_count"], 1)
+        from apps.settlements.models import SettlementTransaction
+
         self.assertEqual(SettlementTransaction.objects.count(), 1)
         self.assertEqual(SettlementTransaction.objects.get().transaction, real_payment)
 
@@ -1114,15 +1107,8 @@ class TransactionAttemptTraceabilityAPITests(TransactionAPITestCase):
         settlement = Settlement.objects.create(
             club=self.club,
             court=self.court,
-            collected_by=self.staff,
-            period_start=self.time_at(8),
-            period_end=self.time_at(14),
-            status=Settlement.Status.SETTLED,
             total_amount=transaction_obj.amount,
-            transaction_count=1,
-            created_by=self.owner,
             settled_by=self.owner,
-            settled_at=self.time_at(14),
         )
         SettlementTransaction.objects.create(
             settlement=settlement,
@@ -1308,15 +1294,8 @@ class TransactionFilterTests(TransactionAPITestCase):
         settlement = Settlement.objects.create(
             club=transaction_obj.club,
             court=transaction_obj.court,
-            collected_by=transaction_obj.created_by,
-            period_start=self.time_at(8),
-            period_end=self.time_at(14),
-            status=Settlement.Status.SETTLED,
             total_amount=transaction_obj.amount,
-            transaction_count=1,
-            created_by=self.platform_admin,
             settled_by=self.platform_admin,
-            settled_at=self.time_at(14),
         )
         SettlementTransaction.objects.create(
             settlement=settlement,

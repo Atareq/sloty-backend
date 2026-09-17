@@ -553,27 +553,15 @@ class Command(BaseCommand):
         settlements = {}
         for club_key, club in clubs.items():
             owner = users[f"owner_{club_key.lower()}"]
-            period_start = self.demo_time(
-                day_offset=3 + ord(club_key) - ord("A"),
-                hour=8,
-            )
-            period_end = period_start + timedelta(hours=2)
 
             pending_transaction = transactions[(club_key, "pending")]
             pending_settlement, _ = Settlement.objects.update_or_create(
                 club=club,
-                period_start=period_start,
-                period_end=period_end,
-                status=Settlement.Status.PENDING,
+                notes="Demo pending settlement.",
                 defaults={
                     "court": courts[club_key][1],
-                    "collected_by": pending_transaction.created_by,
                     "total_amount": pending_transaction.amount,
-                    "transaction_count": 1,
-                    "notes": "Demo pending settlement.",
-                    "created_by": owner,
-                    "settled_by": None,
-                    "settled_at": None,
+                    "settled_by": owner,
                 },
             )
             SettlementTransaction.objects.update_or_create(
@@ -587,18 +575,11 @@ class Command(BaseCommand):
             settled_transaction = transactions[(club_key, "settled")]
             settled_settlement, _ = Settlement.objects.update_or_create(
                 club=club,
-                period_start=period_start,
-                period_end=period_end,
-                status=Settlement.Status.SETTLED,
+                notes="Demo settled settlement.",
                 defaults={
                     "court": courts[club_key][1],
-                    "collected_by": settled_transaction.created_by,
                     "total_amount": settled_transaction.amount,
-                    "transaction_count": 1,
-                    "notes": "Demo settled settlement.",
-                    "created_by": owner,
                     "settled_by": users["platform_admin"],
-                    "settled_at": period_end + timedelta(minutes=30),
                 },
             )
             SettlementTransaction.objects.update_or_create(
@@ -690,10 +671,10 @@ class Command(BaseCommand):
 
         settlement = settlements[(club_key, seed_target)]
         if action == AuditLog.Action.SETTLEMENT_MARKED_SETTLED:
-            before_data = {"status": Settlement.Status.PENDING}
+            before_data = {}
             after_data = {
                 "settlement_id": settlement.id,
-                "status": Settlement.Status.SETTLED,
+                "total_amount": str(settlement.total_amount),
             }
         else:
             before_data = {}

@@ -38,7 +38,7 @@ from apps.players.services import (
     get_or_create_club_player,
 )
 from apps.profiles.models import AdminProfile, Profile, StaffCourtAccess, StaffProfile
-from apps.settlements.services import create_approved_settlement
+from apps.settlements.services import create as create_settlement
 from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.services import create_booking_transaction
 
@@ -342,10 +342,10 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         )
 
         def worker():
-            return create_approved_settlement(
-                access=access,
-                collected_by=staff,
-                actor=self.admin,
+            return create_settlement(
+                club=self.club,
+                user=staff,
+                settled_by=self.admin,
             )
 
         results, errors = self.run_threads([worker, worker])
@@ -468,7 +468,6 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             ClubPlayer.objects.filter(
                 club=self.club,
                 player_profile=profile,
-                is_current_version=True,
             ).count(),
             1,
         )

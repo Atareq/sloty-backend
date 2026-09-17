@@ -145,12 +145,6 @@ class AuditAPITestCase(ProfileIdentityMixin, APITestCase):
     def settlement_list_url(self, club):
         return reverse("club-settlement-list", kwargs={"club_slug": club.slug})
 
-    def settlement_mark_settled_url(self, club, settlement):
-        return reverse(
-            "club-settlement-mark-settled",
-            kwargs={"club_slug": club.slug, "pk": settlement.pk},
-        )
-
     def list_ids(self, response):
         return {item["id"] for item in response.data["results"]}
 
@@ -305,14 +299,8 @@ class AuditAccessAPITests(AuditAPITestCase):
         settlement = Settlement.objects.create(
             club=self.club,
             court=self.court,
-            collected_by=self.owner,
-            period_start=self.time_at(10),
-            period_end=self.time_at(11),
-            status=Settlement.Status.SETTLED,
             total_amount=Decimal("50.00"),
-            transaction_count=1,
-            settled_by=self.platform_admin,
-            settled_at=self.time_at(11),
+            settled_by=self.owner,
         )
         logs = (
             record_audit_log(
@@ -367,7 +355,7 @@ class AuditAccessAPITests(AuditAPITestCase):
         self.assertEqual(booking_row["summary"]["customer_name"], "Original Customer")
         self.assertEqual(transaction_row["summary"]["collector_name"], "Ahmed Ali")
         self.assertEqual(transaction_row["summary"]["court_name"], original_court_name)
-        self.assertEqual(settlement_row["summary"]["collected_by_name"], "Ahmed Ali")
+        self.assertEqual(settlement_row["summary"]["settled_by_name"], "Ahmed Ali")
         self.assertEqual(settlement_row["summary"]["total_amount"], "50.00")
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data["summary"], booking_row["summary"])
@@ -806,7 +794,7 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
         )
         create_response = self.client.post(
             self.settlement_list_url(self.club),
-            {"collected_by": self.staff.id},
+            {"user": self.staff.id},
             format="json",
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
@@ -816,31 +804,8 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             entity_type="Settlement",
             entity_id=settlement.id,
         )
-        self.assertEqual(create_log.after_data["collected_by_id"], self.staff.id)
-        self.assertEqual(create_log.after_data["transaction_ids"], [transaction_obj.id])
-        pending_settlement = Settlement.objects.create(
-            club=self.club,
-            court=self.court,
-            collected_by=self.staff,
-            period_start=self.time_at(22),
-            period_end=self.time_at(23),
-            status=Settlement.Status.PENDING,
-            total_amount=Decimal("80.00"),
-            transaction_count=1,
-            created_by=self.platform_admin,
-        )
-        settle_response = self.client.post(
-            self.settlement_mark_settled_url(self.club, pending_settlement),
-            {},
-            format="json",
-        )
-        self.assertEqual(settle_response.status_code, status.HTTP_200_OK)
-        settle_log = AuditLog.objects.get(
-            action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
-            entity_type="Settlement",
-            entity_id=pending_settlement.id,
-        )
-        self.assertEqual(settle_log.after_data["collected_by_id"], self.staff.id)
+        self.assertEqual(create_log.after_data["settled_by_id"], self.platform_admin.id)
+        self.assertEqual(create_log.after_data["transaction_count"], 1)
 
 
 class AuditSeedSchemaTests(AuditAPITestCase):

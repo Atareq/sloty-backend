@@ -6,6 +6,13 @@ This file is the root engineering guide and documentation router for AI coding a
 
 **Sloty** is a sports court rental management system (starting with football courts in Assiut and Upper Egypt). The backend is built with Django and Django REST Framework (DRF) as a modular monolith.
 
+### Core Rule: SIMPLICITY WINS
+
+Keep the implementation direct, minimal, and clean.
+- Do not introduce abstractions unless they solve a demonstrated, active problem.
+- Do not store synthetic lifecycle flags or version chains when domain entities (e.g. Booking relationships, immutable transaction records) already serve as the single source of truth.
+- Do not preserve complexity merely because a previous implementation had it.
+
 ---
 
 ## 2. Source-of-Truth Hierarchy
@@ -37,7 +44,7 @@ Domain-specific business rules, models, invariants, and workflows live inside sc
 | :--- | :--- | :--- |
 | **Accounts** | [`apps/accounts/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/AGENTS.md) | Authentication identity (`User`), platform admin authority, auth endpoints, orphan diagnostics. |
 | **Players** | [`apps/players/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/AGENTS.md) | Global `PlayerProfile` + club-local `ClubPlayer` customer identity (see [`ADR-001`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-001-player-identity-and-booking-link.md)). |
-| **Profiles** | [`apps/profiles/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/profiles/AGENTS.md) | Application role authority: `Profile`, `OwnerProfile`, `StaffProfile`, and `AdminProfile`. |
+| **Profiles** | [`apps/profiles/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/profiles/AGENTS.md) | Application role authority: `Profile`, `OwnerProfile`, `StaffProfile`, `AdminProfile`, and `PlayerProfile`. |
 | **Clubs** | [`apps/clubs/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/clubs/AGENTS.md) | Club tenant definitions, location validation, and profile-backed club scope. |
 | **Courts** | [`apps/courts/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/AGENTS.md) | Court settings, working hours, pricing periods, midnight/slot time semantics. |
 | **Bookings** | [`apps/bookings/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/bookings/AGENTS.md) | Booking lifecycle, agreed price snapshots, overlap protection, recurrence, hold expiry (see [`ADR-002`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/adr/ADR-002-booking-identity-and-authorization-migration.md)). |
@@ -83,7 +90,7 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 
 | Concern | Target direction |
 | :--- | :--- |
-| Identity | `User` (auth) · `Profile` (application role) · `PlayerProfile` → `ClubPlayer` → `Booking.club_player` (customers) |
+| Identity | `User` (auth) · `Profile` (application role; inherited `Profile.user` optional for `PlayerProfile`) · `PlayerProfile` → `ClubPlayer` → `Booking.club_player` (customers) |
 | Authentication | Answers “who?” only (JWT and own-password change). Never club/court/resource access. |
 | Authorization | Spine owns WHERE/WHO · domain `authorization.py` owns special business rules only |
 | Resource config | Implemented `authorization_config` contract only — no second metadata format |
@@ -93,7 +100,7 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 ### Current runtime notes
 
 - Spine code: [`apps/common/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/authorization/)
-- Club scope is derived from the current `Profile`: an owner through `OwnerProfile.clubs`, staff through `StaffProfile.club` and `StaffCourtAccess`, and an admin by `Profile.role == ADMIN`. `User.profile` is one-to-one. `Profile` is the concrete Django multi-table parent; Owner/Staff/AdminProfile inherit its identity, fields, and common `clean()`/`save()`. Children hold only role-specific data. Disabled profiles grant no resource access.
+- Club scope is derived from the current `Profile`: an owner through `OwnerProfile.clubs`, staff through `StaffProfile.club` and `StaffCourtAccess`, and an admin by `Profile.role == ADMIN`. `User.profile` is a nullable one-to-one used only when a profile is linked to an authenticated account. `Profile` is the concrete Django multi-table parent; Owner/Staff/Admin/Player profiles inherit its identity, fields, and common `clean()`/`save()`. Owner/Staff/Admin require `user`; Player may be unlinked until future signup/verification. Children hold only role-specific data. Disabled profiles grant no resource access.
 - There is no heartbeat/presence API. Authorization mixins, ordinary API traffic, login, refresh, `/me`, and scope resolution never write presence state.
 - **Offline & Reconnect Safety**: Server is authoritative. Reconnect mutations require idempotency keys (`client_request_id`). Duplicate requests return `200 OK` with the existing entity; mismatched payloads return `409 Conflict`. Financial mutations (payments, refunds, settlements) require live server authority and can never be committed offline.
 - **Account and Profile Lifecycle**: `User` is authentication identity; the current `Profile` is application-role authority. A missing or invalid profile scope is denied immediately (`CLUB_ACCESS_REVOKED`), regardless of JWT claims.

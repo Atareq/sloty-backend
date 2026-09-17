@@ -1,10 +1,13 @@
 > **Current Profile schema (September 2026):** User has one Profile through a
-> OneToOne relation. OwnerProfile, StaffProfile, and AdminProfile inherit directly
-> from the concrete Profile using Django multi-table inheritance. Profile owns
-> role, is_enabled, timestamps, clean, and save. Staff belong to one Club and
-> receive court access through StaffCourtAccess. Owners use clubs M2M. Admin
-> authorization reads the enabled Profile.role. No separate admin flag or
-> membership compatibility layer participates in runtime authorization.
+> nullable OneToOne relation. OwnerProfile, StaffProfile, AdminProfile, and
+> PlayerProfile inherit directly from the concrete Profile using Django
+> multi-table inheritance. Profile owns user, role, is_enabled, timestamps,
+> clean, and save. Owner/Staff/Admin profiles require a User; PlayerProfile may
+> have user=NULL until future signup/account linking. Staff belong to one Club
+> and receive court access through StaffCourtAccess. Owners use clubs M2M.
+> Admin authorization reads the enabled Profile.role. PLAYER is an identity
+> type only and receives no club-management permissions. No separate admin flag
+> or membership compatibility layer participates in runtime authorization.
 >
 > Older migration-phase notes below describing membership identity, Manager,
 > heartbeat, compatibility contexts, or profile aliases are historical and
@@ -61,7 +64,7 @@ This reference (direction) + scoped AGENTS.md (domain rules)
 ### Implemented today
 
 - `User` authentication identity (`apps/accounts`)
-- `Profile` parent/canonical application identity with `OwnerProfile` / `StaffProfile` / `AdminProfile` children (`apps/profiles`). `Profile.role` is the only application-role authority. Club scope is `OwnerProfile.clubs` or `StaffProfile.club` with `StaffCourtAccess`.
+- `Profile` parent/canonical application identity with `OwnerProfile` / `StaffProfile` / `AdminProfile` / `PlayerProfile` children. `Profile.role` is the only application-role authority. Club scope is `OwnerProfile.clubs` or `StaffProfile.club` with `StaffCourtAccess`; `PLAYER` has no management scope.
 - JWT access + refresh authentication
 - Authorization Spine foundation (`apps/common/authorization/`)
   - `RequestAccessContext`
@@ -108,32 +111,33 @@ Authentication Identity
         │
        User
         │
-        ├── Club Operational Actor ──► ClubMembership
-        │
-        └── Customer Identity ──► PlayerProfile ──► ClubPlayer
+        └── Profile
+              ├── OwnerProfile / StaffProfile / AdminProfile
+              └── PlayerProfile ──► ClubPlayer
 ```
 
 | Concept | Model | Responsibility |
 | :--- | :--- | :--- |
 | Authentication identity | `User` | Login credentials, password hash, activity/security state, platform admin flag |
-| Club operational actor | `ClubMembership` | Club relationship, role (`OWNER` / `MANAGER` / `STAFF`), court assignment, manager delegation flags |
-| Global customer person | `PlayerProfile` | Unique phone identity, optional name, verified flag, nullable `user` FK |
+| Club operational actor | `OwnerProfile` / `StaffProfile` / `AdminProfile` | Profile child rows; `Profile.role` is `OWNER`, `STAFF`, or `ADMIN`; User required |
+| Global customer person | `PlayerProfile` | Profile child row with `role=PLAYER`; unique phone identity, optional name, verified flag, inherited nullable `Profile.user` |
 | Club-local customer label | `ClubPlayer` | Per-club display name, club number, metadata; immutable versioned historical record — at most one **current** row per `(club, player_profile)` (`UNIQUE(club, player_profile) WHERE is_current_version=True`); identity changes create a new version (`previous_version`, `is_current_version`), never edit or soft-delete |
 
 **Clarify:**
 
 - `User` = authentication identity (“who can log in?”)
-- `ClubMembership` = club operational relationship (“what role does this user have in this club?”)
+- `Profile` = application role relationship (“what role does this user/profile have?”)
 - `PlayerProfile` = global customer identity (“which person is this phone?”)
 - `ClubPlayer` = club-specific representation (“how does this club name/number that person?”)
 
-**Do not introduce** `StaffProfile` / `OwnerProfile` / `ManagerProfile` unless a future product requirement proves `ClubMembership` insufficient. Today it already carries role, court, and flags.
+`PLAYER` is not a club-management role. Do not add it to Owner/Staff/Admin
+authorization rules.
 
 ### Current State
 
 - `User` exists and is identity-only (no club roles stored on the user row).
-- `ClubMembership` exists and is the operational actor.
-- `PlayerProfile` and `ClubPlayer` exist (`apps/players/`). `ClubPlayer` is an immutable versioned historical identity record (`previous_version`, `is_current_version`, `created_at`; no `deleted_at`, no `last_used_at`, no `updated_at`) — last-used version is derived from the latest `Booking` for that `player_profile_id` at the club — see `apps/players/AGENTS.md` "ClubPlayer Lifecycle (Versioned, Append-Only)".
+- `Profile` and its inherited children are the operational actor and customer identity parent.
+- `PlayerProfile` and `ClubPlayer` exist (`apps/players/`). PlayerProfile inherits from Profile and can exist with `user=NULL`, `role=PLAYER`, and `verified=false`. ClubPlayer is the club-local customer identity record — last-used identity is derived from the latest `Booking` for that `player_profile_id` at the club — see `apps/players/AGENTS.md`.
 - Bookings store a required `club_player` FK (`Booking.club_player`, `on_delete=PROTECT`) as the exact ClubPlayer version used at booking time. There is no `Booking.player_profile` FK and no denormalized `customer_name` / `customer_phone` on Booking. Walk-in create still accepts those fields as resolution inputs. Because `ClubPlayer` is itself historical, `Booking.club_player_id` is unaffected by any later version of that player.
 - `RequestAccessContext.profile` / `profile_type` are forward-compat aliases of membership/role — not separate profile tables.
 

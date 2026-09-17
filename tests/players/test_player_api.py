@@ -31,6 +31,7 @@ from apps.bookings.models import Booking
 from apps.clubs.models import Club
 from apps.courts.models import Court
 from apps.players.models import ClubPlayer, PlayerProfile
+from apps.profiles.models import Profile
 from tests.profile_factories import grant_owner_club, grant_staff_courts
 
 
@@ -54,7 +55,10 @@ class PlayerAPITestCase(APITestCase):
 
     def create_profile(self, phone, full_name="", user=None) -> PlayerProfile:
         return PlayerProfile.objects.create(
-            phone_number=phone, full_name=full_name, user=user
+            phone_number=phone,
+            full_name=full_name,
+            user=user,
+            role=Profile.Role.PLAYER,
         )
 
     def create_club_player(self, club, profile, display_name="", player_number=None):
@@ -102,8 +106,6 @@ class ClubPlayerCRUDTests(PlayerAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["display_name"], "Ahmed H")
         self.assertEqual(response.data["player_number"], 10)
-        self.assertTrue(response.data["is_current_version"])
-        self.assertIsNone(response.data["previous_version"])
         self.assertIn("player_profile", response.data)
         self.assertFalse(response.data["player_profile"]["has_account"])
 
@@ -332,14 +334,7 @@ class ClubPlayerCreateIdempotentTests(PlayerAPITestCase):
         self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(second_response.status_code, status.HTTP_201_CREATED)
         self.assertNotEqual(first_response.data["id"], second_response.data["id"])
-        self.assertFalse(
-            ClubPlayer.objects.get(pk=first_response.data["id"]).is_current_version
-        )
-        self.assertTrue(second_response.data["is_current_version"])
-        self.assertEqual(
-            second_response.data["previous_version"], first_response.data["id"]
-        )
-        # Both versions permanently exist — nothing was overwritten or removed.
+        # Both records permanently exist — nothing was overwritten or removed.
         self.assertEqual(ClubPlayer.objects.filter(club=self.club).count(), 2)
 
 
@@ -380,12 +375,6 @@ class ClubPlayerFilterTests(PlayerAPITestCase):
         ids = [r["id"] for r in response.data["results"]]
         self.assertIn(self.cp1.id, ids)
         self.assertNotIn(self.cp2.id, ids)
-
-    def test_filter_current_versions(self):
-        url = self.player_list_url(self.club) + "?is_current_version=true"
-        response = self.client.get(url)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertTrue(all(r["is_current_version"] for r in response.data["results"]))
 
 
 class PlayerProfileViewSetTests(PlayerAPITestCase):
@@ -442,15 +431,11 @@ class PlayerProfileViewSetTests(PlayerAPITestCase):
     def test_retrieve_includes_club_player_versions_and_recommended_id(self):
         p = self.create_profile("+201077770007", full_name="Ahmed")
         v1 = self.create_club_player(self.club, p, "Ahmed Ali", player_number=7)
-        v1.is_current_version = False
-        v1.save(update_fields=["is_current_version"])
         v2 = ClubPlayer.objects.create(
             club=self.club,
             player_profile=p,
             display_name="Ahmed Salah",
             player_number=10,
-            previous_version=v1,
-            is_current_version=True,
         )
         response = self.client.get(self.profile_detail_url(self.club, p.pk))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -464,15 +449,11 @@ class PlayerProfileViewSetTests(PlayerAPITestCase):
     def test_recommended_id_is_club_player_from_latest_booking(self):
         p = self.create_profile("+201077770008", full_name="Ahmed")
         v1 = self.create_club_player(self.club, p, "Ahmed Ali", player_number=7)
-        v1.is_current_version = False
-        v1.save(update_fields=["is_current_version"])
         v2 = ClubPlayer.objects.create(
             club=self.club,
             player_profile=p,
             display_name="Ahmed Salah",
             player_number=10,
-            previous_version=v1,
-            is_current_version=True,
         )
         court = Court.objects.create(
             club=self.club,

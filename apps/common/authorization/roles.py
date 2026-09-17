@@ -11,6 +11,7 @@ class Role:
     ADMIN = "ADMIN"
     OWNER = Profile.Role.OWNER
     STAFF = Profile.Role.STAFF
+    PLAYER = Profile.Role.PLAYER
 
     ALL = (ADMIN, OWNER, STAFF)
     CLUB_ROLES = (OWNER, STAFF)

@@ -157,7 +157,6 @@ class BookingOfflineSafetyTests(APITestCase):
         ).first()
         self.assertIsNotNone(club_player)
         self.assertEqual(club_player.display_name, name)
-        self.assertTrue(club_player.is_current_version)
 
         # Booking points to the resolved ClubPlayer
         booking = Booking.objects.get(id=res.data["id"])

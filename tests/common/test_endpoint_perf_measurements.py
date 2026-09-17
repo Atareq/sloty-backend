@@ -257,13 +257,7 @@ class EndpointPerfMeasurementTests(BookingAPITestCase):
         settlement = Settlement.objects.create(
             club=self.club,
             court=self.court,
-            period_start=self.time_at(8),
-            period_end=self.time_at(14),
-            status=Settlement.Status.SETTLED,
             total_amount=Decimal("50.00"),
-            transaction_count=1,
-            collected_by=self.platform_admin,
-            created_by=self.platform_admin,
             settled_by=self.platform_admin,
         )
         paid = self.booking.transactions.get()

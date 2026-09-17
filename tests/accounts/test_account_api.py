@@ -578,10 +578,12 @@ class PasswordChangeAPITests(AccountAPITestCase):
             user=self.user, role=Profile.Role.OWNER
         )
         owner_profile.clubs.add(club)
+        player_user = self.create_user(username="password-change-player")
         player_profile = PlayerProfile.objects.create(
             phone_number="+201066661111",
             full_name="Password Change Player",
-            user=self.user,
+            user=player_user,
+            role=Profile.Role.PLAYER,
         )
         original_password_hash = self.user.password
         self.authenticate_user()
@@ -601,7 +603,7 @@ class PasswordChangeAPITests(AccountAPITestCase):
         self.assertTrue(self.user.check_password(self.new_password))
         self.assertFalse(self.user.check_password(self.password))
         self.assertEqual(owner_profile.role, Profile.Role.OWNER)
-        self.assertEqual(player_profile.user_id, self.user.id)
+        self.assertEqual(player_profile.user_id, player_user.id)
 
     def test_wrong_current_password_returns_validation_error(self):
         self.authenticate_user()
