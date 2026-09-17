@@ -15,7 +15,7 @@ source "${SCRIPT_DIR}/lib/backend-release.sh"
 COMMIT_SHA="${1:-}"
 RELEASE_TAG="${2:-}"
 
-SLOTY_PYTHON_RUNTIME="${SLOTY_PYTHON_RUNTIME:-/opt/sloty-runtime/python}"
+SLOTY_PYTHON_RUNTIME_ROOT="${SLOTY_PYTHON_RUNTIME_ROOT:-/opt/sloty-runtime/python}"
 SLOTY_REQUIRED_PYTHON_VERSION="${SLOTY_REQUIRED_PYTHON_VERSION:-3.12.14}"
 SLOTY_BACKEND_SERVICE="${SLOTY_BACKEND_SERVICE:-sloty-backend.service}"
 SLOTY_HEALTH_URL="${SLOTY_HEALTH_URL:-http://127.0.0.1:8020/health/}"
@@ -150,27 +150,32 @@ deploy_verify_python() {
     return 1
   fi
 
-  local python_info version base_prefix
-  python_info="$(
-    sloty_python -c 'import sys; print(".".join(map(str, sys.version_info[:3]))); print(sys.base_prefix)'
+  local python_version venv_prefix base_prefix
+  python_version="$(
+    sloty_python -c 'import platform; print(platform.python_version())'
   )"
-  version="$(printf '%s\n' "$python_info" | sed -n '1p')"
-  base_prefix="$(printf '%s\n' "$python_info" | sed -n '2p')"
+  venv_prefix="$(sloty_python -c 'import sys; print(sys.prefix)')"
+  base_prefix="$(sloty_python -c 'import sys; print(sys.base_prefix)')"
 
-  if [[ "$version" != "$SLOTY_REQUIRED_PYTHON_VERSION" ]]; then
-    echo "Sloty virtualenv must run Python ${SLOTY_REQUIRED_PYTHON_VERSION}." >&2
-    echo "Found ${version} at ${SLOTY_BACKEND_PYTHON}." >&2
-    echo "Expected runtime: ${SLOTY_PYTHON_RUNTIME}" >&2
+  if [[ "$python_version" != "$SLOTY_REQUIRED_PYTHON_VERSION" ]]; then
+    echo "Wrong Sloty Python version: ${python_version}" >&2
+    echo "expected=${SLOTY_REQUIRED_PYTHON_VERSION}" >&2
+    return 1
+  fi
+
+  if [[ "$venv_prefix" != "$SLOTY_BACKEND_VENV" ]]; then
+    echo "Unexpected Sloty virtualenv prefix: ${venv_prefix}" >&2
+    echo "expected=${SLOTY_BACKEND_VENV}" >&2
     return 1
   fi
 
   case "$base_prefix" in
-    "${SLOTY_PYTHON_RUNTIME}"|"${SLOTY_PYTHON_RUNTIME}/")
+    "${SLOTY_PYTHON_RUNTIME_ROOT}"/*)
       ;;
     *)
-      echo "Sloty virtualenv is based on the wrong Python runtime." >&2
+      echo "Sloty virtualenv is not based on the dedicated Sloty Python runtime." >&2
       echo "base_prefix=${base_prefix}" >&2
-      echo "expected prefix=${SLOTY_PYTHON_RUNTIME}" >&2
+      echo "expected under=${SLOTY_PYTHON_RUNTIME_ROOT}/" >&2
       echo "Refusing to modify system Python or other project runtimes." >&2
       return 1
       ;;

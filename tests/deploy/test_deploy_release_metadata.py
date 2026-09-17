@@ -241,7 +241,10 @@ def test_write_helper_validates_arguments(tmp_path):
     assert not (tmp_path / "etc-sloty" / "backend-release.json").exists()
 
 
-def _write_fake_python(path, version, base_prefix):
+PRODUCTION_BASE_PREFIX = "/opt/sloty-runtime/python/cpython-3.12.14-linux-x86_64-gnu"
+
+
+def _write_fake_python(path, version, prefix, base_prefix):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "\n".join(
@@ -249,8 +252,15 @@ def _write_fake_python(path, version, base_prefix):
                 "#!/usr/bin/env python3",
                 "import sys",
                 "if len(sys.argv) >= 3 and sys.argv[1] == '-c':",
-                f"    print({version!r})",
-                f"    print({base_prefix!r})",
+                "    code = sys.argv[2]",
+                "    if 'python_version' in code:",
+                f"        print({version!r})",
+                "    elif 'base_prefix' in code:",
+                f"        print({base_prefix!r})",
+                "    elif 'prefix' in code:",
+                f"        print({prefix!r})",
+                "    else:",
+                "        raise SystemExit('unexpected -c snippet')",
                 "    raise SystemExit(0)",
                 "raise SystemExit('unexpected invocation')",
                 "",
@@ -262,15 +272,24 @@ def _write_fake_python(path, version, base_prefix):
 
 
 def _run_python_verify(tmp_path, python_path=None, extra_env=None):
-    env = {"SLOTY_BACKEND_PYTHON": str(python_path)} if python_path else {}
+    venv = tmp_path / "venv"
+    env = {"SLOTY_BACKEND_VENV": str(venv)}
+    if python_path is not None:
+        env["SLOTY_BACKEND_PYTHON"] = str(python_path)
     if extra_env:
         env.update(extra_env)
     return _source_deploy("deploy_verify_python", extra_env=env)
 
 
 def test_python_verify_accepts_sloty_runtime(tmp_path):
-    python_path = tmp_path / "venv" / "bin" / "python"
-    _write_fake_python(python_path, "3.12.14", "/opt/sloty-runtime/python")
+    venv = tmp_path / "venv"
+    python_path = venv / "bin" / "python"
+    _write_fake_python(
+        python_path,
+        "3.12.14",
+        str(venv),
+        PRODUCTION_BASE_PREFIX,
+    )
 
     result = _run_python_verify(tmp_path, python_path)
 
@@ -286,24 +305,44 @@ def test_python_verify_rejects_missing_interpreter(tmp_path):
 
 
 def test_python_verify_rejects_wrong_version(tmp_path):
-    python_path = tmp_path / "venv" / "bin" / "python"
-    _write_fake_python(python_path, "3.12.7", "/opt/sloty-runtime/python")
+    venv = tmp_path / "venv"
+    python_path = venv / "bin" / "python"
+    _write_fake_python(python_path, "3.13.5", str(venv), PRODUCTION_BASE_PREFIX)
 
     result = _run_python_verify(tmp_path, python_path)
 
     assert result.returncode != 0
+    assert "Wrong Sloty Python version: 3.13.5" in result.stderr
     assert "3.12.14" in result.stderr
-    assert "3.12.7" in result.stderr
 
 
-def test_python_verify_rejects_wrong_runtime_prefix(tmp_path):
-    python_path = tmp_path / "venv" / "bin" / "python"
-    _write_fake_python(python_path, "3.12.14", "/usr")
+@pytest.mark.parametrize("base_prefix", ["/usr", "/usr/local", "/usr/lib/python3.13"])
+def test_python_verify_rejects_system_runtime(tmp_path, base_prefix):
+    venv = tmp_path / "venv"
+    python_path = venv / "bin" / "python"
+    _write_fake_python(python_path, "3.12.14", str(venv), base_prefix)
 
     result = _run_python_verify(tmp_path, python_path)
 
     assert result.returncode != 0
-    assert "wrong Python runtime" in result.stderr
+    assert "dedicated Sloty Python runtime" in result.stderr
+    assert base_prefix in result.stderr
+
+
+def test_python_verify_rejects_wrong_virtualenv_prefix(tmp_path):
+    venv = tmp_path / "venv"
+    python_path = venv / "bin" / "python"
+    _write_fake_python(
+        python_path,
+        "3.12.14",
+        str(tmp_path / "other-venv"),
+        PRODUCTION_BASE_PREFIX,
+    )
+
+    result = _run_python_verify(tmp_path, python_path)
+
+    assert result.returncode != 0
+    assert "Unexpected Sloty virtualenv prefix" in result.stderr
 
 
 def test_deploy_script_uses_isolated_runtime_and_health_probe():
@@ -314,6 +353,7 @@ def test_deploy_script_uses_isolated_runtime_and_health_probe():
     assert "git pull" not in script
     assert "${SLOTY_BACKEND_DIR}/.venv" in script
     assert "/opt/sloty-runtime/python" in script
+    assert "SLOTY_PYTHON_RUNTIME_ROOT" in script
     assert "3.12.14" in script
     assert "sloty_python -m pip install" in script
     assert "systemctl restart sloty-backend.service" in script
