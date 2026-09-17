@@ -6,12 +6,11 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework.permissions import AllowAny
 
 from apps.accounts.views import SlotyTokenObtainPairView, SlotyTokenRefreshView
-from apps.common.views import HealthCheckAPIView
+from apps.common.views import HealthCheckAPIView, VersionAPIView
 
 urlpatterns = [
-    path("healthz", HealthCheckAPIView.as_view(), name="healthz"),
     path("health/", HealthCheckAPIView.as_view(), name="health_root"),
-    path("health", HealthCheckAPIView.as_view()),
+    path("api/system/version/", VersionAPIView.as_view(), name="system_version"),
     path("admin/", admin.site.urls),
     path("api/v1/", include("apps.accounts.urls")),
     path("api/v1/", include("apps.common.urls")),

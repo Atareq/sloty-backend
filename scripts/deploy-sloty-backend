@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# Production deploy entrypoint. Keep this file in sync with
+# /usr/local/sbin/deploy-sloty-backend on the VPS.
+#
+# Usage:
+#   deploy-sloty-backend <COMMIT_SHA> <RELEASE_TAG>
+#
+# This script belongs exclusively to Sloty. It must never manage shared
+# infrastructure (system Python, PostgreSQL, or other projects' virtualenvs).
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/backend-release.sh
+source "${SCRIPT_DIR}/lib/backend-release.sh"
+
+COMMIT_SHA="${1:-}"
+RELEASE_TAG="${2:-}"
+
+SLOTY_BACKEND_DIR="${SLOTY_BACKEND_DIR:-/srv/sloty/backend}"
+SLOTY_BACKEND_VENV="${SLOTY_BACKEND_VENV:-${SLOTY_BACKEND_DIR}/.venv}"
+SLOTY_BACKEND_PYTHON="${SLOTY_BACKEND_PYTHON:-${SLOTY_BACKEND_VENV}/bin/python}"
+SLOTY_PYTHON_RUNTIME="${SLOTY_PYTHON_RUNTIME:-/opt/sloty-runtime/python}"
+SLOTY_REQUIRED_PYTHON_VERSION="${SLOTY_REQUIRED_PYTHON_VERSION:-3.12.14}"
+SLOTY_BACKEND_SERVICE="${SLOTY_BACKEND_SERVICE:-sloty-backend.service}"
+SLOTY_HEALTH_URL="${SLOTY_HEALTH_URL:-http://127.0.0.1:8020/health/}"
+SLOTY_HEALTH_HOST="${SLOTY_HEALTH_HOST:-api.sloty.baronlearning.com}"
+SLOTY_ETC_DIR="${SLOTY_ETC_DIR:-/etc/sloty}"
+SLOTY_BACKEND_ENV_FILE="${SLOTY_BACKEND_ENV_FILE:-${SLOTY_ETC_DIR}/backend.env}"
+SLOTY_RELEASE_FILE="${SLOTY_RELEASE_FILE:-${SLOTY_ETC_DIR}/backend-release.json}"
+SLOTY_DJANGO_SETTINGS="${SLOTY_DJANGO_SETTINGS:-config.settings.production}"
+
+run_stage() {
+  local stage="$1"
+  shift
+
+  if [[ "${SLOTY_DEPLOY_FAIL_STAGE:-}" == "$stage" ]]; then
+    echo "Deploy stage failed: ${stage}" >&2
+    return 1
+  fi
+
+  if [[ -n "${SLOTY_DEPLOY_STUB_DIR:-}" ]]; then
+    local stub="${SLOTY_DEPLOY_STUB_DIR}/${stage}"
+    if [[ -x "$stub" ]]; then
+      "$stub"
+    fi
+    return 0
+  fi
+
+  "$@"
+}
+
+sloty_python() {
+  "$SLOTY_BACKEND_PYTHON" "$@"
+}
+
+deploy_fetch() {
+  git -C "$SLOTY_BACKEND_DIR" fetch --prune origin
+}
+
+deploy_verify() {
+  git -C "$SLOTY_BACKEND_DIR" cat-file -e "${COMMIT_SHA}^{commit}"
+}
+
+deploy_checkout() {
+  git -C "$SLOTY_BACKEND_DIR" checkout --detach "$COMMIT_SHA"
+}
+
+deploy_verify_python() {
+  if [[ ! -x "$SLOTY_BACKEND_PYTHON" ]]; then
+    echo "Sloty virtualenv interpreter is missing: ${SLOTY_BACKEND_PYTHON}" >&2
+    echo "Refusing to use system Python or another project's runtime." >&2
+    return 1
+  fi
+
+  local python_info version base_prefix
+  python_info="$(
+    sloty_python -c 'import sys; print(".".join(map(str, sys.version_info[:3]))); print(sys.base_prefix)'
+  )"
+  version="$(printf '%s\n' "$python_info" | sed -n '1p')"
+  base_prefix="$(printf '%s\n' "$python_info" | sed -n '2p')"
+
+  if [[ "$version" != "$SLOTY_REQUIRED_PYTHON_VERSION" ]]; then
+    echo "Sloty virtualenv must run Python ${SLOTY_REQUIRED_PYTHON_VERSION}." >&2
+    echo "Found ${version} at ${SLOTY_BACKEND_PYTHON}." >&2
+    echo "Expected runtime: ${SLOTY_PYTHON_RUNTIME}" >&2
+    return 1
+  fi
+
+  case "$base_prefix" in
+    "${SLOTY_PYTHON_RUNTIME}"|"${SLOTY_PYTHON_RUNTIME}/")
+      ;;
+    *)
+      echo "Sloty virtualenv is based on the wrong Python runtime." >&2
+      echo "base_prefix=${base_prefix}" >&2
+      echo "expected prefix=${SLOTY_PYTHON_RUNTIME}" >&2
+      echo "Refusing to modify system Python or other project runtimes." >&2
+      return 1
+      ;;
+  esac
+}
+
+deploy_install() {
+  sloty_python -m pip install -r "${SLOTY_BACKEND_DIR}/requirements/base.txt"
+}
+
+deploy_load_env() {
+  if [[ ! -f "$SLOTY_BACKEND_ENV_FILE" ]]; then
+    echo "Missing Sloty backend env file: ${SLOTY_BACKEND_ENV_FILE}" >&2
+    return 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "$SLOTY_BACKEND_ENV_FILE"
+  set +a
+}
+
+deploy_check() {
+  sloty_python "${SLOTY_BACKEND_DIR}/manage.py" check \
+    --settings="$SLOTY_DJANGO_SETTINGS"
+}
+
+deploy_migrate() {
+  sloty_python "${SLOTY_BACKEND_DIR}/manage.py" migrate \
+    --noinput \
+    --settings="$SLOTY_DJANGO_SETTINGS"
+}
+
+deploy_collectstatic() {
+  sloty_python "${SLOTY_BACKEND_DIR}/manage.py" collectstatic \
+    --noinput \
+    --settings="$SLOTY_DJANGO_SETTINGS"
+}
+
+deploy_restart() {
+  systemctl restart sloty-backend.service
+}
+
+deploy_verify_service() {
+  systemctl is-active --quiet sloty-backend.service
+}
+
+deploy_health() {
+  curl \
+    --silent \
+    --show-error \
+    --fail \
+    --max-time 10 \
+    --header "Host: ${SLOTY_HEALTH_HOST}" \
+    --output /dev/null \
+    "$SLOTY_HEALTH_URL"
+}
+
+main() {
+  validate_backend_release_args "$COMMIT_SHA" "$RELEASE_TAG"
+
+  run_stage fetch deploy_fetch
+  run_stage verify deploy_verify
+  run_stage checkout deploy_checkout
+  run_stage python deploy_verify_python
+  run_stage install deploy_install
+  run_stage env deploy_load_env
+  run_stage check deploy_check
+  run_stage migrate deploy_migrate
+  run_stage collectstatic deploy_collectstatic
+  run_stage restart deploy_restart
+  run_stage systemd deploy_verify_service
+  run_stage health deploy_health
+  write_backend_release_metadata "$COMMIT_SHA" "$RELEASE_TAG"
+}
+
+if [[ "${SLOTY_DEPLOY_SOURCE_ONLY:-}" != "1" ]]; then
+  main
+fi

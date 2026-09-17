@@ -54,46 +54,18 @@ jobs:
         run: |
           pytest
 
-  deploy:
-    name: Deploy Production
+  prepare-release:
+    name: Calculate Production Release
     needs: test
 
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
 
     runs-on: ubuntu-latest
 
-    steps:
-      - name: Configure SSH
-        env:
-          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
-          PROD_HOST: ${{ vars.PROD_HOST }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$PROD_SSH_KEY" > ~/.ssh/sloty_github_actions
-          chmod 600 ~/.ssh/sloty_github_actions
-          ssh-keyscan -H "$PROD_HOST" >> ~/.ssh/known_hosts
-
-      - name: Deploy production
-        env:
-          PROD_HOST: ${{ vars.PROD_HOST }}
-          PROD_USER: ${{ vars.PROD_USER }}
-        run: |
-          ssh \
-            -i ~/.ssh/sloty_github_actions \
-            -o IdentitiesOnly=yes \
-            "$PROD_USER@$PROD_HOST" \
-            "sudo /usr/local/sbin/deploy-sloty-backend ${{ github.sha }}"
-
-  release:
-    name: Create Production Release
-    needs: deploy
-
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
+    outputs:
+      release_tag: ${{ steps.calc.outputs.release_tag }}
+      create_release: ${{ steps.calc.outputs.create_release }}
+      commit_sha: ${{ steps.calc.outputs.commit_sha }}
 
     steps:
       - name: Checkout repository
@@ -102,6 +74,7 @@ jobs:
           fetch-depth: 0
 
       - name: Calculate next release version
+        id: calc
         run: |
           git fetch --tags
 
@@ -115,7 +88,9 @@ jobs:
 
           if [ -n "$EXISTING_TAG" ]; then
             echo "This commit is already released as $EXISTING_TAG."
-            echo "SKIP_RELEASE=true" >> "$GITHUB_ENV"
+            echo "release_tag=${EXISTING_TAG}" >> "$GITHUB_OUTPUT"
+            echo "create_release=false" >> "$GITHUB_OUTPUT"
+            echo "commit_sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -137,14 +112,91 @@ jobs:
           fi
 
           echo "Next release: $NEXT_TAG"
-          echo "RELEASE_TAG=$NEXT_TAG" >> "$GITHUB_ENV"
+          echo "release_tag=${NEXT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "create_release=true" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy Production
+    needs: prepare-release
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Configure SSH
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          PROD_HOST: ${{ vars.PROD_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$PROD_SSH_KEY" > ~/.ssh/sloty_github_actions
+          chmod 600 ~/.ssh/sloty_github_actions
+          ssh-keyscan -H "$PROD_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy production
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+          PROD_USER: ${{ vars.PROD_USER }}
+          COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
+        run: |
+          ssh \
+            -i ~/.ssh/sloty_github_actions \
+            -o IdentitiesOnly=yes \
+            "$PROD_USER@$PROD_HOST" \
+            "sudo /usr/local/sbin/deploy-sloty-backend ${COMMIT_SHA} ${RELEASE_TAG}"
+
+      - name: Write backend release metadata
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+          PROD_USER: ${{ vars.PROD_USER }}
+          COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
+        run: |
+          ssh \
+            -i ~/.ssh/sloty_github_actions \
+            -o IdentitiesOnly=yes \
+            "$PROD_USER@$PROD_HOST" \
+            "sudo env SLOTY_ETC_DIR=/etc/sloty bash -s -- ${COMMIT_SHA} ${RELEASE_TAG}" \
+            < scripts/write-backend-release-metadata
+
+  release:
+    name: Create Production Release
+    needs:
+      - prepare-release
+      - deploy
+
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/master' &&
+      needs.prepare-release.outputs.create_release == 'true'
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
 
       - name: Create GitHub release
-        if: env.SKIP_RELEASE != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
+          COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
         run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "GitHub release $RELEASE_TAG already exists; leaving production unchanged."
+            exit 0
+          fi
+
           gh release create "$RELEASE_TAG" \
-            --target "$GITHUB_SHA" \
+            --target "$COMMIT_SHA" \
             --title "Sloty Backend $RELEASE_TAG" \
             --generate-notes

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Write /etc/sloty/backend-release.json after a successful production deploy.
+# This script is self-contained so CI can pipe it over SSH.
+set -euo pipefail
+
+COMMIT_SHA="${1:-}"
+RELEASE_TAG="${2:-}"
+RELEASE_TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+$'
+COMMIT_SHA_PATTERN='^[0-9a-fA-F]{40}$'
+
+if [[ ! "$COMMIT_SHA" =~ $COMMIT_SHA_PATTERN ]]; then
+  echo "Invalid commit SHA: expected exactly 40 hexadecimal characters." >&2
+  exit 1
+fi
+
+if [[ ! "$RELEASE_TAG" =~ $RELEASE_TAG_PATTERN ]]; then
+  echo "Invalid release tag: expected v<number>.<number>.<number>." >&2
+  exit 1
+fi
+
+METADATA_DIR="${SLOTY_ETC_DIR:-/etc/sloty}"
+METADATA_PATH="${SLOTY_RELEASE_FILE:-${METADATA_DIR}/backend-release.json}"
+mkdir -p "$(dirname "$METADATA_PATH")"
+TMP_FILE="$(mktemp "${METADATA_PATH}.tmp.XXXXXX")"
+cleanup() {
+  rm -f "$TMP_FILE"
+}
+trap cleanup EXIT
+
+DEPLOYED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+python3 - "$TMP_FILE" "$RELEASE_TAG" "$COMMIT_SHA" "$DEPLOYED_AT" <<'PY'
+import json
+import sys
+
+path, release, commit, deployed_at = sys.argv[1:5]
+payload = {
+    "service": "sloty-backend",
+    "release": release,
+    "commit": commit.lower(),
+    "deployed_at": deployed_at,
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=4)
+    handle.write("\n")
+PY
+
+chmod 0640 "$TMP_FILE"
+if [[ "$(id -u)" -eq 0 ]] && getent group sloty >/dev/null 2>&1; then
+  chown root:sloty "$TMP_FILE"
+fi
+
+if [[ -n "${SLOTY_DEPLOY_FAIL_BEFORE_METADATA_RENAME:-}" ]]; then
+  echo "Refusing to rename release metadata (test interrupt)." >&2
+  exit 1
+fi
+
+mv -f "$TMP_FILE" "$METADATA_PATH"
+trap - EXIT

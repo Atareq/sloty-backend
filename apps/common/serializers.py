@@ -42,3 +42,10 @@ class EgyptLocationPayloadSerializer(serializers.Serializer):
 class HealthCheckResponseSerializer(serializers.Serializer):
     status = serializers.CharField(default="ok")
     database = serializers.CharField(default="connected")
+
+
+class BackendVersionSerializer(serializers.Serializer):
+    service = serializers.CharField()
+    release = serializers.CharField(allow_null=True)
+    commit = serializers.CharField(allow_null=True)
+    deployed_at = serializers.CharField(required=False)

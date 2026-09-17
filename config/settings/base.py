@@ -226,4 +226,9 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 
+BACKEND_RELEASE_METADATA_PATH = os.environ.get(
+    "BACKEND_RELEASE_METADATA_PATH",
+    "/etc/sloty/backend-release.json",
+)
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
