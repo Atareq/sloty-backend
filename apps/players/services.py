@@ -137,6 +137,13 @@ def get_or_create_club_player(
         return current, False
 
     with transaction.atomic():
+        if player_profile.pk:
+            PlayerProfile.objects.select_for_update().filter(
+                pk=player_profile.pk
+            ).first()
+        current = get_current_club_player(club, player_profile)
+        if current is not None:
+            return current, False
         club_player = ClubPlayer.objects.create(
             club=club,
             player_profile=player_profile,

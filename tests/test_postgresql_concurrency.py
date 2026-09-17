@@ -468,7 +468,6 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             ClubPlayer.objects.filter(
                 club=self.club,
                 player_profile=profile,
-                is_current_version=True,
             ).count(),
             1,
         )
