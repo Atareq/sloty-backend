@@ -35,6 +35,7 @@ class Migration(migrations.Migration):
                             ("OWNER", "Owner"),
                             ("STAFF", "Staff"),
                             ("ADMIN", "Admin"),
+                            ("PLAYER", "Player"),
                         ],
                         db_index=True,
                         max_length=16,
@@ -46,6 +47,8 @@ class Migration(migrations.Migration):
                 (
                     "user",
                     models.OneToOneField(
+                        blank=True,
+                        null=True,
                         on_delete=django.db.models.deletion.CASCADE,
                         related_name="profile",
                         to=settings.AUTH_USER_MODEL,

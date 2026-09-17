@@ -4,7 +4,9 @@
 > superseded by the September 16 Profile inheritance baseline. The customer
 > identity decision remains valid. Current account roles and club/court scope
 > are documented in `apps/profiles/AGENTS.md`; historical objections to the
-> operational child profiles below no longer apply.
+> operational child profiles below no longer apply. PlayerProfile now also
+> inherits from Profile as the `PLAYER` child while retaining the customer
+> identity boundary documented here.
 
 **Status:** Accepted
 **Date:** 2026-09-13
@@ -35,13 +37,11 @@ We introduce a two-tier customer identity architecture separating global identit
 ```text
 Authentication Identity
         │
-       User (apps/accounts)
+       User (apps/accounts, optional for players)
         │
-        ├── Operational Club Actor ──► ClubMembership (apps/clubs)
-        │
-        └── Customer Identity
-                    │
-              PlayerProfile (Global human identity)
+       Profile (apps/profiles)
+        ├── OwnerProfile / StaffProfile / AdminProfile
+        └── PlayerProfile (Global human identity, role=PLAYER)
                     │
                 ClubPlayer (Club-specific representation)
                     │
@@ -52,8 +52,10 @@ Authentication Identity
 
 1. **`PlayerProfile` (`apps/players/models.py`)**:
    - Represents the global real-world person.
+   - Inherits from `Profile` using Django multi-table inheritance.
+   - Uses inherited `Profile.role = PLAYER`.
    - Primary key anchor: `phone_number UNIQUE`.
-   - `user` is an optional, nullable foreign key to `User`.
+   - Inherited `Profile.user` is optional and nullable for players.
    - `verified` boolean tracks phone ownership independently from account authentication.
    - Declares **no** `authorization_config` (not scoped to any single club).
 
@@ -81,9 +83,9 @@ Authentication Identity
 
 ## 4. Rejected Alternatives
 
-### 1. `StaffProfile` / `OwnerProfile` / `ManagerProfile` Tables
-- **Proposal**: Create dedicated profile models for staff, managers, and owners alongside player profiles.
-- **Rejected because**: `ClubMembership` already represents the operational actor relationship, carrying `role` (`OWNER`, `MANAGER`, `STAFF`), court assignments, and manager delegation flags (`manager_can_change_pricing`, `manager_can_settle_transactions`). Adding extra profile tables for internal staff would introduce redundant models and unnecessary join overhead without any product need.
+### 1. Legacy `ClubMembership` / `ManagerProfile` Operational Layer
+- **Proposal**: Keep club roles in a separate membership/manager layer while leaving player identity outside `Profile`.
+- **Rejected by the September 2026 baseline because**: `Profile` is now the concrete application-role parent for Owner, Staff, Admin, and Player. Club scope is represented by profile children (`OwnerProfile.clubs`, `StaffProfile.club`, `StaffCourtAccess`). Do not recreate `ClubMembership`, `ManagerProfile`, or a parallel role layer.
 
 ### 2. Global Player Directory Browsing
 - **Proposal**: Allow club staff to search and browse all global `PlayerProfile` records in the system.
@@ -123,4 +125,4 @@ Authentication Identity
 
 ## 7. Addendum — Authentication Lifecycle Boundary (2026-09-15)
 
-Own-password changes operate only on `User` credentials. They never create, link, update, or authorize `PlayerProfile` or `ClubPlayer`; explicit player-linking services remain the only way to establish the optional `PlayerProfile.user` relationship. JWT authentication identifies the account, while live `ClubMembership` resolution remains responsible for club access.
+Own-password changes operate only on `User` credentials. They never create, link, update, or authorize `PlayerProfile` or `ClubPlayer`; explicit player-linking services remain the only way to establish the optional inherited `Profile.user` relationship. JWT authentication identifies the account, while live Profile-backed Authorization Spine resolution remains responsible for club access.

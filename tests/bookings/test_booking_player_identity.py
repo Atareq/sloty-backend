@@ -30,6 +30,7 @@ from apps.clubs.models import Club
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.players.models import ClubPlayer, PlayerProfile
+from apps.profiles.models import Profile
 from apps.transactions.models import Transaction
 from tests.profile_factories import ProfileIdentityMixin
 
@@ -141,7 +142,9 @@ class ClubIsolationTests(BookingPlayerIdentityTestCase):
         club_a = self.create_club("Isolation Club A", "isolation-club-a")
         club_b = self.create_club("Isolation Club B", "isolation-club-b")
         court_a = self.create_court(club_a, "Court A")
-        profile = PlayerProfile.objects.create(phone_number="+201055555555")
+        profile = PlayerProfile.objects.create(
+            phone_number="+201055555555", role=Profile.Role.PLAYER
+        )
         other_club_player = ClubPlayer.objects.create(
             club=club_b, player_profile=profile
         )
@@ -160,7 +163,9 @@ class ClubIsolationTests(BookingPlayerIdentityTestCase):
     def test_service_validation_rejects_cross_club_club_player(self):
         club_a = self.create_club("Isolation Club A2", "isolation-club-a2")
         club_b = self.create_club("Isolation Club B2", "isolation-club-b2")
-        profile = PlayerProfile.objects.create(phone_number="+201066666666")
+        profile = PlayerProfile.objects.create(
+            phone_number="+201066666666", role=Profile.Role.PLAYER
+        )
         other_club_player = ClubPlayer.objects.create(
             club=club_b, player_profile=profile
         )
@@ -173,7 +178,9 @@ class ClubIsolationTests(BookingPlayerIdentityTestCase):
         club_b = self.create_club("Isolation Club B3", "isolation-club-b3")
         court_a = self.create_court(club_a, "Court A3")
         admin = self.create_platform_admin()
-        profile = PlayerProfile.objects.create(phone_number="+201044444444")
+        profile = PlayerProfile.objects.create(
+            phone_number="+201044444444", role=Profile.Role.PLAYER
+        )
         club_b_player = ClubPlayer.objects.create(club=club_b, player_profile=profile)
         booking = create_booking(
             created_by=admin,
@@ -282,7 +289,7 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
             club_player_id=v2.id,
         )
         self.assertEqual(second_booking.club_player_id, v2.id)
-        # Next booking without explicit club_player_id uses latest booking's identity (v2)
+        # Next booking without club_player_id uses latest booking identity (v2)
         third_booking = create_booking(
             created_by=admin,
             court=court,

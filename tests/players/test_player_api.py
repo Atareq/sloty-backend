@@ -31,6 +31,7 @@ from apps.bookings.models import Booking
 from apps.clubs.models import Club
 from apps.courts.models import Court
 from apps.players.models import ClubPlayer, PlayerProfile
+from apps.profiles.models import Profile
 from tests.profile_factories import grant_owner_club, grant_staff_courts
 
 
@@ -54,7 +55,10 @@ class PlayerAPITestCase(APITestCase):
 
     def create_profile(self, phone, full_name="", user=None) -> PlayerProfile:
         return PlayerProfile.objects.create(
-            phone_number=phone, full_name=full_name, user=user
+            phone_number=phone,
+            full_name=full_name,
+            user=user,
+            role=Profile.Role.PLAYER,
         )
 
     def create_club_player(self, club, profile, display_name="", player_number=None):

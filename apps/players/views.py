@@ -32,7 +32,6 @@ from apps.players.serializers import (
 from apps.players.services import (
     find_or_create_player_profile,
     get_current_club_player,
-    get_or_create_club_player,
     last_used_club_player_id_subquery,
 )
 

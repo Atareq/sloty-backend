@@ -1,3 +1,4 @@
+from django.apps import apps
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
@@ -12,9 +13,12 @@ class Profile(models.Model):
         OWNER = "OWNER", "Owner"
         STAFF = "STAFF", "Staff"
         ADMIN = "ADMIN", "Admin"
+        PLAYER = "PLAYER", "Player"
 
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
         on_delete=models.CASCADE,
         related_name="profile",
     )
@@ -24,15 +28,22 @@ class Profile(models.Model):
     modified = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"{self.user} ({self.role})"
+        identity = self.user or "unlinked"
+        return f"{identity} ({self.role})"
 
     def clean(self):
         super().clean()
-        for child, role in (
+        if self.role != self.Role.PLAYER and self.user_id is None:
+            raise ValidationError({"user": f"{self.role} profiles require a user."})
+
+        player_profile = apps.get_model("players", "PlayerProfile", require_ready=False)
+        child_roles = (
             (OwnerProfile, self.Role.OWNER),
             (StaffProfile, self.Role.STAFF),
             (AdminProfile, self.Role.ADMIN),
-        ):
+            (player_profile, self.Role.PLAYER),
+        )
+        for child, role in child_roles:
             # Type checks validate the schema; authorization reads role only.
             if isinstance(self, child) or (
                 self.pk and child.objects.filter(pk=self.pk).exists()

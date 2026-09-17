@@ -29,6 +29,8 @@ from apps.bookings.views import BookingAttemptViewSet, BookingViewSet
 from apps.clubs.models import Club
 from apps.common.middleware import SQLQueryStats
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
+from apps.players.models import PlayerProfile
+from apps.profiles.models import Profile
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking
@@ -4943,3 +4945,51 @@ class BookingMidnightWorkingHourAPITests(BookingAPITestCase):
         next_week_last_slot = slots_response.data["slots"][-1]
         self.assertEqual(next_week_last_slot["slot_status"], "RECURRING_RESERVED")
         self.assertFalse(next_week_last_slot["is_available"])
+
+
+class SeededBarcelonaBookingCreationTests(BookingAPITestCase):
+    def test_authorized_staff_creates_booking_with_customer_identity(self):
+        call_command("seed_demo_data", verbosity=0)
+        club = Club.objects.get(slug="barcelona-fc")
+        court = Court.objects.get(club=club, name="Spotify Camp Nou")
+        staff = User.objects.get(username="staff_a")
+        booking_date = timezone.localdate() + timedelta(days=9)
+        start_time = timezone.make_aware(
+            timezone.datetime.combine(booking_date, time(8, 0)),
+            timezone.get_current_timezone(),
+        )
+        end_time = start_time + timedelta(hours=1)
+        customer_name = "Barcelona Walk-in Customer"
+        customer_phone = "+201012345678"
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.post(
+            self.booking_list_url(club),
+            {
+                "court": court.id,
+                "customer_name": customer_name,
+                "customer_phone": customer_phone,
+                "start_time": start_time.isoformat(),
+                "end_time": end_time.isoformat(),
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        booking = Booking.objects.select_related(
+            "club", "court", "club_player__player_profile"
+        ).get(pk=response.data["id"])
+        self.assertEqual(booking.club, club)
+        self.assertEqual(booking.court, court)
+        self.assertEqual(booking.club_player.club, club)
+        self.assertEqual(booking.club_player.display_name, customer_name)
+        self.assertEqual(
+            str(booking.club_player.player_profile.phone_number), customer_phone
+        )
+        player_profile = PlayerProfile.objects.get(phone_number=customer_phone)
+        self.assertEqual(player_profile.pk, booking.club_player.player_profile_id)
+        self.assertEqual(player_profile.role, Profile.Role.PLAYER)
+        self.assertIsNone(player_profile.user_id)
+        self.assertFalse(player_profile.verified)
+        self.assertEqual(response.data["customer_name"], customer_name)
+        self.assertEqual(response.data["customer_phone"], customer_phone)

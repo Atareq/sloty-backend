@@ -158,6 +158,7 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         "PlayerProfileViewSet": {"list", "retrieve", "create"},
         "ClubPlayerViewSet": {"list", "retrieve", "create"},
     },
+    Role.PLAYER: {},
 }
 
 

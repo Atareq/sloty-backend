@@ -31,7 +31,10 @@ class HealthCheckAPIView(APIView):
     @extend_schema(
         tags=["System"],
         summary="Health Check",
-        description="Health check endpoint for container orchestration and deployment liveness/readiness probes.",
+        description=(
+            "Health check endpoint for container orchestration "
+            "and deployment liveness/readiness probes."
+        ),
         responses={
             200: HealthCheckResponseSerializer,
             503: HealthCheckResponseSerializer,

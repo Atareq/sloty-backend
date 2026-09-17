@@ -19,14 +19,14 @@ Identity boundary:
   Historical Booking.club_player relationships remain intact.
 """
 
-from django.conf import settings
 from django.db import models
 from phonenumber_field.modelfields import PhoneNumberField
 
 from apps.clubs.models import Club
+from apps.profiles.models import Profile
 
 
-class PlayerProfile(models.Model):
+class PlayerProfile(Profile):
     """
     Global customer identity record.
 
@@ -38,8 +38,8 @@ class PlayerProfile(models.Model):
     full_name is the player's own preferred personal name. Clubs do not
     control it and it is never auto-synchronized with ClubPlayer.display_name.
 
-    A user FK may be populated later to link the player to an account
-    (account linking phase — separate task).
+    The inherited Profile.user field may be populated later to link the player
+    to an account (account linking phase — separate task).
 
     This model does NOT declare authorization_config because it has no club
     boundary at the DB row level. Access control is enforced at the API layer
@@ -67,24 +67,13 @@ class PlayerProfile(models.Model):
             "A player is not verified until an explicit verification step runs."
         ),
     )
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="player_profiles",
-        help_text=(
-            "Optional link to an authenticated account. "
-            "NULL means the player exists without an account."
-        ),
-    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        default_related_name = "player_profile"
         indexes = [
             models.Index(fields=["phone_number"]),
-            models.Index(fields=["user"]),
         ]
 
     def __str__(self) -> str:

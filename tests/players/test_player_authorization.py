@@ -20,6 +20,7 @@ from apps.common.authorization.querysets import scoped_queryset
 from apps.common.authorization.resolver import resolve_club_scope
 from apps.common.authorization.scopes import ResourceScope
 from apps.players.models import ClubPlayer, PlayerProfile
+from apps.profiles.models import Profile
 from tests.profile_factories import grant_owner_club
 
 
@@ -34,7 +35,7 @@ def make_club(name, slug):
 
 
 def make_profile(phone):
-    return PlayerProfile.objects.create(phone_number=phone)
+    return PlayerProfile.objects.create(phone_number=phone, role=Profile.Role.PLAYER)
 
 
 def make_club_player(club, profile, display_name=""):

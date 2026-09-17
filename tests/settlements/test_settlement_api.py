@@ -21,8 +21,6 @@ from apps.clubs.models import Club
 from apps.courts.models import Court
 from apps.settlements.filters import SettlementFilter
 from apps.settlements.models import Settlement, SettlementTransaction
-from apps.settlements.services import create as service_create_settlement
-from apps.settlements.services import preview as service_preview_settlement
 from apps.settlements.views import SettlementViewSet
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking

@@ -11,6 +11,7 @@ from django.db.models import OuterRef, Subquery
 
 from apps.common.exceptions import SlotyAPIException
 from apps.players.models import ClubPlayer, PlayerProfile
+from apps.profiles.models import Profile
 
 
 def find_or_create_player_profile(
@@ -33,7 +34,7 @@ def find_or_create_player_profile(
     with transaction.atomic():
         profile, created = PlayerProfile.objects.get_or_create(
             phone_number=phone_number,
-            defaults={"full_name": full_name},
+            defaults={"full_name": full_name, "role": Profile.Role.PLAYER},
         )
     return profile, created
 
@@ -170,17 +171,33 @@ def link_player_to_user(player_profile: PlayerProfile, user) -> PlayerProfile:
 
     Returns the updated PlayerProfile.
     """
-    if player_profile.user_id is not None:
-        if player_profile.user_id == user.pk:
-            return player_profile
-        raise SlotyAPIException(
-            status_code=409,
-            code="PLAYER_ALREADY_LINKED",
-            message=(
-                "This player profile is already linked to a different user account."
-            ),
-        )
     with transaction.atomic():
-        player_profile.user = user
-        player_profile.save(update_fields=["user", "updated_at"])
-    return player_profile
+        locked_profile = PlayerProfile.objects.select_for_update().get(
+            pk=player_profile.pk
+        )
+        if locked_profile.role != Profile.Role.PLAYER:
+            raise SlotyAPIException(
+                status_code=409,
+                code="PLAYER_PROFILE_ROLE_INVALID",
+                message="This profile is not a player profile.",
+            )
+        if locked_profile.user_id is not None:
+            if locked_profile.user_id == user.pk:
+                return locked_profile
+            raise SlotyAPIException(
+                status_code=409,
+                code="PLAYER_ALREADY_LINKED",
+                message=(
+                    "This player profile is already linked to a different "
+                    "user account."
+                ),
+            )
+        if getattr(user, "profile", None) is not None:
+            raise SlotyAPIException(
+                status_code=409,
+                code="USER_ALREADY_HAS_PROFILE",
+                message="This user account is already linked to a profile.",
+            )
+        locked_profile.user = user
+        locked_profile.save(update_fields=["user", "updated_at", "modified"])
+    return locked_profile

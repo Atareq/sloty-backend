@@ -4,7 +4,7 @@
 
 `apps/players/` owns the **customer identity layer**:
 
-- [`PlayerProfile`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/models.py) — global customer identity, keyed by phone number. A player does not need a user account.
+- [`PlayerProfile`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/models.py) — global customer identity and real `Profile` child, keyed by phone number. A player does not need a user account.
 - [`ClubPlayer`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/players/models.py) — club-local representation of a player (display name, jersey number). Each club labels and numbers players independently.
 
 **Read the security architecture and architectural decisions for the full identity boundary:**
@@ -20,16 +20,17 @@
 ```text
 Authentication Identity
         │
-       User (apps/accounts)
+       User (apps/accounts, optional for players)
         │
-        ├── Operational Profile ──► Profile (apps/profiles)
-        │
-        └── Customer Identity ──► PlayerProfile ──► ClubPlayer  ← THIS APP
+        ▼
+Profile (apps/profiles)
+        ├── OwnerProfile / StaffProfile / AdminProfile  (management)
+        └── PlayerProfile ──► ClubPlayer  ← THIS APP
 ```
 
 | Model | Boundary | Authorization |
 |---|---|---|
-| `PlayerProfile` | **Global** — no club boundary | No `authorization_config`. The enabled operational Profile's club scope gates API access but the row itself is shared. |
+| `PlayerProfile` | **Global** — no club boundary | No `authorization_config`. It has `Profile.role == PLAYER`, but `PLAYER` is not granted management permissions. Owner/Staff/Admin club scope gates the management APIs that create or view rows. |
 | `ClubPlayer` | **Club-scoped** | `authorization_config` with `default_scope="club"` (Spine v2). |
 
 ---
@@ -46,7 +47,7 @@ Keep the implementation direct, minimal, and clean.
 ## Domain Invariants
 
 1. **Phone uniqueness**: `PlayerProfile.phone_number` is globally unique. It is the identity key.
-2. **Player ≠ account**: `PlayerProfile.user` is nullable. A player can exist with `user=NULL` and `verified=False`.
+2. **Player ≠ account**: `PlayerProfile` inherits nullable `Profile.user`. A player can exist with `user=NULL`, `role=PLAYER`, and `verified=False`.
 3. **Club controls its own naming**: Two clubs may have different `display_name` and `player_number` for the same `PlayerProfile`. Both are correct.
 4. **Cross-club isolation**: `ClubPlayer` rows are invisible across clubs. The Spine v2 `scoped_queryset()` enforces this structurally — clubs cannot read or write each other's `ClubPlayer` rows.
 5. **Unique current version per club+profile**: `UNIQUE(club, player_profile) WHERE is_current_version=True` — at most one **current** `ClubPlayer` row per pair. Historical versions (`is_current_version=False`) may coexist. There is no `deleted_at` / soft delete.
@@ -55,7 +56,7 @@ Keep the implementation direct, minimal, and clean.
 7. **`PlayerProfile.full_name` is the player's preferred personal name.** Clubs do not control it. It is never auto-synchronized with `ClubPlayer.display_name`.
 8. **Identity fields are immutable after create**: `club`, `player_profile`, `display_name`, `player_number`, `previous_version`. The only allowed post-create update is `is_current_version` (current → historical pointer). No `last_used_at`. No `updated_at`. No PATCH endpoint.
 8. **Historical booking integrity**: Historical `Booking.club_player` relationships remain intact. No soft delete. No `previous_version`, `is_current_version`, or `created_at` metadata fields on `ClubPlayer`.
-9. **Separate identity boundaries**: Do not create or modify operational Profile tables here. `apps/profiles` owns owner/staff/admin authority; this app is purely for customer identity.
+9. **Separate identity boundaries**: Do not merge `User`, `Profile`, `PlayerProfile`, `ClubPlayer`, or `Booking`. `PlayerProfile` is the customer identity child of `Profile`; `ClubPlayer` is still the club-local customer record.
 
 ---
 
@@ -156,7 +157,7 @@ All service functions are **pure** — no role checks. Role enforcement lives in
 
 | Function | Behavior |
 |---|---|
-| `find_or_create_player_profile(phone_number, full_name="")` | `get_or_create` by phone. Does **not** overwrite `full_name` on existing profiles. No merging. |
+| `find_or_create_player_profile(phone_number, full_name="")` | `get_or_create` by phone with `role=PLAYER` and `user=NULL` for new rows. Does **not** create a User and does **not** overwrite `full_name` on existing profiles. No merging. |
 | `get_current_club_player(club, player_profile)` | Current version or `None`. |
 | `get_or_create_club_player(club, player_profile, display_name="", player_number=None)` | Current version, or first version if none exists. Does not version on name change. |
 | `create_club_player_version(club_player, display_name="", player_number=None)` | Marks current historical, creates new current with `previous_version`. |
@@ -166,7 +167,7 @@ All service functions are **pure** — no role checks. Role enforcement lives in
 | `get_or_create_club_player(club, player_profile, display_name="", player_number=None)` | Returns current `ClubPlayer` if one exists, otherwise creates a new `ClubPlayer`. |
 | `get_last_used_club_player(club, player_profile)` | `ClubPlayer` on the latest Booking for this profile at this club, or `None`. |
 | `get_preferred_club_player(club, player_profile)` | Last-used `ClubPlayer` from bookings, else latest `ClubPlayer` row. |
-| `link_player_to_user(player_profile, user)` | Sets `player_profile.user`. Raises `PLAYER_ALREADY_LINKED` on conflict. |
+| `link_player_to_user(player_profile, user)` | Sets the inherited `Profile.user` for future account-linking flows. Raises on conflicting links or users that already have another profile. This is not used during normal player creation. |
 
 All write functions wrap their DB writes in `transaction.atomic()`.
 

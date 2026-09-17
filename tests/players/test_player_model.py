@@ -15,7 +15,8 @@ Tests cover:
 from datetime import timedelta
 from decimal import Decimal
 
-from django.db import IntegrityError, transaction
+from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.test import TestCase
 from django.utils import timezone
 
@@ -33,6 +34,7 @@ from apps.players.services import (
     get_preferred_club_player,
     link_player_to_user,
 )
+from apps.profiles.models import Profile
 
 
 def make_user(username, **kwargs):
@@ -52,7 +54,10 @@ def make_club(name, slug=None):
 
 def make_profile(phone, full_name="", user=None):
     return PlayerProfile.objects.create(
-        phone_number=phone, full_name=full_name, user=user
+        phone_number=phone,
+        full_name=full_name,
+        user=user,
+        role=Profile.Role.PLAYER,
     )
 
 
@@ -84,9 +89,9 @@ def make_booking(club, court, club_player, *, created=None):
 class PlayerProfilePhoneUniquenessTests(TestCase):
     """Phone number is the global identity key — must be unique."""
 
-    def test_duplicate_phone_raises_integrity_error(self):
+    def test_duplicate_phone_is_rejected_by_validation(self):
         make_profile("+201012345678", full_name="Ahmed")
-        with self.assertRaises(IntegrityError):
+        with self.assertRaises(ValidationError):
             with transaction.atomic():
                 make_profile("+201012345678", full_name="Different Person")
 
@@ -103,6 +108,21 @@ class PlayerProfilePhoneUniquenessTests(TestCase):
 class PlayerProfileUserLinkTests(TestCase):
     """User FK is nullable. A player can exist without an account."""
 
+    def test_player_profile_is_real_profile_child(self):
+        self.assertTrue(issubclass(PlayerProfile, Profile))
+        link = PlayerProfile._meta.parents[Profile]
+        self.assertTrue(link.remote_field.parent_link)
+        self.assertTrue(link.primary_key)
+        self.assertEqual(link.name, "profile_ptr")
+        self.assertNotIn(
+            "role", {field.name for field in PlayerProfile._meta.local_fields}
+        )
+        self.assertNotIn(
+            "user", {field.name for field in PlayerProfile._meta.local_fields}
+        )
+        self.assertIs(PlayerProfile.clean, Profile.clean)
+        self.assertIs(PlayerProfile.save, Profile.save)
+
     def test_creating_user_does_not_create_player_profile_or_club_player(self):
         user = make_user("account-without-player-profile")
 
@@ -111,13 +131,17 @@ class PlayerProfileUserLinkTests(TestCase):
 
     def test_profile_without_user_is_valid(self):
         p = make_profile("+201012345678")
+        self.assertEqual(p.role, Profile.Role.PLAYER)
         self.assertIsNone(p.user)
         self.assertIsNone(p.user_id)
+        self.assertFalse(p.verified)
+        self.assertTrue(Profile.objects.filter(pk=p.pk).exists())
 
     def test_profile_with_user_is_valid(self):
         u = make_user("player-user")
         p = make_profile("+201012345678", user=u)
         self.assertEqual(p.user_id, u.pk)
+        self.assertEqual(u.role, Profile.Role.PLAYER)
 
     def test_link_player_to_user_service(self):
         u = make_user("link-user")
@@ -306,7 +330,7 @@ class LatestBookingIdentityTests(TestCase):
         self.court = make_court(self.club)
 
     def test_fallback_to_latest_club_player_when_no_booking(self):
-        cp1 = ClubPlayer.objects.create(
+        ClubPlayer.objects.create(
             club=self.club, player_profile=self.profile, display_name="First"
         )
         cp2 = ClubPlayer.objects.create(
