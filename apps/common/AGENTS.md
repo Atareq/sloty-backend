@@ -146,11 +146,11 @@ Rules:
 - **Response**: `service` is always `sloty-backend`. `release` is the human-readable tag (`v<number>.<number>.<number>`). `commit` is the exact 40-character deployed Git SHA and the authoritative technical identity. Optional `deployed_at` is included only when the file has a valid UTC timestamp.
 - **Missing/invalid metadata**: HTTP 200 with `"release": null` and `"commit": null`. Never 500, never a Git fallback, never invented versions, and never filesystem paths or parser errors in the body.
 - **Caching**: `Cache-Control: no-store`.
-- Production writes the file atomically (`mktemp` in `/etc/sloty` then `mv`) only after `GET http://127.0.0.1:8020/health/` (`Host: api.sloty.baronlearning.com`) succeeds. Failed deploys leave the previous file unchanged.
+- Production writes the file atomically (`mktemp` in `/etc/sloty` then `mv`) only after `GET http://127.0.0.1:8020/health/` (`Host: api.sloty.baronlearning.com`) returns HTTP 200. Failed deploys leave the previous file unchanged.
 
 ### 8. Deployment Health Probe
-- Dedicated unauthenticated `GET /health/` (`authentication_classes = ()`, `AllowAny`). Lightweight and read-only; independent of JWT.
-- Production deploy verifies `http://127.0.0.1:8020/health/` with `Host: api.sloty.baronlearning.com`. Do not use `GET /` as the deploy probe.
+- Dedicated unauthenticated `GET /health/` (`authentication_classes = ()`, `AllowAny`). V1 liveness is in-process only: `{"status": "ok"}`. No PostgreSQL, no writes, no JWT.
+- Production deploy verifies `http://127.0.0.1:8020/health/` with `Host: api.sloty.baronlearning.com` and requires HTTP 200. Do not use `GET /` as the deploy probe.
 
 ## Testing
 

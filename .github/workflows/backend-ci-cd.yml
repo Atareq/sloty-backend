@@ -11,6 +11,10 @@ on:
       - dev
       - master
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 permissions:
   contents: read
 
@@ -38,6 +42,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements/dev.txt
 
+      - name: Validate deployment Bash syntax
+        run: |
+          bash -n scripts/deploy-sloty-backend
+          bash -n scripts/write-backend-release-metadata
+          bash -n scripts/lib/backend-release.sh
+
       - name: Run code quality checks
         run: |
           pre-commit run --all-files
@@ -64,8 +74,6 @@ jobs:
 
     outputs:
       release_tag: ${{ steps.calc.outputs.release_tag }}
-      create_release: ${{ steps.calc.outputs.create_release }}
-      commit_sha: ${{ steps.calc.outputs.commit_sha }}
 
     steps:
       - name: Checkout repository
@@ -77,44 +85,11 @@ jobs:
         id: calc
         run: |
           git fetch --tags
-
-          EXISTING_TAG="$(
-            git tag \
-              --points-at "$GITHUB_SHA" \
-              --list 'v[0-9]*.[0-9]*.[0-9]*' \
-            | sort -V \
-            | tail -n 1
-          )"
-
-          if [ -n "$EXISTING_TAG" ]; then
-            echo "This commit is already released as $EXISTING_TAG."
-            echo "release_tag=${EXISTING_TAG}" >> "$GITHUB_OUTPUT"
-            echo "create_release=false" >> "$GITHUB_OUTPUT"
-            echo "commit_sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          LATEST_TAG="$(
-            git tag \
-              --list 'v[0-9]*.[0-9]*.[0-9]*' \
-              --sort=-v:refname \
-            | head -n 1
-          )"
-
-          if [ -z "$LATEST_TAG" ]; then
-            NEXT_TAG="v0.1.0"
-          else
-            VERSION="${LATEST_TAG#v}"
-
-            IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-
-            NEXT_TAG="v${MAJOR}.$((MINOR + 1)).0"
-          fi
-
-          echo "Next release: $NEXT_TAG"
-          echo "release_tag=${NEXT_TAG}" >> "$GITHUB_OUTPUT"
-          echo "create_release=true" >> "$GITHUB_OUTPUT"
-          echo "commit_sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          # shellcheck source=scripts/lib/backend-release.sh
+          source scripts/lib/backend-release.sh
+          RELEASE_TAG="$(resolve_production_release_tag "$GITHUB_SHA")"
+          echo "Next release: $RELEASE_TAG"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
 
   deploy:
     name: Deploy Production
@@ -125,9 +100,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
       - name: Configure SSH
         env:
           PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
@@ -142,28 +114,13 @@ jobs:
         env:
           PROD_HOST: ${{ vars.PROD_HOST }}
           PROD_USER: ${{ vars.PROD_USER }}
-          COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
           RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
         run: |
           ssh \
             -i ~/.ssh/sloty_github_actions \
             -o IdentitiesOnly=yes \
             "$PROD_USER@$PROD_HOST" \
-            "sudo /usr/local/sbin/deploy-sloty-backend ${COMMIT_SHA} ${RELEASE_TAG}"
-
-      - name: Write backend release metadata
-        env:
-          PROD_HOST: ${{ vars.PROD_HOST }}
-          PROD_USER: ${{ vars.PROD_USER }}
-          COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
-          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
-        run: |
-          ssh \
-            -i ~/.ssh/sloty_github_actions \
-            -o IdentitiesOnly=yes \
-            "$PROD_USER@$PROD_HOST" \
-            "sudo env SLOTY_ETC_DIR=/etc/sloty bash -s -- ${COMMIT_SHA} ${RELEASE_TAG}" \
-            < scripts/write-backend-release-metadata
+            "sudo /srv/sloty/backend/scripts/deploy-sloty-backend ${{ github.sha }} ${RELEASE_TAG}"
 
   release:
     name: Create Production Release
@@ -171,10 +128,7 @@ jobs:
       - prepare-release
       - deploy
 
-    if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/master' &&
-      needs.prepare-release.outputs.create_release == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
 
     runs-on: ubuntu-latest
 
@@ -184,16 +138,27 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
-          COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "GitHub release $RELEASE_TAG already exists; leaving production unchanged."
+          git fetch --tags
+          # shellcheck source=scripts/lib/backend-release.sh
+          source scripts/lib/backend-release.sh
+
+          STATUS="$(release_tag_sha_status "$RELEASE_TAG" "$COMMIT_SHA")"
+          if [ "$STATUS" = "match" ]; then
+            echo "GitHub release $RELEASE_TAG already points at $COMMIT_SHA."
             exit 0
+          fi
+          if [ "$STATUS" = "conflict" ]; then
+            echo "Refusing to move existing release $RELEASE_TAG to $COMMIT_SHA." >&2
+            exit 1
           fi
 
           gh release create "$RELEASE_TAG" \

@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Production deploy entrypoint. Keep this file in sync with
-# /usr/local/sbin/deploy-sloty-backend on the VPS.
+# Canonical production deploy entrypoint.
 #
 # Usage:
 #   deploy-sloty-backend <COMMIT_SHA> <RELEASE_TAG>
 #
 # This script belongs exclusively to Sloty. It must never manage shared
-# infrastructure (system Python, PostgreSQL, or other projects' virtualenvs).
+# infrastructure (system Python, PostgreSQL, Nginx, or other projects).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,18 +15,69 @@ source "${SCRIPT_DIR}/lib/backend-release.sh"
 COMMIT_SHA="${1:-}"
 RELEASE_TAG="${2:-}"
 
-SLOTY_BACKEND_DIR="${SLOTY_BACKEND_DIR:-/srv/sloty/backend}"
-SLOTY_BACKEND_VENV="${SLOTY_BACKEND_VENV:-${SLOTY_BACKEND_DIR}/.venv}"
-SLOTY_BACKEND_PYTHON="${SLOTY_BACKEND_PYTHON:-${SLOTY_BACKEND_VENV}/bin/python}"
 SLOTY_PYTHON_RUNTIME="${SLOTY_PYTHON_RUNTIME:-/opt/sloty-runtime/python}"
 SLOTY_REQUIRED_PYTHON_VERSION="${SLOTY_REQUIRED_PYTHON_VERSION:-3.12.14}"
 SLOTY_BACKEND_SERVICE="${SLOTY_BACKEND_SERVICE:-sloty-backend.service}"
 SLOTY_HEALTH_URL="${SLOTY_HEALTH_URL:-http://127.0.0.1:8020/health/}"
 SLOTY_HEALTH_HOST="${SLOTY_HEALTH_HOST:-api.sloty.baronlearning.com}"
+SLOTY_HEALTH_ATTEMPTS="${SLOTY_HEALTH_ATTEMPTS:-10}"
+SLOTY_HEALTH_RETRY_SLEEP="${SLOTY_HEALTH_RETRY_SLEEP:-1}"
 SLOTY_ETC_DIR="${SLOTY_ETC_DIR:-/etc/sloty}"
 SLOTY_BACKEND_ENV_FILE="${SLOTY_BACKEND_ENV_FILE:-${SLOTY_ETC_DIR}/backend.env}"
 SLOTY_RELEASE_FILE="${SLOTY_RELEASE_FILE:-${SLOTY_ETC_DIR}/backend-release.json}"
 SLOTY_DJANGO_SETTINGS="${SLOTY_DJANGO_SETTINGS:-config.settings.production}"
+SLOTY_EXPECTED_ORIGIN="${SLOTY_EXPECTED_ORIGIN:-git@github.com:Atareq/sloty-backend.git}"
+SLOTY_MASTER_REF="${SLOTY_MASTER_REF:-origin/master}"
+
+discover_sloty_backend_dir() {
+  git -C "${1:-$SCRIPT_DIR}" rev-parse --show-toplevel
+}
+
+configure_repo_paths() {
+  SLOTY_BACKEND_DIR="${SLOTY_BACKEND_DIR:-$(discover_sloty_backend_dir)}"
+  SLOTY_BACKEND_VENV="${SLOTY_BACKEND_VENV:-${SLOTY_BACKEND_DIR}/.venv}"
+  SLOTY_BACKEND_PYTHON="${SLOTY_BACKEND_PYTHON:-${SLOTY_BACKEND_VENV}/bin/python}"
+  SLOTY_BACKEND_MANAGE_PY="${SLOTY_BACKEND_DIR}/manage.py"
+  SLOTY_BACKEND_REQUIREMENTS="${SLOTY_BACKEND_DIR}/requirements/base.txt"
+}
+
+cleanup_deploy_snapshot() {
+  if [[ -n "${SLOTY_DEPLOY_SNAPSHOT_DIR:-}" && -d "${SLOTY_DEPLOY_SNAPSHOT_DIR}" ]]; then
+    rm -rf "${SLOTY_DEPLOY_SNAPSHOT_DIR}"
+  fi
+}
+
+snapshot_and_reexec() {
+  local repo_root snapshot_dir
+
+  if [[ "${SLOTY_DEPLOY_RUNNING_FROM_SNAPSHOT:-}" == "1" ]]; then
+    trap cleanup_deploy_snapshot EXIT
+    return 0
+  fi
+
+  repo_root="$(discover_sloty_backend_dir)"
+  SLOTY_BACKEND_DIR="${SLOTY_BACKEND_DIR:-$repo_root}"
+  snapshot_dir="$(mktemp -d "${TMPDIR:-/tmp}/sloty-deploy.XXXXXX")"
+  mkdir -p "${snapshot_dir}/lib"
+  cp "${repo_root}/scripts/deploy-sloty-backend" "${snapshot_dir}/deploy-sloty-backend"
+  cp "${repo_root}/scripts/write-backend-release-metadata" \
+    "${snapshot_dir}/write-backend-release-metadata"
+  cp "${repo_root}/scripts/lib/backend-release.sh" "${snapshot_dir}/lib/backend-release.sh"
+  chmod +x "${snapshot_dir}/deploy-sloty-backend" \
+    "${snapshot_dir}/write-backend-release-metadata"
+
+  if [[ -n "${SLOTY_DEPLOY_SNAPSHOT_TRACE:-}" ]]; then
+    printf '%s\n' "$snapshot_dir" >> "$SLOTY_DEPLOY_SNAPSHOT_TRACE"
+  fi
+
+  export SLOTY_DEPLOY_RUNNING_FROM_SNAPSHOT=1
+  export SLOTY_DEPLOY_SNAPSHOT_DIR="$snapshot_dir"
+  export SLOTY_BACKEND_DIR
+  exec "${snapshot_dir}/deploy-sloty-backend" "$@"
+  echo "Failed to exec snapshot deploy script." >&2
+  rm -rf "$snapshot_dir"
+  return 1
+}
 
 run_stage() {
   local stage="$1"
@@ -53,12 +103,40 @@ sloty_python() {
   "$SLOTY_BACKEND_PYTHON" "$@"
 }
 
+deploy_worktree() {
+  if [[ -n "$(git -C "$SLOTY_BACKEND_DIR" status --porcelain)" ]]; then
+    echo "Refusing to deploy: production worktree has unexpected changes." >&2
+    git -C "$SLOTY_BACKEND_DIR" status --porcelain >&2
+    return 1
+  fi
+}
+
+deploy_origin() {
+  local actual
+  actual="$(git -C "$SLOTY_BACKEND_DIR" remote get-url origin)"
+  if [[ "$actual" != "$SLOTY_EXPECTED_ORIGIN" &&
+        "$actual" != "${SLOTY_EXPECTED_ORIGIN}.git" &&
+        "${actual}.git" != "$SLOTY_EXPECTED_ORIGIN" ]]; then
+    echo "Unexpected git origin: ${actual}" >&2
+    echo "Expected: ${SLOTY_EXPECTED_ORIGIN}" >&2
+    return 1
+  fi
+}
+
 deploy_fetch() {
   git -C "$SLOTY_BACKEND_DIR" fetch --prune origin
 }
 
 deploy_verify() {
   git -C "$SLOTY_BACKEND_DIR" cat-file -e "${COMMIT_SHA}^{commit}"
+}
+
+deploy_ancestor() {
+  if ! git -C "$SLOTY_BACKEND_DIR" merge-base --is-ancestor \
+    "$COMMIT_SHA" "$SLOTY_MASTER_REF"; then
+    echo "Refusing to deploy ${COMMIT_SHA}: not an ancestor of ${SLOTY_MASTER_REF}." >&2
+    return 1
+  fi
 }
 
 deploy_checkout() {
@@ -100,7 +178,7 @@ deploy_verify_python() {
 }
 
 deploy_install() {
-  sloty_python -m pip install -r "${SLOTY_BACKEND_DIR}/requirements/base.txt"
+  sloty_python -m pip install -r "$SLOTY_BACKEND_REQUIREMENTS"
 }
 
 deploy_load_env() {
@@ -115,18 +193,18 @@ deploy_load_env() {
 }
 
 deploy_check() {
-  sloty_python "${SLOTY_BACKEND_DIR}/manage.py" check \
+  sloty_python "$SLOTY_BACKEND_MANAGE_PY" check \
     --settings="$SLOTY_DJANGO_SETTINGS"
 }
 
 deploy_migrate() {
-  sloty_python "${SLOTY_BACKEND_DIR}/manage.py" migrate \
+  sloty_python "$SLOTY_BACKEND_MANAGE_PY" migrate \
     --noinput \
     --settings="$SLOTY_DJANGO_SETTINGS"
 }
 
 deploy_collectstatic() {
-  sloty_python "${SLOTY_BACKEND_DIR}/manage.py" collectstatic \
+  sloty_python "$SLOTY_BACKEND_MANAGE_PY" collectstatic \
     --noinput \
     --settings="$SLOTY_DJANGO_SETTINGS"
 }
@@ -140,21 +218,40 @@ deploy_verify_service() {
 }
 
 deploy_health() {
-  curl \
-    --silent \
-    --show-error \
-    --fail \
-    --max-time 10 \
-    --header "Host: ${SLOTY_HEALTH_HOST}" \
-    --output /dev/null \
-    "$SLOTY_HEALTH_URL"
+  local attempt http_code
+  http_code="000"
+  for attempt in $(seq 1 "$SLOTY_HEALTH_ATTEMPTS"); do
+    http_code="$(
+      curl \
+        --silent \
+        --show-error \
+        --max-time 10 \
+        --header "Host: ${SLOTY_HEALTH_HOST}" \
+        --output /dev/null \
+        --write-out "%{http_code}" \
+        "$SLOTY_HEALTH_URL" || true
+    )"
+    http_code="${http_code:-000}"
+    if [[ "$http_code" == "200" ]]; then
+      return 0
+    fi
+    if [[ "$attempt" -lt "$SLOTY_HEALTH_ATTEMPTS" ]]; then
+      sleep "$SLOTY_HEALTH_RETRY_SLEEP"
+    fi
+  done
+  echo "Health check failed: expected HTTP 200 from ${SLOTY_HEALTH_URL}, got ${http_code}." >&2
+  return 1
 }
 
 main() {
+  configure_repo_paths
   validate_backend_release_args "$COMMIT_SHA" "$RELEASE_TAG"
 
+  run_stage worktree deploy_worktree
+  run_stage origin deploy_origin
   run_stage fetch deploy_fetch
   run_stage verify deploy_verify
+  run_stage ancestor deploy_ancestor
   run_stage checkout deploy_checkout
   run_stage python deploy_verify_python
   run_stage install deploy_install
@@ -168,6 +265,12 @@ main() {
   write_backend_release_metadata "$COMMIT_SHA" "$RELEASE_TAG"
 }
 
-if [[ "${SLOTY_DEPLOY_SOURCE_ONLY:-}" != "1" ]]; then
+if [[ "${SLOTY_DEPLOY_SOURCE_ONLY:-}" == "1" ]]; then
+  configure_repo_paths
+elif [[ "${SLOTY_DEPLOY_RUNNING_FROM_SNAPSHOT:-}" == "1" ]]; then
+  trap cleanup_deploy_snapshot EXIT
   main
+else
+  validate_backend_release_args "$COMMIT_SHA" "$RELEASE_TAG"
+  snapshot_and_reexec "$@"
 fi

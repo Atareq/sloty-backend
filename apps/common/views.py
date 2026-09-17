@@ -1,4 +1,3 @@
-from django.db import connection
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -35,30 +34,13 @@ class HealthCheckAPIView(APIView):
         tags=["System"],
         summary="Health Check",
         description=(
-            "Unauthenticated liveness/readiness probe for systemd and "
-            "production deployment verification. Not used for application auth."
+            "Unauthenticated liveness probe for systemd and production "
+            "deployment verification. Independent of JWT and PostgreSQL."
         ),
-        responses={
-            200: HealthCheckResponseSerializer,
-            503: HealthCheckResponseSerializer,
-        },
+        responses={200: HealthCheckResponseSerializer},
     )
     def get(self, request):
-        db_status = "connected"
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT 1")
-        except Exception:
-            db_status = "unavailable"
-            return Response(
-                {"status": "error", "database": db_status},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        return Response(
-            {"status": "ok", "database": db_status},
-            status=status.HTTP_200_OK,
-        )
+        return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
 
 class VersionAPIView(APIView):

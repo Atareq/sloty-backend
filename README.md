@@ -110,14 +110,23 @@ this host:
   using an atomic rename. A failed deploy leaves the previous file in place.
 - Responses use `Cache-Control: no-store`.
 
-Keep `/usr/local/sbin/deploy-sloty-backend` on the VPS aligned with
-`scripts/deploy-sloty-backend`. Production uses `/srv/sloty/backend/.venv`
-(`Python 3.12.14` from `/opt/sloty-runtime/python/`), loads
-`/etc/sloty/backend.env`, restarts only `sloty-backend.service`, and must not
-manage PostgreSQL or system Python. CI calculates the release tag once, deploys
-that exact SHA and tag, then creates the GitHub Release with the same values.
+Keep `scripts/deploy-sloty-backend` as the canonical production executable.
+CI SSHs to the VPS and runs that file from the git worktree:
 
-Unauthenticated `GET /health/` is the dedicated deploy/systemd probe.
+```bash
+sudo /srv/sloty/backend/scripts/deploy-sloty-backend <SHA> <TAG>
+```
+
+There is no `/usr/local/sbin` copy. The script discovers the repository root
+from git, snapshots its own `scripts/` bundle to `/tmp` before checkout, uses
+`<repo>/.venv` (`Python 3.12.14` from `/opt/sloty-runtime/python/`), loads
+`/etc/sloty/backend.env`, restarts only `sloty-backend.service`, and must not
+manage PostgreSQL, Nginx, or system Python. CI calculates the release tag once,
+deploys that exact SHA and tag, then creates or reuses the GitHub Release with
+the same values.
+
+Unauthenticated `GET /health/` is the dedicated deploy/systemd probe and returns
+`{"status": "ok"}` without touching PostgreSQL.
 
 ## Authentication Endpoints
 

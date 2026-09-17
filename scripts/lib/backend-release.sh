@@ -1,5 +1,4 @@
-# Shared release-metadata helpers for Sloty backend deployment.
-# Sourced by scripts/deploy-sloty-backend and scripts/write-backend-release-metadata.
+# Shared release-metadata and version helpers for Sloty backend deployment.
 
 RELEASE_TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+$'
 COMMIT_SHA_PATTERN='^[0-9a-fA-F]{40}$'
@@ -19,20 +18,74 @@ validate_backend_release_args() {
   fi
 }
 
+resolve_production_release_tag() {
+  local sha="${1:?}"
+  local existing_tag latest_tag version major minor patch
+
+  existing_tag="$(
+    git tag --points-at "$sha" --list 'v[0-9]*.[0-9]*.[0-9]*' \
+      | sort -V \
+      | tail -n 1
+  )"
+  if [[ -n "$existing_tag" ]]; then
+    printf '%s\n' "$existing_tag"
+    return 0
+  fi
+
+  latest_tag="$(
+    git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+      | head -n 1
+  )"
+  if [[ -z "$latest_tag" ]]; then
+    printf '%s\n' "v0.1.0"
+    return 0
+  fi
+
+  version="${latest_tag#v}"
+  IFS='.' read -r major minor patch <<< "$version"
+  printf 'v%s.%s.0\n' "$major" "$((minor + 1))"
+}
+
+release_tag_sha_status() {
+  local release_tag="${1:?}"
+  local commit_sha="${2:?}"
+  local tag_sha
+
+  if ! git rev-parse -q --verify "refs/tags/${release_tag}^{commit}" >/dev/null; then
+    printf '%s\n' "missing"
+    return 0
+  fi
+
+  tag_sha="$(git rev-list -n 1 "refs/tags/${release_tag}")"
+  if [[ "$tag_sha" == "$commit_sha" ]]; then
+    printf '%s\n' "match"
+    return 0
+  fi
+
+  printf '%s\n' "conflict"
+}
+
 write_backend_release_metadata() {
   local commit_sha="${1:?}"
   local release_tag="${2:?}"
   local metadata_dir="${SLOTY_ETC_DIR:-/etc/sloty}"
   local metadata_path="${SLOTY_RELEASE_FILE:-${metadata_dir}/backend-release.json}"
+  local python_bin="${SLOTY_BACKEND_PYTHON:-}"
   local tmp_file=""
   local deployed_at
+
+  if [[ -z "$python_bin" || ! -x "$python_bin" ]]; then
+    echo "Sloty virtualenv interpreter is required to write release metadata." >&2
+    echo "Refusing to use system python/python3." >&2
+    return 1
+  fi
 
   mkdir -p "$(dirname "$metadata_path")"
   tmp_file="$(mktemp "${metadata_path}.tmp.XXXXXX")"
 
   deployed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-  python3 - "$tmp_file" "$release_tag" "$commit_sha" "$deployed_at" <<'PY'
+  "$python_bin" - "$tmp_file" "$release_tag" "$commit_sha" "$deployed_at" <<'PY'
 import json
 import sys
 

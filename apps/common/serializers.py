@@ -41,7 +41,6 @@ class EgyptLocationPayloadSerializer(serializers.Serializer):
 
 class HealthCheckResponseSerializer(serializers.Serializer):
     status = serializers.CharField(default="ok")
-    database = serializers.CharField(default="connected")
 
 
 class BackendVersionSerializer(serializers.Serializer):
