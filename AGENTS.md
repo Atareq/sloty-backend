@@ -229,3 +229,10 @@ Key Django management commands for maintenance and development:
   python manage.py seed_demo_data --scenario albaladya-test
   ```
   Idempotently populates multi-club test fixtures, demo users (`admin`, `owner`, `staff`), profile extensions, courts, working hours, bookings, transactions, and settlements for local development and manual testing.
+
+- **Runtime version**:
+  ```text
+  GET /api/system/version/
+  ```
+  Authenticated. Reads `/etc/sloty/backend-release.json` (no database). `commit` is the deployed Git SHA; `release` is the human-readable tag. Missing metadata returns null fields. See [`apps/common/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/AGENTS.md).
+- **Production deploy isolation**: Canonical executable is [`scripts/deploy-sloty-backend`](file:///home/tarek/Desktop/sloty/sloty-backend/scripts/deploy-sloty-backend). Production CI runs `sudo /srv/sloty/backend/scripts/deploy-sloty-backend <SHA> <TAG>`. The script discovers the git root from its location, snapshots `scripts/` to `/tmp` before checkout, uses `<repo>/.venv/bin/python` (must be Python 3.12.14 from `/opt/sloty-runtime/python/`), loads `/etc/sloty/backend.env`, runs Django check/migrate/collectstatic, restarts only `sloty-backend.service`, and requires HTTP 200 from `http://127.0.0.1:8020/health/` with `Host: api.sloty.baronlearning.com`. It must not manage system Python, other project virtualenvs, Nginx, or the shared PostgreSQL service.

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Write /etc/sloty/backend-release.json after a successful production deploy.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/backend-release.sh
+source "${SCRIPT_DIR}/lib/backend-release.sh"
+
+COMMIT_SHA="${1:-}"
+RELEASE_TAG="${2:-}"
+
+if [[ -z "${SLOTY_BACKEND_PYTHON:-}" ]]; then
+  SLOTY_BACKEND_DIR="${SLOTY_BACKEND_DIR:-$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)}"
+  SLOTY_BACKEND_PYTHON="${SLOTY_BACKEND_DIR}/.venv/bin/python"
+fi
+
+validate_backend_release_args "$COMMIT_SHA" "$RELEASE_TAG"
+write_backend_release_metadata "$COMMIT_SHA" "$RELEASE_TAG"

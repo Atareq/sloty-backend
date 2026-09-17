@@ -140,6 +140,18 @@ Rules:
 - Profile migration is complete: Courts, Bookings, Transactions, Settlements, Dashboard, Audit, Reports, Players, and Clubs consume Profile-backed `RequestAccessContext`. Dashboard and Reports are read models using `ClubScopedViewMixin` plus source-domain `scoped_queryset` aggregations. Audit is club-only and matrix-denied to Staff; court/collector scope is not applied to audit rows. Global `ClubViewSet` remains URL-unscoped but Profile-filtered.
 - **Not a presence/activity tracker**: The Spine has no request-level side effects beyond authorization/scoping. There is no heartbeat endpoint.
 
+### 7. Runtime Release Metadata ([`apps/common/release_metadata.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/release_metadata.py))
+- **Endpoint**: authenticated `GET /api/system/version/` (`IsAuthenticated`, same default as business APIs).
+- **Source of truth**: `/etc/sloty/backend-release.json` written on the host after a successful production deploy and health check. Not GitHub, not `master`, not `.git`, and not the database.
+- **Response**: `service` is always `sloty-backend`. `release` is the human-readable tag (`v<number>.<number>.<number>`). `commit` is the exact 40-character deployed Git SHA and the authoritative technical identity. Optional `deployed_at` is included only when the file has a valid UTC timestamp.
+- **Missing/invalid metadata**: HTTP 200 with `"release": null` and `"commit": null`. Never 500, never a Git fallback, never invented versions, and never filesystem paths or parser errors in the body.
+- **Caching**: `Cache-Control: no-store`.
+- Production writes the file atomically (`mktemp` in `/etc/sloty` then `mv`) only after `GET http://127.0.0.1:8020/health/` (`Host: api.sloty.baronlearning.com`) returns HTTP 200. Failed deploys leave the previous file unchanged.
+
+### 8. Deployment Health Probe
+- Dedicated unauthenticated `GET /health/` (`authentication_classes = ()`, `AllowAny`). V1 liveness is in-process only: `{"status": "ok"}`. No PostgreSQL, no writes, no JWT.
+- Production deploy verifies `http://127.0.0.1:8020/health/` with `Host: api.sloty.baronlearning.com` and requires HTTP 200. Do not use `GET /` as the deploy probe.
+
 ## Testing
 
 - Run with the project-standard command: `pytest -n 4 --reuse-db tests/common/ tests/authorization/`. Retry a failed node sequentially only if the parallel run reports a failure (see root `AGENTS.md` §8).
@@ -152,4 +164,6 @@ Rules:
   - `test_base_permission_and_matrix.py`: Matrix verification, default deny, custom actions, object permission hook.
   - `test_scoped_resources.py`: Model configuration, club/court/future scoping, fail-closed behavior, relation loading, and DRF ViewSet composition.
   - `test_egypt_locations.py` / `test_locations_api.py`: Choice validation and API endpoint.
+  - `test_version_api.py`: Runtime release metadata endpoint.
   - `test_sql_query_stats_middleware.py`: Middleware counting and threshold logging.
+- Deployment/release metadata tests: [`tests/deploy/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/deploy/).

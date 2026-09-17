@@ -86,6 +86,48 @@ For development convenience, `/api/v1/docs/` and `/api/v1/schema/` are public.
 Business endpoints still require authentication. Use Swagger UI to inspect APIs
 and test authenticated requests by providing a bearer token.
 
+## Runtime Version
+
+Authenticated `GET /api/system/version/` returns the backend release running on
+this host:
+
+```json
+{
+  "service": "sloty-backend",
+  "release": "v0.7.0",
+  "commit": "91bd3aa28e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b"
+}
+```
+
+- `release` is the human-readable deployment tag (`v<major>.<minor>.<patch>`).
+- `commit` is the exact deployed Git SHA and the authoritative technical identity.
+- The endpoint reads `/etc/sloty/backend-release.json`. It does not query GitHub,
+  `master`, `.git`, or the database.
+- Local development and tests usually have no metadata file; the response stays
+  HTTP 200 with `"release": null` and `"commit": null`.
+- Production writes that file only after a successful deploy and
+  `GET http://127.0.0.1:8020/health/` (`Host: api.sloty.baronlearning.com`),
+  using an atomic rename. A failed deploy leaves the previous file in place.
+- Responses use `Cache-Control: no-store`.
+
+Keep `scripts/deploy-sloty-backend` as the canonical production executable.
+CI SSHs to the VPS and runs that file from the git worktree:
+
+```bash
+sudo /srv/sloty/backend/scripts/deploy-sloty-backend <SHA> <TAG>
+```
+
+There is no `/usr/local/sbin` copy. The script discovers the repository root
+from git, snapshots its own `scripts/` bundle to `/tmp` before checkout, uses
+`<repo>/.venv` (`Python 3.12.14` from `/opt/sloty-runtime/python/`), loads
+`/etc/sloty/backend.env`, restarts only `sloty-backend.service`, and must not
+manage PostgreSQL, Nginx, or system Python. CI calculates the release tag once,
+deploys that exact SHA and tag, then creates or reuses the GitHub Release with
+the same values.
+
+Unauthenticated `GET /health/` is the dedicated deploy/systemd probe and returns
+`{"status": "ok"}` without touching PostgreSQL.
+
 ## Authentication Endpoints
 
 - `POST /api/v1/auth/token/` obtains JWT access and refresh tokens.
