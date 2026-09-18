@@ -65,6 +65,9 @@ class BookingAPITestCase(ProfileIdentityMixin, APITestCase):
             "cancellation_refund_notice_days": 0,
         }
         data.update(extra_fields)
+        # Working hours are created immediately below; keep the deposit
+        # invariant (deposit >= lowest working-hour price) satisfied by default.
+        data.setdefault("minimum_deposit", data["default_price"])
         court = Court.objects.create(**data)
         self.create_working_hours(
             court,
@@ -74,6 +77,21 @@ class BookingAPITestCase(ProfileIdentityMixin, APITestCase):
             price=court.default_price,
         )
         return court
+
+    def set_court_minimum_deposit(self, court: Court, amount) -> None:
+        """
+        Set ``minimum_deposit`` while keeping the deposit-vs-pricing invariant.
+
+        If existing working-hour prices are higher than ``amount``, they are
+        lowered to ``amount`` so ``minimum_deposit >= lowest price`` holds.
+        """
+        amount = Decimal(amount)
+        periods = CourtWorkingHourPricePeriod.objects.filter(working_hour__court=court)
+        current_min = periods.order_by("price").values_list("price", flat=True).first()
+        if current_min is not None and amount < current_min:
+            periods.update(price=amount)
+        court.minimum_deposit = amount
+        court.save(update_fields=["minimum_deposit"])
 
     def create_booking(self, court: Court, **extra_fields) -> Booking:
         extra_fields.setdefault("start_time", self.time_at(20))
@@ -1561,7 +1579,64 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertEqual(self.slot_by_hour(response, 9)["label"], "بانتظار العربون")
         self.assertEqual(self.slot_by_hour(response, 10)["label"], "متاح")
 
-    def test_date_range_too_large_returns_slot_period_error(self):
+    def test_short_date_range_still_works(self):
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {
+                "court": self.court.id,
+                "date_from": "2026-05-20",
+                "date_to": "2026-05-22",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["date_from"], "2026-05-20")
+        self.assertEqual(response.data["date_to"], "2026-05-22")
+
+    def test_thirty_one_day_inclusive_range_is_accepted(self):
+        # Former hard cap was 31 inclusive days; it must remain valid under 45.
+        # 2026-09-17 → 2026-10-17 = 31 inclusive calendar days.
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {
+                "court": self.court.id,
+                "date_from": "2026-09-17",
+                "date_to": "2026-10-17",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["date_from"], "2026-09-17")
+        self.assertEqual(response.data["date_to"], "2026-10-17")
+
+    def test_thirty_two_day_inclusive_range_is_accepted(self):
+        # 2026-09-17 → 2026-10-18 = 32 inclusive calendar days.
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {
+                "court": self.court.id,
+                "date_from": "2026-09-17",
+                "date_to": "2026-10-18",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["date_from"], "2026-09-17")
+        self.assertEqual(response.data["date_to"], "2026-10-18")
+
+    def test_exact_forty_five_day_inclusive_range_is_accepted(self):
+        # 2026-09-17 → 2026-10-31 = 45 inclusive calendar days.
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {
+                "court": self.court.id,
+                "date_from": "2026-09-17",
+                "date_to": "2026-10-31",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["date_from"], "2026-09-17")
+        self.assertEqual(response.data["date_to"], "2026-10-31")
+
+    def test_forty_six_day_inclusive_range_returns_slot_period_error(self):
+        # 2026-05-01 → 2026-06-15 = 46 inclusive calendar days.
         response = self.client.get(
             self.booking_slots_url(self.club),
             {
@@ -1572,6 +1647,32 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assert_api_error(response, "SLOT_PERIOD_TOO_LARGE")
+
+    def test_date_from_after_date_to_returns_validation_error(self):
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {
+                "court": self.court.id,
+                "date_from": "2026-05-22",
+                "date_to": "2026-05-20",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_api_error(response, "VALIDATION_ERROR")
+        self.assertIn("date_to", response.data["field_errors"])
+
+    def test_malformed_slot_date_returns_validation_error(self):
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {
+                "court": self.court.id,
+                "date_from": "not-a-date",
+                "date_to": "2026-05-20",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_api_error(response, "VALIDATION_ERROR")
+        self.assertIn("date_from", response.data["field_errors"])
 
     def test_longer_opening_hours_do_not_add_per_slot_queries(self):
         query_counts = []
@@ -2146,12 +2247,14 @@ class BookingLifecycleActionTests(BookingAPITestCase):
     def ensure_priced_interval(self, court, start_time, end_time):
         local_start = timezone.localtime(start_time)
         local_end = timezone.localtime(end_time)
+        # Price must remain <= minimum_deposit so the court invariant holds.
+        price = min(court.default_price, court.minimum_deposit)
         self.create_working_hours(
             court,
             weekday=local_start.weekday(),
             opens_at=local_start.time(),
             closes_at=local_end.time(),
-            price=court.default_price,
+            price=price,
         )
 
     def test_anonymous_cannot_call_lifecycle_actions(self):
@@ -2216,11 +2319,9 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         self.assertEqual(booking.cancellation_reason, "Customer cancelled")
 
     def test_cancellation_preview_and_cancel_create_signed_refund(self):
-        self.court.minimum_deposit = Decimal("50.00")
+        self.set_court_minimum_deposit(self.court, Decimal("50.00"))
         self.court.cancellation_refund_notice_days = 3
-        self.court.save(
-            update_fields=["minimum_deposit", "cancellation_refund_notice_days"]
-        )
+        self.court.save(update_fields=["cancellation_refund_notice_days"])
         booking = self.create_booking(
             self.court,
             status=Booking.Status.CONFIRMED,
@@ -2471,8 +2572,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         self.assertFalse(hasattr(booking, "next_recurring_booking"))
 
     def test_active_recurring_completion_renews_next_week_with_normal_payment(self):
-        self.court.minimum_deposit = Decimal("50.00")
-        self.court.save(update_fields=["minimum_deposit"])
+        self.set_court_minimum_deposit(self.court, Decimal("50.00"))
         booking = self.create_booking(
             self.court,
             status=Booking.Status.CONFIRMED,
@@ -2514,11 +2614,9 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         self.assertEqual(next_payment.amount, Decimal("50.00"))
 
     def test_recurrence_next_preview_is_authoritative_and_does_not_mutate(self):
-        self.court.minimum_deposit = Decimal("150.00")
+        self.set_court_minimum_deposit(self.court, Decimal("150.00"))
         self.court.requires_digital_payment_reference = True
-        self.court.save(
-            update_fields=["minimum_deposit", "requires_digital_payment_reference"]
-        )
+        self.court.save(update_fields=["requires_digital_payment_reference"])
         booking = self.create_booking(
             self.court,
             status=Booking.Status.CONFIRMED,
@@ -2545,7 +2643,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             parse_datetime(response.data["next_end_time"]),
             booking.end_time + timedelta(days=7),
         )
-        self.assertEqual(response.data["next_total_price"], "300.00")
+        self.assertEqual(response.data["next_total_price"], "150.00")
         self.assertEqual(response.data["next_required_deposit"], "150.00")
         self.assertTrue(response.data["requires_digital_payment_reference"])
         self.assertTrue(response.data["requires_payment_reference"])
@@ -2557,8 +2655,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
     def test_historical_recurring_completion_skips_missed_weeks_to_future_occurrence(
         self,
     ):
-        self.court.minimum_deposit = Decimal("0.00")
-        self.court.save(update_fields=["minimum_deposit"])
+        self.set_court_minimum_deposit(self.court, Decimal("0.00"))
         sync_now = timezone.datetime(
             2026, 9, 8, 12, 0, tzinfo=timezone.get_current_timezone()
         )
@@ -2604,8 +2701,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         )
 
     def test_historical_recurring_completion_can_create_current_occurrence(self):
-        self.court.minimum_deposit = Decimal("0.00")
-        self.court.save(update_fields=["minimum_deposit"])
+        self.set_court_minimum_deposit(self.court, Decimal("0.00"))
         sync_now = timezone.datetime(
             2026, 9, 8, 18, 30, tzinfo=timezone.get_current_timezone()
         )
@@ -4304,11 +4400,9 @@ class BookingRescheduleRefundEntitlementTests(BookingAPITestCase):
         )
 
     def configure_refund_policy(self):
-        self.court.minimum_deposit = Decimal("100.00")
+        self.set_court_minimum_deposit(self.court, Decimal("100.00"))
         self.court.cancellation_refund_notice_days = 1
-        self.court.save(
-            update_fields=["minimum_deposit", "cancellation_refund_notice_days"]
-        )
+        self.court.save(update_fields=["cancellation_refund_notice_days"])
 
     def later_wednesday(self, hour):
         return timezone.datetime(
@@ -4584,6 +4678,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         )
 
     def test_confirmed_by_transaction_updates_actor(self):
+        self.set_court_minimum_deposit(self.court, Decimal("100.00"))
         booking = self.create_booking(
             self.court,
             status=Booking.Status.HOLD,

@@ -56,6 +56,8 @@ class DashboardAPITestCase(ProfileIdentityMixin, APITestCase):
             "slot_duration_minutes": 60,
         }
         data.update(extra_fields)
+        # Working hours are usually seeded next; keep deposit >= lowest price.
+        data.setdefault("minimum_deposit", data["default_price"])
         return Court.objects.create(**data)
 
     def time_at(self, hour: int, minute: int = 0):

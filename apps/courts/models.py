@@ -111,6 +111,20 @@ class Court(models.Model):
                 raise ValidationError(
                     {"club": "Assigned staff must belong to the court's club."}
                 )
+        if self.pk and self.minimum_deposit is not None:
+            # Lazy import avoids a models ↔ services import cycle at module load.
+            from apps.courts.services import lowest_working_hour_price_for_court
+
+            lowest_price = lowest_working_hour_price_for_court(self)
+            if lowest_price is not None and self.minimum_deposit < lowest_price:
+                raise ValidationError(
+                    {
+                        "minimum_deposit": (
+                            "Minimum deposit cannot be lower than the court's "
+                            "lowest working-hour price."
+                        )
+                    }
+                )
 
     def save(self, *args, **kwargs):
         if not self.pk:
@@ -210,6 +224,22 @@ class CourtWorkingHourPricePeriod(models.Model):
             errors["starts_at"] = "starts_at must be before ends_at."
         if self.price is not None and self.price < Decimal("0.00"):
             errors["price"] = "Price must be greater than or equal to zero."
+        if self.price is not None and self.working_hour_id is not None and not errors:
+            court = self.working_hour.court
+            sibling_prices = list(
+                CourtWorkingHourPricePeriod.objects.filter(
+                    working_hour__court_id=court.pk
+                )
+                .exclude(pk=self.pk)
+                .values_list("price", flat=True)
+            )
+            sibling_prices.append(self.price)
+            lowest_price = min(sibling_prices)
+            if court.minimum_deposit < lowest_price:
+                errors["price"] = (
+                    "Minimum deposit cannot be lower than the court's "
+                    "lowest working-hour price."
+                )
         if errors:
             raise ValidationError(errors)
 

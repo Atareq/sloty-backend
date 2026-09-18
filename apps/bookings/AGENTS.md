@@ -200,7 +200,7 @@ Request → Authentication → resolve_club_scope → Spine scoped QuerySet (clu
   - `POST .../bookings/{id}/end-recurrence/`
   - `POST .../bookings/{id}/cancellation-preview/`
   - `GET .../bookings/{id}/recurrence-next/`
-- `/api/v1/clubs/{club_slug}/bookings/slots/`: Schedule slot availability generator.
+- `/api/v1/clubs/{club_slug}/bookings/slots/`: Schedule slot availability generator. Accepts `court` plus either `date` or inclusive `date_from`/`date_to`. The inclusive calendar-day span must be `<= MAX_SLOT_PERIOD_DAYS` (45) or the API returns `SLOT_PERIOD_TOO_LARGE` (400).
 - `/api/v1/clubs/{club_slug}/booking-attempts/`: Traceability list/detail and dismissal for rejected attempts.
 
 ## Cross-App Dependencies
