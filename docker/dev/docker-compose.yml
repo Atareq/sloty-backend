@@ -1,0 +1,54 @@
+# Canonical invocation, from the repository root:
+#   docker compose --env-file .env -f docker/dev/docker-compose.yml up --build
+#
+# --env-file is what feeds ${VAR} interpolation below; the per-service env_file
+# is what populates the container environment. Both read the same root .env, so
+# there is exactly one source of configuration.
+name: sloty-backend-dev
+
+services:
+  db:
+    image: postgres:16-alpine
+    env_file: ../../.env
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "${DB_PORT_PUBLISHED:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT_PUBLISHED:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: ../..
+      dockerfile: docker/dev/Dockerfile
+    env_file: ../../.env
+    volumes:
+      # Bind mount so edits are live without a rebuild.
+      - ../..:/app
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  db_data:

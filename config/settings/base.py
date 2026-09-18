@@ -146,6 +146,29 @@ else:
         }
     }
 
+# Cache backend. Redis is used when REDIS_URL is set (both Docker stacks set it);
+# otherwise Django falls back to a per-process local-memory cache so plain SQLite
+# development runs and the test suite keep working with no extra service.
+#
+# Anything that needs a *shared* counter across gunicorn workers — rate limiting
+# above all — is only correct on Redis. LocMemCache is per process.
+REDIS_URL = os.environ.get("REDIS_URL", "").strip()
+
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "sloty-locmem",
+        }
+    }
+
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
