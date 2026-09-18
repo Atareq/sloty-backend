@@ -120,6 +120,31 @@ SIMPLE_JWT = {
     "CHECK_REVOKE_TOKEN": True,
 }
 
+# ---------------------------------------------------------------------------
+# CAPTCHA
+# ---------------------------------------------------------------------------
+# Off by default. When disabled there is no serializer field, no token read, and
+# no network call — see apps/common/captcha.py.
+#
+# CAPTCHA_ENABLED is the operational kill switch: verification fails closed when
+# the provider is unreachable, so this flag is how an outage is worked around
+# without a deploy.
+CAPTCHA_ENABLED = env_bool("CAPTCHA_ENABLED", default=False)
+CAPTCHA_PROVIDER = os.environ.get("CAPTCHA_PROVIDER", "turnstile").strip().lower()
+CAPTCHA_SECRET_KEY = os.environ.get("CAPTCHA_SECRET_KEY", "")
+CAPTCHA_VERIFY_URL = os.environ.get(
+    "CAPTCHA_VERIFY_URL",
+    "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+)
+CAPTCHA_TIMEOUT_SECONDS = env_float("CAPTCHA_TIMEOUT_SECONDS", 5.0)
+# Only meaningful for score-based providers such as reCAPTCHA v3. Leave unset
+# for pass/fail providers like Turnstile and hCaptcha.
+CAPTCHA_MIN_SCORE = (
+    env_float("CAPTCHA_MIN_SCORE", 0.0)
+    if os.environ.get("CAPTCHA_MIN_SCORE")
+    else None
+)
+
 DB_ENGINE = os.environ.get("DB_ENGINE", "sqlite").strip().lower()
 
 if DB_ENGINE in {"postgres", "postgresql"}:
