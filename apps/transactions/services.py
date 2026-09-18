@@ -594,7 +594,7 @@ def dismiss_transaction_attempt(*, access, attempt, actor):
             )
 
         locked_attempt.resolution = TransactionAttempt.Resolution.DISMISSED
-        locked_attempt.save(update_fields=["resolution", "modified"])
+        locked_attempt.save(update_fields=["resolution", "modified_at"])
         return locked_attempt
 
 
@@ -780,7 +780,7 @@ def create_booking_transaction(
 
                 if locked_booking.status == Booking.Status.HOLD:
                     locked_booking.status = Booking.Status.CONFIRMED
-                    locked_booking.save(update_fields=["status", "modified"])
+                    locked_booking.save(update_fields=["status", "modified_at"])
                     locked_booking.last_status_changed_by = created_by
                     locked_booking.last_status_changed_by_type = (
                         Booking.LastStatusActorType.INTERNAL_USER
@@ -792,7 +792,7 @@ def create_booking_transaction(
                             "status",
                             "last_status_changed_by",
                             "last_status_changed_by_type",
-                            "modified",
+                            "modified_at",
                         ]
                     )
 
@@ -855,7 +855,7 @@ def recalculate_booking_status_after_transaction_cancel(booking, *, actor=None):
                 "status",
                 "last_status_changed_by",
                 "last_status_changed_by_type",
-                "modified",
+                "modified_at",
             ]
         )
     return old_status, booking.status
@@ -932,7 +932,7 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
                 "cancelled_by",
                 "cancelled_at",
                 "cancellation_reason",
-                "modified",
+                "modified_at",
             ]
         )
         _, new_booking_status = recalculate_booking_status_after_transaction_cancel(

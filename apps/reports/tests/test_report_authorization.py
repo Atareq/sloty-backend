@@ -142,9 +142,9 @@ class CourtUsageReportAuthorizationTests(CourtUsageReportAPITestCase):
 
     def test_report_does_not_update_profile_state(self):
         profile = self.owner.profile
-        modified = profile.modified
+        modified = profile.modified_at
         self.client.force_authenticate(user=self.owner)
         response = self.client.get(self.url(), self.params())
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         profile.refresh_from_db()
-        self.assertEqual(profile.modified, modified)
+        self.assertEqual(profile.modified_at, modified)

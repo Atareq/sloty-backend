@@ -21,6 +21,8 @@ class PlayerProfileSerializer(serializers.ModelSerializer):
     privacy boundary between authentication identity and player identity.
     full_name is the player's own preferred personal name — not a club label.
     """
+    updated_at = serializers.DateTimeField(source="modified_at", read_only=True)
+
 
     has_account = serializers.SerializerMethodField(
         help_text="True if this player profile is linked to a user account."

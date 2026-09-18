@@ -70,7 +70,7 @@ def make_court(club, name="Court 1"):
     )
 
 
-def make_booking(club, court, club_player, *, created=None):
+def make_booking(club, court, club_player, *, created_at=None):
     start = timezone.now()
     booking = Booking.objects.create(
         club=club,
@@ -80,8 +80,8 @@ def make_booking(club, court, club_player, *, created=None):
         end_time=start + timedelta(hours=1),
         total_price=Decimal("300.00"),
     )
-    if created is not None:
-        Booking.objects.filter(pk=booking.pk).update(created=created)
+    if created_at is not None:
+        Booking.objects.filter(pk=booking.pk).update(created_at=created_at)
         booking.refresh_from_db()
     return booking
 
@@ -314,8 +314,8 @@ class GetPreferredClubPlayerTests(TestCase):
         )
         older = timezone.now() - timedelta(days=2)
         newer = timezone.now() - timedelta(days=1)
-        make_booking(self.club, self.court, v2, created=older)
-        make_booking(self.club, self.court, v1, created=newer)
+        make_booking(self.club, self.court, v2, created_at=older)
+        make_booking(self.club, self.court, v1, created_at=newer)
         preferred = get_preferred_club_player(self.club, self.profile)
         self.assertEqual(preferred.pk, v1.pk)
         self.assertEqual(get_last_used_club_player(self.club, self.profile).pk, v1.pk)
@@ -347,7 +347,7 @@ class LatestBookingIdentityTests(TestCase):
         )
         older = timezone.now() - timedelta(days=2)
         newer = timezone.now() - timedelta(days=1)
-        make_booking(self.club, self.court, cp2, created=older)
-        make_booking(self.club, self.court, cp1, created=newer)
+        make_booking(self.club, self.court, cp2, created_at=older)
+        make_booking(self.club, self.court, cp1, created_at=newer)
         # Even though cp2 has a higher id, cp1 is on the latest booking!
         self.assertEqual(get_current_club_player(self.club, self.profile).pk, cp1.pk)

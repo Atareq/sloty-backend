@@ -140,6 +140,43 @@ Rules:
 - Profile migration is complete: Courts, Bookings, Transactions, Settlements, Dashboard, Audit, Reports, Players, and Clubs consume Profile-backed `RequestAccessContext`. Dashboard and Reports are read models using `ClubScopedViewMixin` plus source-domain `scoped_queryset` aggregations. Audit is club-only and matrix-denied to Staff; court/collector scope is not applied to audit rows. Global `ClubViewSet` remains URL-unscoped but Profile-filtered.
 - **Not a presence/activity tracker**: The Spine has no request-level side effects beyond authorization/scoping. There is no heartbeat endpoint.
 
+### 6d. Shared Base Models ([`apps/common/models.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/models.py))
+
+Two abstract layers, deliberately separate.
+
+| Base | Fields | Applied to |
+| :--- | :--- | :--- |
+| `TimeStampedModel` | `created_at`, `modified_at` | **every** model in the project |
+| `SoftDeleteModel` | the above plus `deleted_at`, `deleted_by` | `Club`, `Court` only |
+
+**Soft delete is opt-in, not universal.** Three groups deliberately do not get it:
+
+1. *Immutable history* — `Transaction` (ledger; corrections are a logged cancel),
+   `AuditLog` (append-only), `ClubPlayer` (never deleted), `Booking` (lifecycle is
+   `CANCELLED` / `EXPIRED`, not deletion). A `delete()` that silently succeeded
+   would contradict these domains.
+2. *Wholesale-replaced configuration* — `CourtWorkingHour`,
+   `CourtWorkingHourPricePeriod`, `StaffCourtAccess`. These are rebuilt by
+   replace-and-recreate flows; rows that are only marked stay behind and collide
+   with their `UNIQUE` constraints.
+3. *Already has deactivation* — `Profile` expresses this through `is_enabled`.
+
+**Managers.** `objects` (alive only, and therefore `_default_manager`),
+`all_objects` (everything), `deleted_objects` (only deleted). `delete()` is soft
+at both model and queryset level; `hard_delete()` is the explicit escape hatch;
+`restore()` clears both fields.
+
+> [!IMPORTANT]
+> Manager declaration order is load-bearing. `scoped_queryset()` starts from
+> `model._default_manager`, so soft-deleted rows leave every authorized queryset
+> automatically and read as **404, not 403**. `tests/authorization/test_soft_deleted_scoping.py`
+> pins this; if the order changed, deleted courts would silently reappear.
+
+**Field naming.** Model fields are `created_at` / `modified_at` everywhere. The
+**API response keys are unchanged** (`created`, `modified`, and `updated_at` on
+PlayerProfile) — serializers map them with `source=`. The `?ordering=` values
+stay `created` / `-created` for the same reason: the frontend deploys separately.
+
 ### 7. Runtime Release Metadata ([`apps/common/release_metadata.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/release_metadata.py))
 - **Endpoint**: authenticated `GET /api/system/version/` (`IsAuthenticated`, same default as business APIs).
 - **Source of truth**: `/etc/sloty/backend-release.json` written on the host after a successful production deploy and health check. Not GitHub, not `master`, not `.git`, and not the database.
@@ -164,6 +201,7 @@ Rules:
   - `test_base_permission_and_matrix.py`: Matrix verification, default deny, custom actions, object permission hook.
   - `test_scoped_resources.py`: Model configuration, club/court/future scoping, fail-closed behavior, relation loading, and DRF ViewSet composition.
   - `test_egypt_locations.py` / `test_locations_api.py`: Choice validation and API endpoint.
+  - `test_base_model.py`: Timestamps on every model, soft-delete semantics, manager split, and the opt-in boundary.
   - `test_version_api.py`: Runtime release metadata endpoint.
   - `test_sql_query_stats_middleware.py`: Middleware counting and threshold logging.
 - Deployment/release metadata tests: [`tests/deploy/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/deploy/).

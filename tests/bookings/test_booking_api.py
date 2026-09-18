@@ -308,7 +308,7 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         attempt = BookingAttempt.objects.get()
         self.assertEqual(attempt.requested_at, requested_at)
-        self.assertNotEqual(attempt.created, attempt.requested_at)
+        self.assertNotEqual(attempt.created_at, attempt.requested_at)
 
     def test_serializer_shape_error_does_not_create_booking_attempt(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -2275,7 +2275,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             start_time=now - timedelta(minutes=10),
             end_time=now + timedelta(minutes=50),
         )
-        Booking.objects.filter(pk=booking.pk).update(created=now - timedelta(hours=2))
+        Booking.objects.filter(pk=booking.pk).update(created_at=now - timedelta(hours=2))
         response = self.post_lifecycle(
             self.club,
             booking,
@@ -3180,7 +3180,7 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
 
     def age_booking(self, booking, *, hours):
         created = timezone.now() - timedelta(hours=hours)
-        Booking.objects.filter(pk=booking.pk).update(created=created)
+        Booking.objects.filter(pk=booking.pk).update(created_at=created)
         booking.refresh_from_db()
         return booking
 
@@ -3358,7 +3358,7 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
         )
         due_ids = due_hold_booking_candidate_ids(now=timezone.now())
         self.assertEqual(due_ids, [booking.id])
-        Booking.objects.filter(pk=booking.pk).update(created=timezone.now())
+        Booking.objects.filter(pk=booking.pk).update(created_at=timezone.now())
         expired = expire_locked_due_hold_bookings(due_ids=due_ids, now=timezone.now())
         booking.refresh_from_db()
         self.assertEqual(expired, [])
@@ -3389,7 +3389,7 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             end_time=start_time + timedelta(hours=1),
             customer_phone="+201000001041",
         )
-        Booking.objects.filter(pk=booking.pk).update(created=created)
+        Booking.objects.filter(pk=booking.pk).update(created_at=created)
         booking.refresh_from_db()
         expected = created + timedelta(hours=2)
         self.assertEqual(compute_booking_hold_expires_at(booking), expected)
@@ -3411,7 +3411,7 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             end_time=start_time + timedelta(hours=1),
             customer_phone="+201000001042",
         )
-        Booking.objects.filter(pk=booking.pk).update(created=created)
+        Booking.objects.filter(pk=booking.pk).update(created_at=created)
         booking.refresh_from_db()
         self.assertEqual(compute_booking_hold_expires_at(booking), start_time)
         self.assertEqual(self.annotated_hold_expires_at(booking), start_time)
@@ -3427,7 +3427,7 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             end_time=now + timedelta(hours=1),
             customer_phone="+201000001043",
         )
-        Booking.objects.filter(pk=booking.pk).update(created=now - timedelta(hours=1))
+        Booking.objects.filter(pk=booking.pk).update(created_at=now - timedelta(hours=1))
         due_ids = due_hold_booking_candidate_ids(now=now)
         self.assertIn(booking.id, due_ids)
 
@@ -3443,7 +3443,7 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             customer_phone="+201000001044",
         )
         Booking.objects.filter(pk=booking.pk).update(
-            created=now - timedelta(minutes=30)
+            created_at=now - timedelta(minutes=30)
         )
         due_ids = due_hold_booking_candidate_ids(now=now)
         self.assertIn(booking.id, due_ids)
@@ -3469,7 +3469,7 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             customer_phone="+201000001046",
         )
         Booking.objects.filter(pk__in=[short_booking.pk, long_booking.pk]).update(
-            created=created
+            created_at=created
         )
         short_booking.refresh_from_db()
         long_booking.refresh_from_db()
@@ -3753,7 +3753,7 @@ class BookingFilterTests(BookingAPITestCase):
             status=Booking.Status.HOLD,
         )
         Booking.objects.filter(pk=expiring_hold.pk).update(
-            created=timezone.now() - timedelta(minutes=45)
+            created_at=timezone.now() - timedelta(minutes=45)
         )
         response = self.client.get(
             self.booking_list_url(self.club), {"hold_expiring": "true"}
@@ -3928,8 +3928,8 @@ class BookingFilterTests(BookingAPITestCase):
         )
         t0 = timezone.now() - timedelta(hours=2)
         t1 = timezone.now() - timedelta(hours=1)
-        Booking.objects.filter(pk=b1.pk).update(created=t0)
-        Booking.objects.filter(pk__in=[b2.pk, b3.pk]).update(created=t1)
+        Booking.objects.filter(pk=b1.pk).update(created_at=t0)
+        Booking.objects.filter(pk__in=[b2.pk, b3.pk]).update(created_at=t1)
         self.assertLess(b2.id, b3.id)
         default_resp = self.client.get(self.booking_list_url(self.club))
         self.assertEqual(
@@ -3969,8 +3969,8 @@ class BookingFilterTests(BookingAPITestCase):
         )
         t0 = timezone.now() - timedelta(hours=3)
         t1 = timezone.now() - timedelta(hours=1)
-        Booking.objects.filter(pk=self.confirmed_booking.pk).update(created=t1)
-        Booking.objects.filter(pk=extra_confirmed.pk).update(created=t0)
+        Booking.objects.filter(pk=self.confirmed_booking.pk).update(created_at=t1)
+        Booking.objects.filter(pk=extra_confirmed.pk).update(created_at=t0)
         oldest_resp = self.client.get(
             self.booking_list_url(self.club),
             {"status": Booking.Status.CONFIRMED, "ordering": "created"},
@@ -4004,7 +4004,7 @@ class BookingFilterTests(BookingAPITestCase):
             new_bookings.append(b)
         all_bookings = [self.booking, self.confirmed_booking] + new_bookings
         Booking.objects.filter(pk__in=[b.pk for b in all_bookings]).update(
-            created=created_time
+            created_at=created_time
         )
         all_ids_sorted_asc = sorted([b.id for b in all_bookings])
         all_ids_sorted_desc = sorted([b.id for b in all_bookings], reverse=True)

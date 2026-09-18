@@ -644,7 +644,7 @@ def dismiss_booking_attempt(*, access, attempt, actor):
             )
 
         locked_attempt.resolution = BookingAttempt.Resolution.DISMISSED
-        locked_attempt.save(update_fields=["resolution", "modified"])
+        locked_attempt.save(update_fields=["resolution", "modified_at"])
         return locked_attempt
 
 
@@ -1482,7 +1482,7 @@ def cancel_booking(
             "cancellation_reason",
             "last_status_changed_by",
             "last_status_changed_by_type",
-            "modified",
+            "modified_at",
         ]
         if recurrence_ended:
             update_fields.append("recurrence_status")
@@ -1540,14 +1540,14 @@ def no_show_booking(*, access, booking, actor, reason=""):
             Booking.LastStatusActorType.INTERNAL_USER if actor else None
         )
         recurrence_ended = end_active_recurrence(locked_booking=locked_booking)
-        update_fields = ["status", "no_show_at", "no_show_reason", "modified"]
+        update_fields = ["status", "no_show_at", "no_show_reason", "modified_at"]
         update_fields = [
             "status",
             "no_show_at",
             "no_show_reason",
             "last_status_changed_by",
             "last_status_changed_by_type",
-            "modified",
+            "modified_at",
         ]
         if recurrence_ended:
             update_fields.append("recurrence_status")
@@ -1646,7 +1646,7 @@ def reschedule_booking(
                 "end_time",
                 "total_price",
                 "reschedule_reason",
-                "modified",
+                "modified_at",
             ]
         )
         create_lifecycle_audit_log(
@@ -1914,7 +1914,7 @@ def complete_booking(
                     created_by=actor,
                 )
                 next_booking.status = Booking.Status.CONFIRMED
-                next_booking.save(update_fields=["status", "modified"])
+                next_booking.save(update_fields=["status", "modified_at"])
                 next_booking.last_status_changed_by = actor
                 next_booking.last_status_changed_by_type = (
                     Booking.LastStatusActorType.INTERNAL_USER if actor else None
@@ -1924,7 +1924,7 @@ def complete_booking(
                         "status",
                         "last_status_changed_by",
                         "last_status_changed_by_type",
-                        "modified",
+                        "modified_at",
                     ]
                 )
                 record_audit_log(
@@ -1939,7 +1939,7 @@ def complete_booking(
                 )
             else:
                 next_booking.status = Booking.Status.CONFIRMED
-                next_booking.save(update_fields=["status", "modified"])
+                next_booking.save(update_fields=["status", "modified_at"])
                 next_booking.last_status_changed_by = actor
                 next_booking.last_status_changed_by_type = (
                     Booking.LastStatusActorType.INTERNAL_USER if actor else None
@@ -1949,7 +1949,7 @@ def complete_booking(
                         "status",
                         "last_status_changed_by",
                         "last_status_changed_by_type",
-                        "modified",
+                        "modified_at",
                     ]
                 )
             record_audit_log(
@@ -1965,7 +1965,7 @@ def complete_booking(
 
         locked_booking.status = Booking.Status.COMPLETED
         locked_booking.completed_at = timezone.now()
-        update_fields = ["status", "completed_at", "modified"]
+        update_fields = ["status", "completed_at", "modified_at"]
         locked_booking.last_status_changed_by = actor
         locked_booking.last_status_changed_by_type = (
             Booking.LastStatusActorType.INTERNAL_USER if actor else None
@@ -1975,7 +1975,7 @@ def complete_booking(
             "completed_at",
             "last_status_changed_by",
             "last_status_changed_by_type",
-            "modified",
+            "modified_at",
         ]
         if is_active_recurrence:
             locked_booking.recurrence_status = (
@@ -2038,13 +2038,13 @@ def expire_locked_booking(*, locked_booking, actor, metadata=None):
         locked_booking.last_status_changed_by = None
         locked_booking.last_status_changed_by_type = Booking.LastStatusActorType.SYSTEM
     recurrence_ended = end_active_recurrence(locked_booking=locked_booking)
-    update_fields = ["status", "expired_at", "modified"]
+    update_fields = ["status", "expired_at", "modified_at"]
     update_fields = [
         "status",
         "expired_at",
         "last_status_changed_by",
         "last_status_changed_by_type",
-        "modified",
+        "modified_at",
     ]
     if recurrence_ended:
         update_fields.append("recurrence_status")
@@ -2082,7 +2082,7 @@ def end_booking_recurrence(*, access, booking, actor, reason=""):
             )
         before_data = booking_audit_snapshot(locked_booking)
         locked_booking.recurrence_status = Booking.RecurrenceStatus.ENDED
-        locked_booking.save(update_fields=["recurrence_status", "modified"])
+        locked_booking.save(update_fields=["recurrence_status", "modified_at"])
         create_lifecycle_audit_log(
             booking=locked_booking,
             actor=actor,

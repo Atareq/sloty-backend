@@ -22,6 +22,7 @@ Identity boundary:
 from django.db import models
 from phonenumber_field.modelfields import PhoneNumberField
 
+from apps.common.models import TimeStampedModel
 from apps.clubs.models import Club
 from apps.profiles.models import Profile
 
@@ -67,8 +68,6 @@ class PlayerProfile(Profile):
             "A player is not verified until an explicit verification step runs."
         ),
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         default_related_name = "player_profile"
@@ -80,7 +79,7 @@ class PlayerProfile(Profile):
         return f"PlayerProfile({self.phone_number})"
 
 
-class ClubPlayer(models.Model):
+class ClubPlayer(TimeStampedModel):
     """
     Club-local representation of a player.
 

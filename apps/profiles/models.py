@@ -3,10 +3,11 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
 
+from apps.common.models import TimeStampedModel
 from apps.courts.models import Court
 
 
-class Profile(models.Model):
+class Profile(TimeStampedModel):
     """Concrete parent and sole application-role authority for an account."""
 
     class Role(models.TextChoices):
@@ -24,8 +25,6 @@ class Profile(models.Model):
     )
     role = models.CharField(max_length=16, choices=Role.choices, db_index=True)
     is_enabled = models.BooleanField(default=True, db_index=True)
-    created = models.DateTimeField(auto_now_add=True)
-    modified = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         identity = self.user or "unlinked"
@@ -94,14 +93,13 @@ class AdminProfile(Profile):
         default_related_name = "admin_profile"
 
 
-class StaffCourtAccess(models.Model):
+class StaffCourtAccess(TimeStampedModel):
     staff_profile = models.ForeignKey(
         StaffProfile, on_delete=models.CASCADE, related_name="court_accesses"
     )
     court = models.ForeignKey(
         "courts.Court", on_delete=models.CASCADE, related_name="staff_court_accesses"
     )
-    created = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [

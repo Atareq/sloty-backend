@@ -25,7 +25,7 @@ class BookingAdmin(admin.ModelAdmin):
         "club__name",
     )
     date_hierarchy = "start_time"
-    readonly_fields = ("total_price", "created_by", "created", "modified")
+    readonly_fields = ("total_price", "created_by", "created_at", "modified_at")
 
 
 @admin.register(BookingAttempt)
@@ -78,7 +78,7 @@ class BookingAttemptAdmin(admin.ModelAdmin):
         "club__name",
     )
     date_hierarchy = "requested_at"
-    readonly_fields = ("created", "modified")
+    readonly_fields = ("created_at", "modified_at")
 
     def get_readonly_fields(self, request, obj=None):
         if obj is None:

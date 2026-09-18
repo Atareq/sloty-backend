@@ -7,7 +7,6 @@ psycopg2==2.9.10
 python-dotenv==1.1.1
 django-extensions==3.1.5
 django-filter==24.3
-django-safedelete==1.4.1
 djangorestframework-simplejwt==5.5.1
 django-phonenumber-field==8.4.0
 phonenumbers

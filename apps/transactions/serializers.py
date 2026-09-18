@@ -31,6 +31,8 @@ class BookingCustomerIdentityMixin(serializers.Serializer):
 class TransactionListSerializer(
     BookingCustomerIdentityMixin, serializers.ModelSerializer
 ):
+    created = serializers.DateTimeField(source="created_at", read_only=True)
+
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     cancelled_by = serializers.PrimaryKeyRelatedField(read_only=True)
     booking_start_time = serializers.DateTimeField(
@@ -80,6 +82,9 @@ class TransactionListSerializer(
 class TransactionDetailSerializer(
     BookingCustomerIdentityMixin, serializers.ModelSerializer
 ):
+    created = serializers.DateTimeField(source="created_at", read_only=True)
+    modified = serializers.DateTimeField(source="modified_at", read_only=True)
+
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     cancelled_by = serializers.PrimaryKeyRelatedField(read_only=True)
     booking_start_time = serializers.DateTimeField(
@@ -158,6 +163,9 @@ class TransactionAttemptListSerializer(
     TransactionAttemptStatusMixin,
     serializers.ModelSerializer,
 ):
+    created = serializers.DateTimeField(source="created_at", read_only=True)
+    modified = serializers.DateTimeField(source="modified_at", read_only=True)
+
     court_name = serializers.CharField(source="court.name", read_only=True)
     attempted_by_username = serializers.CharField(
         source="attempted_by.username",

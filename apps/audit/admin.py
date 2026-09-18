@@ -13,9 +13,9 @@ class AuditLogAdmin(admin.ModelAdmin):
         "entity_id",
         "actor",
         "court",
-        "created",
+        "created_at",
     )
-    list_filter = ("club", "action", "entity_type", "created")
+    list_filter = ("club", "action", "entity_type", "created_at")
     search_fields = (
         "club__name",
         "club__slug",
@@ -35,5 +35,5 @@ class AuditLogAdmin(admin.ModelAdmin):
         "before_data",
         "after_data",
         "metadata",
-        "created",
+        "created_at",
     )

@@ -91,7 +91,7 @@ class DashboardAPITestCase(ProfileIdentityMixin, APITestCase):
         return persist_booking(court, **extra_fields)
 
     def create_transaction(self, booking: Booking, **extra_fields) -> Transaction:
-        created = extra_fields.pop("created", self.time_at(13))
+        created = extra_fields.pop("created_at", self.time_at(13))
         data = {
             "booking": booking,
             "amount": Decimal("100.00"),
@@ -99,12 +99,12 @@ class DashboardAPITestCase(ProfileIdentityMixin, APITestCase):
         }
         data.update(extra_fields)
         transaction_obj = Transaction.objects.create(**data)
-        Transaction.objects.filter(pk=transaction_obj.pk).update(created=created)
+        Transaction.objects.filter(pk=transaction_obj.pk).update(created_at=created)
         transaction_obj.refresh_from_db()
         return transaction_obj
 
     def create_settlement(self, club: Club, **extra_fields) -> Settlement:
-        created = extra_fields.pop("created", None) or extra_fields.pop(
+        created = extra_fields.pop("created_at", None) or extra_fields.pop(
             "created_at", self.time_at(14)
         )
         extra_fields.pop("period_start", None)
@@ -112,7 +112,7 @@ class DashboardAPITestCase(ProfileIdentityMixin, APITestCase):
         extra_fields.pop("status", None)
         extra_fields.pop("transaction_count", None)
         extra_fields.pop("settled_at", None)
-        extra_fields.pop("modified", None)
+        extra_fields.pop("modified_at", None)
         extra_fields.pop("collected_by", None)
         extra_fields.pop("created_by", None)
         data = {
@@ -247,13 +247,13 @@ class DashboardDataMixin:
             self.confirmed,
             amount=Decimal("100.00"),
             created_by=self.staff,
-            created=self.time_at(13),
+            created_at=self.time_at(13),
         )
         self.settled_transaction = self.create_transaction(
             self.completed,
             amount=Decimal("300.00"),
             created_by=self.staff,
-            created=self.time_at(13, 10),
+            created_at=self.time_at(13, 10),
         )
         self.unsettled_transaction = self.create_transaction(
             self.other_court_booking,
@@ -261,14 +261,14 @@ class DashboardDataMixin:
             payment_method=Transaction.PaymentMethod.DIGITAL_WALLET,
             payment_reference="DASH-DIGITAL-001",
             created_by=self.staff,
-            created=self.time_at(13, 20),
+            created_at=self.time_at(13, 20),
         )
         self.settled_settlement = self.create_settlement(
             self.club,
             court=self.court,
             total_amount=Decimal("400.00"),
             settled_by=self.platform_admin,
-            created=self.time_at(14, 10),
+            created_at=self.time_at(14, 10),
         )
         SettlementTransaction.objects.create(
             settlement=self.settled_settlement,
@@ -580,7 +580,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             booking_occurs_later,
             amount=Decimal("300.00"),
             created_by=self.staff,
-            created=timezone.datetime(
+            created_at=timezone.datetime(
                 2026, 8, 17, 14, 0, tzinfo=timezone.get_current_timezone()
             ),
         )
@@ -588,7 +588,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             booking_occurs_in_range,
             amount=Decimal("200.00"),
             created_by=self.staff,
-            created=timezone.datetime(
+            created_at=timezone.datetime(
                 2026, 8, 16, 14, 0, tzinfo=timezone.get_current_timezone()
             ),
         )
@@ -647,7 +647,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             self.other_club,
             court=self.cross_club_court,
             total_amount=Decimal("999.00"),
-            created=self.time_at(14),
+            created_at=self.time_at(14),
         )
         self.client.force_authenticate(user=self.platform_admin)
         response = self.client.get(self.summary_url(self.club), self.range_params())
@@ -737,33 +737,33 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             self.confirmed,
             amount=Decimal("500.00"),
             created_by=self.staff,
-            created=selected_at,
+            created_at=selected_at,
         )
         self.create_transaction(
             self.confirmed,
             amount=Decimal("300.00"),
             created_by=self.staff,
-            created=selected_at + timedelta(minutes=5),
+            created_at=selected_at + timedelta(minutes=5),
         )
         self.create_transaction(
             self.confirmed,
             transaction_type=Transaction.Type.REFUND,
             amount=Decimal("-200.00"),
             created_by=self.staff,
-            created=selected_at + timedelta(minutes=10),
+            created_at=selected_at + timedelta(minutes=10),
         )
         self.create_transaction(
             self.confirmed,
             transaction_type=Transaction.Type.REFUND,
             amount=Decimal("-100.00"),
             created_by=self.staff,
-            created=selected_at - timedelta(days=1),
+            created_at=selected_at - timedelta(days=1),
         )
         self.create_transaction(
             self.confirmed,
             amount=Decimal("700.00"),
             created_by=self.staff,
-            created=selected_at + timedelta(minutes=15),
+            created_at=selected_at + timedelta(minutes=15),
             is_cancelled=True,
             cancelled_by=self.platform_admin,
             cancelled_at=selected_at + timedelta(minutes=16),
@@ -792,7 +792,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             amount=Decimal("20.00"),
             payment_method=Transaction.PaymentMethod.CASH,
             created_by=self.staff,
-            created=self.time_at(13) - timedelta(days=2),
+            created_at=self.time_at(13) - timedelta(days=2),
         )
         self.client.force_authenticate(user=self.platform_admin)
         response = self.client.get(
@@ -824,7 +824,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             self.confirmed,
             amount=Decimal("20.00"),
             created_by=self.owner,
-            created=self.time_at(13) - timedelta(days=2),
+            created_at=self.time_at(13) - timedelta(days=2),
         )
         self.client.force_authenticate(user=self.platform_admin)
         response = self.client.get(self.summary_url(self.club), self.range_params())
@@ -855,26 +855,26 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             booking,
             amount=Decimal("500.00"),
             created_by=mohamed,
-            created=self.time_at(12) - timedelta(days=10),
+            created_at=self.time_at(12) - timedelta(days=10),
         )
         self.create_transaction(
             booking,
             amount=Decimal("900.00"),
             created_by=mohamed,
-            created=self.time_at(12),
+            created_at=self.time_at(12),
         )
         self.create_transaction(
             booking,
             transaction_type=Transaction.Type.REFUND,
             amount=Decimal("-150.00"),
             created_by=mohamed,
-            created=self.time_at(12, 5),
+            created_at=self.time_at(12, 5),
         )
         self.create_transaction(
             booking,
             amount=Decimal("300.00"),
             created_by=mohamed,
-            created=self.time_at(12, 10),
+            created_at=self.time_at(12, 10),
             is_cancelled=True,
             cancelled_by=self.platform_admin,
             cancelled_at=self.time_at(12, 11),
@@ -884,14 +884,14 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             booking,
             amount=Decimal("400.00"),
             created_by=mohamed,
-            created=self.time_at(12, 15),
+            created_at=self.time_at(12, 15),
         )
         settlement = self.create_settlement(
             self.club,
             court=self.court,
             total_amount=settled_payment.amount,
             settled_by=self.platform_admin,
-            created=self.time_at(13, 30),
+            created_at=self.time_at(13, 30),
         )
         SettlementTransaction.objects.create(
             settlement=settlement,
@@ -959,27 +959,27 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             self.confirmed,
             amount=Decimal("200.00"),
             created_by=self.owner,
-            created=self.time_at(13, 40),
+            created_at=self.time_at(13, 40),
         )
         self.create_transaction(
             self.other_court_booking,
             amount=Decimal("20.00"),
             created_by=self.staff,
-            created=self.time_at(13, 45),
+            created_at=self.time_at(13, 45),
         )
         settled_only_user = self.create_user("dashboard-settled-only")
         settled_only_transaction = self.create_transaction(
             self.confirmed,
             amount=Decimal("400.00"),
             created_by=settled_only_user,
-            created=self.time_at(13, 50),
+            created_at=self.time_at(13, 50),
         )
         settled_only_settlement = self.create_settlement(
             self.club,
             court=self.court,
             total_amount=settled_only_transaction.amount,
             settled_by=self.platform_admin,
-            created=self.time_at(14, 20),
+            created_at=self.time_at(14, 20),
         )
         SettlementTransaction.objects.create(
             settlement=settled_only_settlement,
@@ -990,7 +990,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             self.confirmed,
             amount=Decimal("70.00"),
             created_by=self.create_user("cancelled-only-collector"),
-            created=self.time_at(13, 55),
+            created_at=self.time_at(13, 55),
             is_cancelled=True,
             cancelled_by=self.platform_admin,
             cancelled_at=timezone.now(),
@@ -1000,7 +1000,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             self.cross_club_booking,
             amount=Decimal("999.00"),
             created_by=self.other_staff,
-            created=self.time_at(13, 58),
+            created_at=self.time_at(13, 58),
         )
         self.client.force_authenticate(user=self.platform_admin)
         response = self.client.get(self.summary_url(self.club), self.range_params())

@@ -6,7 +6,7 @@ from apps.settlements.models import Settlement, SettlementTransaction
 class SettlementTransactionInline(admin.TabularInline):
     model = SettlementTransaction
     extra = 0
-    readonly_fields = ("transaction", "amount", "created")
+    readonly_fields = ("transaction", "amount", "created_at")
     can_delete = False
 
 
@@ -39,12 +39,12 @@ class SettlementAdmin(admin.ModelAdmin):
 
 @admin.register(SettlementTransaction)
 class SettlementTransactionAdmin(admin.ModelAdmin):
-    list_display = ("id", "settlement", "transaction", "amount", "created")
-    list_filter = ("settlement__club", "created")
+    list_display = ("id", "settlement", "transaction", "amount", "created_at")
+    list_filter = ("settlement__club", "created_at")
     search_fields = (
         "settlement__club__slug",
         "settlement__club__name",
         "transaction__payment_reference",
         "transaction__booking__club_player__display_name",
     )
-    readonly_fields = ("settlement", "transaction", "amount", "created")
+    readonly_fields = ("settlement", "transaction", "amount", "created_at")

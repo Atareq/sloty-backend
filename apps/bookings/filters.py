@@ -18,7 +18,7 @@ from apps.bookings.models import Booking, BookingAttempt
 
 
 def compute_booking_hold_expires_at(booking):
-    policy_expires_at = booking.created + timedelta(
+    policy_expires_at = booking.created_at + timedelta(
         hours=booking.court.internal_hold_expiry_hours
     )
     return min(policy_expires_at, booking.start_time)
@@ -31,7 +31,7 @@ def annotate_booking_hold_expires_at(queryset):
         output_field=DurationField(),
     )
     policy_expires_at = ExpressionWrapper(
-        F("created") + hold_expiry_duration,
+        F("created_at") + hold_expiry_duration,
         output_field=DateTimeField(),
     )
     return queryset.annotate(
@@ -237,9 +237,9 @@ class BookingFilter(django_filters.FilterSet):
 
     def filter_ordering(self, queryset, name, value):
         if value == "created":
-            return queryset.order_by("created", "id")
+            return queryset.order_by("created_at", "id")
         if value == "-created":
-            return queryset.order_by("-created", "-id")
+            return queryset.order_by("-created_at", "-id")
         return queryset
 
 

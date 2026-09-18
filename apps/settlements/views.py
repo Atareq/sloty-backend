@@ -73,8 +73,8 @@ class SettlementViewSet(
         queryset = apply_collector_scope(self.get_access_context(), queryset)
         queryset = queryset.annotate(
             annotated_transaction_count=Count("lines", distinct=True),
-            annotated_period_start=Min("lines__transaction__created"),
-            annotated_period_end=Max("lines__transaction__created"),
+            annotated_period_start=Min("lines__transaction__created_at"),
+            annotated_period_end=Max("lines__transaction__created_at"),
         )
         return queryset.order_by("-created_at", "-id")
 

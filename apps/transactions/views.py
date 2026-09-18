@@ -69,7 +69,7 @@ class TransactionAttemptViewSet(
             queryset,
             actor_field="attempted_by",
         )
-        return queryset.order_by("-created", "-id")
+        return queryset.order_by("-created_at", "-id")
 
     def check_object_permission(self, request, obj) -> bool:
         if self.action == "dismiss":
@@ -162,7 +162,7 @@ class TransactionViewSet(
             queryset,
             actor_field="created_by",
         )
-        return queryset.order_by("-created", "-id")
+        return queryset.order_by("-created_at", "-id")
 
     def check_object_permission(self, request, obj) -> bool:
         if self.action == "cancel":

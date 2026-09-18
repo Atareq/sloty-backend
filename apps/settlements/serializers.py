@@ -102,10 +102,10 @@ class SettlementLineSerializer(serializers.ModelSerializer):
         read_only=True,
     )
     transaction_created = serializers.DateTimeField(
-        source="transaction.created",
+        source="transaction.created_at",
         read_only=True,
     )
-    created = serializers.DateTimeField(source="transaction.created", read_only=True)
+    created = serializers.DateTimeField(source="transaction.created_at", read_only=True)
     kind = serializers.SerializerMethodField()
 
     class Meta:
@@ -402,7 +402,7 @@ class SettlementUnsettledSummaryRequestSerializer(serializers.Serializer):
             queryset = queryset.filter(court=court)
 
         grouped = {}
-        for t in queryset.select_related("created_by").order_by("created", "id"):
+        for t in queryset.select_related("created_by").order_by("created_at", "id"):
             u_id = t.created_by_id
             if u_id not in grouped:
                 grouped[u_id] = {
@@ -446,7 +446,7 @@ class SettlementUnsettledSummaryRequestSerializer(serializers.Serializer):
                 {
                     "user": u_id,
                     "user_name": name,
-                    "period_start": txs[0].created,
+                    "period_start": txs[0].created_at,
                     "period_end": now,
                     "transaction_count": len(txs),
                     "total_amount": net,

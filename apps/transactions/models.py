@@ -5,12 +5,13 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
+from apps.common.models import TimeStampedModel
 from apps.bookings.models import Booking
 from apps.clubs.models import Club
 from apps.courts.models import Court
 
 
-class Transaction(models.Model):
+class Transaction(TimeStampedModel):
     class Type(models.TextChoices):
         PAYMENT = "PAYMENT", _("Payment")
         REFUND = "REFUND", _("Refund")
@@ -72,8 +73,6 @@ class Transaction(models.Model):
     cancelled_at = models.DateTimeField(blank=True, null=True, db_index=True)
     cancellation_reason = models.TextField(blank=True)
     occurred_at = models.DateTimeField(default=timezone.now, db_index=True)
-    created = models.DateTimeField(auto_now_add=True, db_index=True)
-    modified = models.DateTimeField(auto_now=True)
 
     # Authorization Spine v2 resource-query contract
     # (apps/common/authorization/contracts.py). Operational boundary is
@@ -117,15 +116,15 @@ class Transaction(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=["club", "created"]),
-            models.Index(fields=["court", "created"]),
-            models.Index(fields=["booking", "created"]),
-            models.Index(fields=["created_by", "created"]),
-            models.Index(fields=["club", "is_cancelled", "created"]),
+            models.Index(fields=["club", "created_at"]),
+            models.Index(fields=["court", "created_at"]),
+            models.Index(fields=["booking", "created_at"]),
+            models.Index(fields=["created_by", "created_at"]),
+            models.Index(fields=["club", "is_cancelled", "created_at"]),
             models.Index(fields=["booking", "is_cancelled"]),
             models.Index(fields=["booking", "transaction_type", "is_cancelled"]),
-            models.Index(fields=["created_by", "is_cancelled", "created"]),
-            models.Index(fields=["transaction_type", "created"]),
+            models.Index(fields=["created_by", "is_cancelled", "created_at"]),
+            models.Index(fields=["transaction_type", "created_at"]),
             models.Index(fields=["payment_method"]),
             models.Index(fields=["payment_reference"]),
             models.Index(fields=["club", "occurred_at"]),
@@ -159,7 +158,7 @@ class Transaction(models.Model):
         super().save(*args, **kwargs)
 
 
-class TransactionAttempt(models.Model):
+class TransactionAttempt(TimeStampedModel):
     class Outcome(models.TextChoices):
         SUCCESS = "SUCCESS", _("Success")
         REJECTED = "REJECTED", _("Rejected")
@@ -217,8 +216,6 @@ class TransactionAttempt(models.Model):
         default=Resolution.UNRESOLVED,
         db_index=True,
     )
-    created = models.DateTimeField(auto_now_add=True, db_index=True)
-    modified = models.DateTimeField(auto_now=True)
 
     # Authorization Spine v2 resource-query contract. Boundary is club+court.
     # Staff attempted_by restriction is applied in
@@ -274,11 +271,11 @@ class TransactionAttempt(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=["club", "created"]),
-            models.Index(fields=["club", "outcome", "created"]),
-            models.Index(fields=["attempted_by", "created"]),
-            models.Index(fields=["court", "created"]),
-            models.Index(fields=["booking", "created"]),
+            models.Index(fields=["club", "created_at"]),
+            models.Index(fields=["club", "outcome", "created_at"]),
+            models.Index(fields=["attempted_by", "created_at"]),
+            models.Index(fields=["court", "created_at"]),
+            models.Index(fields=["booking", "created_at"]),
             models.Index(fields=["club", "occurred_at"]),
         ]
 

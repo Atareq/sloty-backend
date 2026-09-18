@@ -126,6 +126,7 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 
 - **Transactions**: Multi-model writes and state transitions must be wrapped in `transaction.atomic()`.
 - **Concurrency & Locking**: When concurrent requests can conflict (e.g. booking creation, slot reservation, rescheduling, settlements, transaction cancellation), lock affected rows using `select_for_update()`.
+- **Base models**: Every model inherits `apps.common.models.TimeStampedModel` (`created_at`, `modified_at`). `SoftDeleteModel` adds `deleted_at`/`deleted_by` and is applied **only** to `Club` and `Court` — see `apps/common/AGENTS.md` §6d for why immutable-history and wholesale-replaced models are excluded.
 - **Migrations**: Every model change requires a migration. Avoid data migrations inside schema migration files. The September 2026 pre-release Profile refactor intentionally rebuilt first-party migrations as one `0001_initial.py` per model-bearing app. Recreate development/test databases when adopting this baseline; do not migrate an obsolete database forward or fake its history.
 - **Timezone**: Django `TIME_ZONE = "Africa/Cairo"` with `USE_TZ = True`. Datetimes are stored as UTC in the database and translated to local Cairo time for business logic.
 

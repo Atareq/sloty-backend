@@ -105,6 +105,8 @@ class AuditLogPresentationMixin:
 
 
 class AuditLogListSerializer(AuditLogPresentationMixin, serializers.ModelSerializer):
+    created = serializers.DateTimeField(source="created_at", read_only=True)
+
     action_label = serializers.SerializerMethodField()
     actor = serializers.PrimaryKeyRelatedField(read_only=True)
     actor_name = serializers.SerializerMethodField()
@@ -134,6 +136,8 @@ class AuditLogListSerializer(AuditLogPresentationMixin, serializers.ModelSeriali
 
 
 class AuditLogDetailSerializer(AuditLogPresentationMixin, serializers.ModelSerializer):
+    created = serializers.DateTimeField(source="created_at", read_only=True)
+
     action_label = serializers.SerializerMethodField()
     actor = serializers.PrimaryKeyRelatedField(read_only=True)
     actor_name = serializers.SerializerMethodField()

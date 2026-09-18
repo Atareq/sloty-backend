@@ -140,6 +140,9 @@ class CourtListSerializer(serializers.ModelSerializer):
 
 
 class CourtDetailSerializer(serializers.ModelSerializer):
+    created = serializers.DateTimeField(source="created_at", read_only=True)
+    modified = serializers.DateTimeField(source="modified_at", read_only=True)
+
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     working_hours = CourtWorkingHourSerializer(many=True, read_only=True)
     pricing_configured = serializers.SerializerMethodField()

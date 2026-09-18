@@ -2,8 +2,10 @@ from django.contrib.auth.models import AbstractUser
 from django.db import models
 from phonenumber_field.modelfields import PhoneNumberField
 
+from apps.common.models import TimeStampedModel
 
-class User(AbstractUser):
+
+class User(AbstractUser, TimeStampedModel):
     phone_number = PhoneNumberField(blank=True, null=True)
     created_by = models.ForeignKey(
         "self",

@@ -46,7 +46,7 @@ def _calculate(club, user=None, court=None, lock=False) -> dict:
             "booking__club_player__player_profile",
             "court",
             "created_by",
-        ).order_by("created", "id")
+        ).order_by("created_at", "id")
     )
     if not candidates:
         raise SlotyAPIException(
@@ -89,7 +89,7 @@ def _calculate(club, user=None, court=None, lock=False) -> dict:
             "amount": t.amount,
             "payment_method": t.payment_method,
             "payment_reference": t.payment_reference,
-            "created": t.created,
+            "created": t.created_at,
         }
         for t in candidates
     ]
@@ -108,8 +108,8 @@ def _calculate(club, user=None, court=None, lock=False) -> dict:
         "collected_by_name": user_name,
         "user": user_id,
         "user_name": user_name,
-        "period_start": candidates[0].created,
-        "period_end": candidates[-1].created,
+        "period_start": candidates[0].created_at,
+        "period_end": candidates[-1].created_at,
         "transaction_count": len(candidates),
         "total_amount": total_amount,
         "net_amount": total_amount,

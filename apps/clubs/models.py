@@ -4,6 +4,7 @@ from django.db import models
 from django.utils.text import slugify
 from phonenumber_field.modelfields import PhoneNumberField
 
+from apps.common.models import SoftDeleteModel
 from apps.common.egypt_locations import (
     get_all_city_choices,
     get_governorate_choices,
@@ -26,7 +27,7 @@ def generate_unique_club_slug(name: str, *, exclude_pk=None) -> str:
     return slug
 
 
-class Club(models.Model):
+class Club(SoftDeleteModel):
     name = models.CharField(max_length=255, db_index=True)
     slug = models.SlugField(max_length=120, unique=True, db_index=True)
     governorate = models.CharField(
@@ -46,8 +47,6 @@ class Club(models.Model):
         on_delete=models.SET_NULL,
         related_name="created_clubs",
     )
-    created = models.DateTimeField(auto_now_add=True)
-    modified = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [

@@ -6,11 +6,12 @@ from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models, transaction
 
+from apps.common.models import SoftDeleteModel, TimeStampedModel
 from apps.clubs.models import Club
 from apps.courts.pricing import is_valid_period_bounds
 
 
-class Court(models.Model):
+class Court(SoftDeleteModel):
     class SportType(models.TextChoices):
         FOOTBALL = "FOOTBALL", "Football"
         PADEL = "PADEL", "Padel"
@@ -75,8 +76,6 @@ class Court(models.Model):
         on_delete=models.SET_NULL,
         related_name="created_courts",
     )
-    created = models.DateTimeField(auto_now_add=True)
-    modified = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [
@@ -135,7 +134,7 @@ class Court(models.Model):
             return super().save(*args, **kwargs)
 
 
-class CourtWorkingHour(models.Model):
+class CourtWorkingHour(TimeStampedModel):
     # Every court can have weekday-specific pricing periods.
     class Weekday(models.IntegerChoices):
         MONDAY = 0, "Monday"
@@ -180,7 +179,7 @@ class CourtWorkingHour(models.Model):
         return f"{self.court} - {self.get_weekday_display()}"
 
 
-class CourtWorkingHourPricePeriod(models.Model):
+class CourtWorkingHourPricePeriod(TimeStampedModel):
     working_hour = models.ForeignKey(
         CourtWorkingHour,
         on_delete=models.CASCADE,

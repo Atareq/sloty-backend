@@ -71,7 +71,7 @@ class SettlementAPITestCase(ProfileIdentityMixin, APITestCase):
         return persist_booking(court, **extra_fields)
 
     def create_transaction(self, booking: Booking, **extra_fields) -> Transaction:
-        created = extra_fields.pop("created", self.time_at(12))
+        created = extra_fields.pop("created_at", self.time_at(12))
         data = {
             "booking": booking,
             "amount": Decimal("50.00"),
@@ -79,7 +79,7 @@ class SettlementAPITestCase(ProfileIdentityMixin, APITestCase):
         }
         data.update(extra_fields)
         transaction_obj = Transaction.objects.create(**data)
-        Transaction.objects.filter(pk=transaction_obj.pk).update(created=created)
+        Transaction.objects.filter(pk=transaction_obj.pk).update(created_at=created)
         transaction_obj.refresh_from_db()
         return transaction_obj
 
@@ -89,7 +89,7 @@ class SettlementAPITestCase(ProfileIdentityMixin, APITestCase):
         extra_fields.pop("status", None)
         extra_fields.pop("transaction_count", None)
         extra_fields.pop("settled_at", None)
-        extra_fields.pop("modified", None)
+        extra_fields.pop("modified_at", None)
         if "collected_by" in extra_fields:
             collector = extra_fields.pop("collected_by")
             if "settled_by" not in extra_fields:
@@ -198,7 +198,7 @@ class SettlementModelTests(SettlementAPITestCase):
         self.assertIsNone(settlement.period_start)
         self.assertIsNone(settlement.period_end)
 
-        t2 = self.create_transaction(self.booking, created=self.time_at(16))
+        t2 = self.create_transaction(self.booking, created_at=self.time_at(16))
         SettlementTransaction.objects.create(
             settlement=settlement,
             transaction=self.transaction_obj,
@@ -210,8 +210,8 @@ class SettlementModelTests(SettlementAPITestCase):
             amount=t2.amount,
         )
         self.assertEqual(settlement.transaction_count, 2)
-        self.assertEqual(settlement.period_start, self.transaction_obj.created)
-        self.assertEqual(settlement.period_end, t2.created)
+        self.assertEqual(settlement.period_start, self.transaction_obj.created_at)
+        self.assertEqual(settlement.period_end, t2.created_at)
 
     def test_line_amount_must_be_positive(self):
         settlement = self.create_settlement(self.club, court=self.court)
@@ -320,28 +320,28 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.first_transaction = self.create_transaction(
             self.booking,
             amount=Decimal("50.00"),
-            created=self.time_at(11),
+            created_at=self.time_at(11),
             payment_reference="PREVIEW-1",
             created_by=self.staff,
         )
         self.second_transaction = self.create_transaction(
             self.second_booking,
             amount=Decimal("75.00"),
-            created=self.time_at(12),
+            created_at=self.time_at(12),
             payment_reference="PREVIEW-2",
             created_by=self.staff,
         )
         self.other_court_transaction = self.create_transaction(
             self.other_court_booking,
             amount=Decimal("25.00"),
-            created=self.time_at(12),
+            created_at=self.time_at(12),
             payment_reference="PREVIEW-OTHER-COURT",
             created_by=self.staff,
         )
         self.other_club_transaction = self.create_transaction(
             self.other_club_booking,
             amount=Decimal("90.00"),
-            created=self.time_at(12),
+            created_at=self.time_at(12),
             payment_reference="PREVIEW-OTHER-CLUB",
             created_by=self.other_staff,
         )
@@ -378,28 +378,28 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.owner_transaction = self.create_transaction(
             self.owner_booking,
             amount=Decimal("80.00"),
-            created=self.time_at(13),
+            created_at=self.time_at(13),
             payment_reference="PREVIEW-OWNER-SELF",
             created_by=self.owner,
         )
         self.owner_second_transaction = self.create_transaction(
             self.owner_second_booking,
             amount=Decimal("90.00"),
-            created=self.time_at(14),
+            created_at=self.time_at(14),
             payment_reference="PREVIEW-OWNER-SELF-2",
             created_by=self.owner,
         )
         self.owner_settled_transaction = self.create_transaction(
             self.owner_settled_booking,
             amount=Decimal("100.00"),
-            created=self.time_at(15),
+            created_at=self.time_at(15),
             payment_reference="PREVIEW-OWNER-SETTLED",
             created_by=self.owner,
         )
         self.owner_cancelled_transaction = self.create_transaction(
             self.owner_cancelled_booking,
             amount=Decimal("110.00"),
-            created=self.time_at(16),
+            created_at=self.time_at(16),
             payment_reference="PREVIEW-OWNER-CANCELLED",
             is_cancelled=True,
             cancelled_by=self.platform_admin,
@@ -410,21 +410,21 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.platform_admin_transaction = self.create_transaction(
             self.platform_admin_booking,
             amount=Decimal("120.00"),
-            created=self.time_at(17),
+            created_at=self.time_at(17),
             payment_reference="PREVIEW-ADMIN-SELF",
             created_by=self.platform_admin,
         )
         self.already_settled = self.create_transaction(
             self.booking,
             amount=Decimal("30.00"),
-            created=self.time_at(13),
+            created_at=self.time_at(13),
             payment_reference="PREVIEW-SETTLED",
             created_by=self.staff,
         )
         self.cancelled_transaction = self.create_transaction(
             self.booking,
             amount=Decimal("40.00"),
-            created=self.time_at(12),
+            created_at=self.time_at(12),
             payment_reference="PREVIEW-CANCELED",
             is_cancelled=True,
             cancelled_by=self.platform_admin,
@@ -626,7 +626,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             self.second_booking,
             transaction_type=Transaction.Type.REFUND,
             amount=Decimal("-25.00"),
-            created=self.time_at(13),
+            created_at=self.time_at(13),
             payment_reference="PREVIEW-REFUND",
             created_by=self.staff,
         )
@@ -674,7 +674,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         settlement = Settlement.objects.get(id=response.data["id"])
         self.assertIsNone(settlement.court)
         self.assertEqual(settlement.settled_by, self.platform_admin)
-        self.assertEqual(settlement.period_start, self.first_transaction.created)
+        self.assertEqual(settlement.period_start, self.first_transaction.created_at)
         self.assertLessEqual(settlement.period_end, timezone.now())
         self.assertEqual(settlement.total_amount, Decimal("150.00"))
         self.assertEqual(settlement.transaction_count, 3)
@@ -893,7 +893,7 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
             booking,
             amount=Decimal("500.00"),
             payment_method=Transaction.PaymentMethod.CASH,
-            created=timezone.now() - timedelta(days=10),
+            created_at=timezone.now() - timedelta(days=10),
             created_by=self.staff,
             payment_reference="CUSTODY-OLD",
         )
@@ -901,7 +901,7 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
             booking,
             amount=Decimal("900.00"),
             payment_method=Transaction.PaymentMethod.DIGITAL_WALLET,
-            created=timezone.now(),
+            created_at=timezone.now(),
             created_by=self.staff,
             payment_reference="CUSTODY-RECENT",
         )
@@ -910,7 +910,7 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
             transaction_type=Transaction.Type.REFUND,
             amount=Decimal("-150.00"),
             payment_method=Transaction.PaymentMethod.BANK_TRANSFER,
-            created=timezone.now(),
+            created_at=timezone.now(),
             created_by=self.staff,
             payment_reference="CUSTODY-REFUND",
         )
@@ -918,7 +918,7 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
             booking,
             amount=Decimal("300.00"),
             payment_method=Transaction.PaymentMethod.OTHER,
-            created=timezone.now(),
+            created_at=timezone.now(),
             created_by=self.staff,
             payment_reference="CUSTODY-CANCELLED",
             is_cancelled=True,
@@ -929,7 +929,7 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
         self.settled_payment = self.create_transaction(
             booking,
             amount=Decimal("400.00"),
-            created=timezone.now(),
+            created_at=timezone.now(),
             created_by=self.staff,
             payment_reference="CUSTODY-SETTLED",
         )
@@ -1122,7 +1122,7 @@ class SettlementImmutabilityFilterPatternTests(SettlementAPITestCase):
         )
         self.t1 = self.create_transaction(
             self.create_booking(self.court),
-            created=self.time_at(10),
+            created_at=self.time_at(10),
             created_by=self.staff,
         )
         SettlementTransaction.objects.create(
@@ -1138,7 +1138,7 @@ class SettlementImmutabilityFilterPatternTests(SettlementAPITestCase):
         )
         self.t2 = self.create_transaction(
             self.create_booking(self.same_club_other_court),
-            created=self.time_at(16),
+            created_at=self.time_at(16),
             created_by=self.creator,
         )
         SettlementTransaction.objects.create(
@@ -1493,7 +1493,7 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
             self.booking,
             amount=Decimal("800.00"),
             payment_method=Transaction.PaymentMethod.CASH,
-            created=self.time_at(11),
+            created_at=self.time_at(11),
             created_by=self.staff,
             payment_reference="SUM-CASH",
         )
@@ -1501,7 +1501,7 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
             self.booking,
             amount=Decimal("450.00"),
             payment_method=Transaction.PaymentMethod.DIGITAL_WALLET,
-            created=self.time_at(12),
+            created_at=self.time_at(12),
             created_by=self.staff,
             payment_reference="SUM-WALLET",
         )
@@ -1509,21 +1509,21 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
             self.booking,
             amount=Decimal("-100.00"),
             transaction_type=Transaction.Type.REFUND,
-            created=self.time_at(13),
+            created_at=self.time_at(13),
             created_by=self.staff,
             payment_reference="SUM-REFUND",
         )
         self.other_staff_tx = self.create_transaction(
             self.booking,
             amount=Decimal("200.00"),
-            created=self.time_at(14),
+            created_at=self.time_at(14),
             created_by=self.other_staff,
             payment_reference="SUM-OTHER-STAFF",
         )
         self.owner_tx = self.create_transaction(
             self.booking,
             amount=Decimal("500.00"),
-            created=self.time_at(15),
+            created_at=self.time_at(15),
             created_by=self.owner,
             payment_reference="SUM-OWNER",
         )
@@ -1562,14 +1562,14 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
         period_start = staff_row["period_start"]
         if isinstance(period_start, str):
             period_start = parse_datetime(period_start)
-        self.assertEqual(period_start, self.staff_cash.created)
+        self.assertEqual(period_start, self.staff_cash.created_at)
         owner_row = by_id[self.owner.id]
         self.assertTrue(owner_row["is_self"])
         self.assertTrue(owner_row["can_approve"])
 
     def test_old_unsettled_transaction_remains_visible_days_later(self):
         old_created = timezone.now() - timedelta(days=4)
-        Transaction.objects.filter(pk=self.staff_cash.pk).update(created=old_created)
+        Transaction.objects.filter(pk=self.staff_cash.pk).update(created_at=old_created)
         self.staff_cash.refresh_from_db()
         self.client.force_authenticate(user=self.owner)
         response = self.client.get(self.settlement_unsettled_summary_url(self.club))

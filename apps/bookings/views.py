@@ -364,7 +364,7 @@ class BookingAttemptViewSet(
         context = self.get_access_context()
         if context.role == Role.STAFF:
             queryset = queryset.filter(attempted_by=context.user)
-        return queryset.order_by("-created", "-id")
+        return queryset.order_by("-created_at", "-id")
 
     def check_object_permission(self, request, obj) -> bool:
         if self.action == "dismiss":

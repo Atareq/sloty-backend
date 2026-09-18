@@ -100,11 +100,11 @@ class TransactionFilter(django_filters.FilterSet):
 
     def filter_date(self, queryset, name, value):
         start_of_day, end_of_day = day_bounds(value)
-        return queryset.filter(created__gte=start_of_day, created__lt=end_of_day)
+        return queryset.filter(created_at__gte=start_of_day, created_at__lt=end_of_day)
 
     def filter_date_from(self, queryset, name, value):
         start, _date_only = parse_filter_bound(value, field_name="date_from")
-        return queryset.filter(created__gte=start)
+        return queryset.filter(created_at__gte=start)
 
     def filter_date_to(self, queryset, name, value):
         end, date_only = parse_filter_bound(
@@ -112,7 +112,7 @@ class TransactionFilter(django_filters.FilterSet):
             field_name="date_to",
             date_is_end=True,
         )
-        lookup = "created__lt" if date_only else "created__lte"
+        lookup = "created_at__lt" if date_only else "created_at__lte"
         return queryset.filter(**{lookup: end})
 
     def filter_settlement_status(self, queryset, name, value):
@@ -144,8 +144,8 @@ class TransactionFilter(django_filters.FilterSet):
 
     def filter_ordering(self, queryset, name, value):
         if value == "created":
-            return queryset.order_by("created", "id")
-        return queryset.order_by("-created", "-id")
+            return queryset.order_by("created_at", "id")
+        return queryset.order_by("-created_at", "-id")
 
 
 class TransactionAttemptFilter(django_filters.FilterSet):

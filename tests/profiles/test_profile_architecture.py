@@ -198,14 +198,14 @@ def test_parent_and_child_reject_role_change(user):
 
 def test_shared_save_calls_validation_and_preserves_parent_values(user, club):
     staff = StaffProfile.objects.create(user=user, role=Profile.Role.STAFF, club=club)
-    created = staff.created
+    created = staff.created_at
     staff.is_enabled = False
     with patch.object(Profile, "clean", autospec=True, wraps=Profile.clean) as clean:
         staff.save(update_fields=["is_enabled"])
         clean.assert_called_once_with(staff)
     parent = Profile.objects.get(pk=staff.pk)
     assert not parent.is_enabled
-    assert parent.created == created
+    assert parent.created_at == created
     assert parent.role == Profile.Role.STAFF
     assert parent.user_id == user.pk
 

@@ -8,12 +8,13 @@ from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 from phonenumber_field.modelfields import PhoneNumberField
 
+from apps.common.models import TimeStampedModel
 from apps.clubs.models import Club
 from apps.courts.models import Court
 from apps.players.models import ClubPlayer
 
 
-class Booking(models.Model):
+class Booking(TimeStampedModel):
     class Status(models.TextChoices):
         HOLD = "HOLD", _("Hold")
         CONFIRMED = "CONFIRMED", _("Confirmed")
@@ -131,8 +132,6 @@ class Booking(models.Model):
         blank=True,
         null=True,
     )
-    created = models.DateTimeField(auto_now_add=True, db_index=True)
-    modified = models.DateTimeField(auto_now=True)
 
     # Authorization Spine v2 resource-query contract
     # (apps/common/authorization/contracts.py). Booking is an operational
@@ -188,7 +187,7 @@ class Booking(models.Model):
                 name="bookings_bo_court_i_d3b92f_idx",
             ),
             models.Index(fields=["created_by"]),
-            models.Index(fields=["created"]),
+            models.Index(fields=["created_at"]),
             models.Index(fields=["completed_at"]),
             models.Index(fields=["cancelled_at"]),
             models.Index(fields=["no_show_at"]),
@@ -257,7 +256,7 @@ class Booking(models.Model):
             raise ValidationError(errors)
 
 
-class BookingAttempt(models.Model):
+class BookingAttempt(TimeStampedModel):
     class Outcome(models.TextChoices):
         SUCCESS = "SUCCESS", _("Success")
         REJECTED = "REJECTED", _("Rejected")
@@ -314,8 +313,6 @@ class BookingAttempt(models.Model):
         default=Resolution.UNRESOLVED,
         db_index=True,
     )
-    created = models.DateTimeField(auto_now_add=True, db_index=True)
-    modified = models.DateTimeField(auto_now=True)
 
     # Authorization Spine v2 resource-query contract. Boundary is club+court.
     # Staff attempted_by restriction is applied in BookingAttemptViewSet
@@ -371,10 +368,10 @@ class BookingAttempt(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=["club", "created"]),
-            models.Index(fields=["club", "outcome", "created"]),
-            models.Index(fields=["attempted_by", "created"]),
-            models.Index(fields=["court", "created"]),
+            models.Index(fields=["club", "created_at"]),
+            models.Index(fields=["club", "outcome", "created_at"]),
+            models.Index(fields=["attempted_by", "created_at"]),
+            models.Index(fields=["court", "created_at"]),
             models.Index(fields=["club", "requested_start"]),
         ]
 

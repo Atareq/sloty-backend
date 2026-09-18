@@ -522,7 +522,7 @@ class TransactionCreateTests(TransactionAPITestCase):
         self.assertEqual(
             str(transaction_obj.client_request_id), response.data["client_request_id"]
         )
-        self.assertNotEqual(transaction_obj.created, occurred_at)
+        self.assertNotEqual(transaction_obj.created_at, occurred_at)
         self.booking.refresh_from_db()
         self.assertEqual(self.booking.status, Booking.Status.CONFIRMED)
 
@@ -643,7 +643,7 @@ class TransactionCreateTests(TransactionAPITestCase):
         self.assertEqual(len(preview_res["transactions"]), 1)
         self.assertEqual(preview_res["transactions"][0]["id"], transaction_obj.id)
         self.assertEqual(preview_res["net_amount"], Decimal("125.00"))
-        self.assertEqual(preview_res["period_start"], transaction_obj.created)
+        self.assertEqual(preview_res["period_start"], transaction_obj.created_at)
         self.assertNotEqual(preview_res["period_start"], transaction_obj.occurred_at)
 
     def test_revoked_staff_access_cannot_sync_transaction(self):
@@ -1327,14 +1327,14 @@ class TransactionFilterTests(TransactionAPITestCase):
     def test_filter_by_date(self):
         response = self.client.get(
             self.transaction_list_url(self.club),
-            {"date": timezone.localdate(self.transaction_obj.created).isoformat()},
+            {"date": timezone.localdate(self.transaction_obj.created_at).isoformat()},
         )
         self.assertIn(self.transaction_obj.id, self.list_ids(response))
         self.assertNotIn(self.other_transaction.id, self.list_ids(response))
 
     def test_filter_by_date_from_and_date_to(self):
-        date_from = (self.transaction_obj.created - timedelta(minutes=1)).isoformat()
-        date_to = (self.transaction_obj.created + timedelta(minutes=1)).isoformat()
+        date_from = (self.transaction_obj.created_at - timedelta(minutes=1)).isoformat()
+        date_to = (self.transaction_obj.created_at + timedelta(minutes=1)).isoformat()
         response = self.client.get(
             self.transaction_list_url(self.club),
             {"date_from": date_from, "date_to": date_to},
@@ -1367,13 +1367,13 @@ class TransactionFilterTests(TransactionAPITestCase):
             self.booking, payment_reference="AFTER-RANGE"
         )
         Transaction.objects.filter(pk=created_in_range.pk).update(
-            created=selected_start
+            created_at=selected_start
         )
         Transaction.objects.filter(pk=created_late_in_range.pk).update(
-            created=selected_end
+            created_at=selected_end
         )
-        Transaction.objects.filter(pk=created_before.pk).update(created=before)
-        Transaction.objects.filter(pk=created_after.pk).update(created=after)
+        Transaction.objects.filter(pk=created_before.pk).update(created_at=before)
+        Transaction.objects.filter(pk=created_after.pk).update(created_at=after)
         response = self.client.get(
             self.transaction_list_url(self.club),
             {"date_from": "2026-08-17", "date_to": "2026-08-17"},
@@ -1412,12 +1412,12 @@ class TransactionFilterTests(TransactionAPITestCase):
             booking_outside_range, payment_reference="BOOKING-OUT-TX-IN"
         )
         Transaction.objects.filter(pk=transaction_before.pk).update(
-            created=timezone.datetime(
+            created_at=timezone.datetime(
                 2026, 8, 16, 14, 0, tzinfo=timezone.get_current_timezone()
             )
         )
         Transaction.objects.filter(pk=transaction_in_range.pk).update(
-            created=timezone.datetime(
+            created_at=timezone.datetime(
                 2026, 8, 17, 14, 0, tzinfo=timezone.get_current_timezone()
             )
         )
@@ -1506,7 +1506,7 @@ class TransactionFilterTests(TransactionAPITestCase):
         self.client.force_authenticate(user=self.staff)
         response = self.client.get(
             self.transaction_list_url(self.club),
-            {"date": timezone.localdate(staff_transaction.created).isoformat()},
+            {"date": timezone.localdate(staff_transaction.created_at).isoformat()},
         )
         self.assertEqual(self.list_ids(response), {staff_transaction.id})
         self.assertNotIn(self.transaction_obj.id, self.list_ids(response))
@@ -1627,7 +1627,7 @@ class TransactionFilterTests(TransactionAPITestCase):
         second = self.same_club_other_transaction
         shared_created = timezone.now()
         Transaction.objects.filter(pk__in=[first.pk, second.pk]).update(
-            created=shared_created
+            created_at=shared_created
         )
         newest = self.client.get(
             self.transaction_list_url(self.club), {"ordering": "-created"}

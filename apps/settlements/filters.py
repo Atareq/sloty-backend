@@ -31,7 +31,7 @@ class SettlementFilter(django_filters.FilterSet):
         )
 
     def filter_period_from(self, queryset, name, value):
-        return queryset.filter(lines__transaction__created__gte=value).distinct()
+        return queryset.filter(lines__transaction__created_at__gte=value).distinct()
 
     def filter_period_to(self, queryset, name, value):
-        return queryset.filter(lines__transaction__created__lte=value).distinct()
+        return queryset.filter(lines__transaction__created_at__lte=value).distinct()

@@ -155,6 +155,8 @@ class BookingListSerializer(
     BookingLastStatusActorMixin,
     serializers.ModelSerializer,
 ):
+    created = serializers.DateTimeField(source="created_at", read_only=True)
+
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     court_name = serializers.CharField(source="court.name", read_only=True)
     is_recurring = serializers.SerializerMethodField()
@@ -200,6 +202,9 @@ class BookingDetailSerializer(
     BookingLastStatusActorMixin,
     serializers.ModelSerializer,
 ):
+    created = serializers.DateTimeField(source="created_at", read_only=True)
+    modified = serializers.DateTimeField(source="modified_at", read_only=True)
+
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     is_recurring = serializers.SerializerMethodField()
     next_recurring_booking_id = serializers.SerializerMethodField()
@@ -367,6 +372,9 @@ class BookingAttemptListSerializer(
     BookingAttemptStatusMixin,
     serializers.ModelSerializer,
 ):
+    created = serializers.DateTimeField(source="created_at", read_only=True)
+    modified = serializers.DateTimeField(source="modified_at", read_only=True)
+
     court_name = serializers.CharField(source="court.name", read_only=True)
     attempted_by_username = serializers.CharField(
         source="attempted_by.username",

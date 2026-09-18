@@ -220,8 +220,8 @@ def dashboard_bookings_queryset(*, access, date_from, date_to, court=None):
 
 def dashboard_transactions_queryset(*, access, date_from, date_to, court=None):
     queryset = scoped_dashboard_transactions(access).filter(
-        created__gte=date_from,
-        created__lt=date_to,
+        created_at__gte=date_from,
+        created_at__lt=date_to,
         is_cancelled=False,
     )
     if court is not None:
@@ -465,7 +465,7 @@ def current_custody_aggregate_expressions():
 def aggregate_current_custody(queryset):
     summary = queryset.order_by().aggregate(
         **current_custody_aggregate_expressions(),
-        period_start=Min("created"),
+        period_start=Min("created_at"),
     )
     summary["net_amount"] = summary["net_amount"] or ZERO
     summary["booking_payments"] = summary["booking_payments"] or ZERO
@@ -493,7 +493,7 @@ def build_current_custody_collector_rows(queryset):
             booking_refunds=money_sum(
                 "amount", filter=Q(transaction_type=Transaction.Type.REFUND)
             ),
-            period_start=Min("created"),
+            period_start=Min("created_at"),
         )
         .order_by("created_by")
     )
@@ -582,8 +582,8 @@ def get_dashboard_summary(
     )
     transactions = Transaction.objects.filter(
         court__in=courts,
-        created__gte=date_from,
-        created__lt=date_to,
+        created_at__gte=date_from,
+        created_at__lt=date_to,
         is_cancelled=False,
     )
     transactions = apply_transaction_filters(
@@ -858,10 +858,10 @@ def period_label(value):
 
 def trunc_for_group(group_by):
     if group_by == "week":
-        return TruncWeek("created")
+        return TruncWeek("created_at")
     if group_by == "month":
-        return TruncMonth("created")
-    return TruncDate("created")
+        return TruncMonth("created_at")
+    return TruncDate("created_at")
 
 
 def get_revenue_summary(
@@ -985,8 +985,8 @@ def get_court_utilization(*, access, date_from, date_to):
         row["court_id"]: row["total"]
         for row in Transaction.objects.filter(
             court__in=courts,
-            created__gte=date_from,
-            created__lt=date_to,
+            created_at__gte=date_from,
+            created_at__lt=date_to,
             is_cancelled=False,
         )
         .values("court_id")

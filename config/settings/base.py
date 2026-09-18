@@ -70,7 +70,6 @@ DJANGO_APPS = [
 THIRD_PARTY_APPS = [
     "django_extensions",
     "corsheaders",
-    "safedelete",
     "rest_framework",
     "drf_spectacular",
     "rest_framework_simplejwt",

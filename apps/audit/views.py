@@ -42,7 +42,7 @@ class AuditLogViewSet(
         super().initial(request, *args, **kwargs)
 
     def filter_scoped_queryset(self, queryset):
-        return queryset.order_by("-created", "-id")
+        return queryset.order_by("-created_at", "-id")
 
     def get_serializer_class(self):
         if self.action == "list":

@@ -364,7 +364,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             customer_phone="+201055555555",
         )
         Booking.objects.filter(pk=booking.pk).update(
-            created=timezone.now() - timedelta(hours=13)
+            created_at=timezone.now() - timedelta(hours=13)
         )
         access = self.make_access()
 

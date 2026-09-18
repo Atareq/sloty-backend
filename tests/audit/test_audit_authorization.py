@@ -345,7 +345,7 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
             "before_data": self.court_a_log.before_data,
             "after_data": self.court_a_log.after_data,
             "metadata": self.court_a_log.metadata,
-            "created": self.court_a_log.created,
+            "created_at": self.court_a_log.created_at,
         }
         self.client.force_authenticate(user=self.owner)
         list_response = self.client.get(self.audit_list_url(self.club))
@@ -364,4 +364,4 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         self.assertEqual(self.court_a_log.before_data, original["before_data"])
         self.assertEqual(self.court_a_log.after_data, original["after_data"])
         self.assertEqual(self.court_a_log.metadata, original["metadata"])
-        self.assertEqual(self.court_a_log.created, original["created"])
+        self.assertEqual(self.court_a_log.created_at, original["created_at"])

@@ -28,11 +28,11 @@ class AuditLogFilter(django_filters.FilterSet):
     court = django_filters.NumberFilter(field_name="court_id")
     date = django_filters.DateFilter(method="filter_date")
     date_from = django_filters.IsoDateTimeFilter(
-        field_name="created",
+        field_name="created_at",
         lookup_expr="gte",
     )
     date_to = django_filters.IsoDateTimeFilter(
-        field_name="created",
+        field_name="created_at",
         lookup_expr="lte",
     )
     search = django_filters.CharFilter(
@@ -56,7 +56,7 @@ class AuditLogFilter(django_filters.FilterSet):
 
     def filter_date(self, queryset, name, value):
         start_of_day, end_of_day = day_bounds(value)
-        return queryset.filter(created__gte=start_of_day, created__lte=end_of_day)
+        return queryset.filter(created_at__gte=start_of_day, created_at__lte=end_of_day)
 
     def filter_search(self, queryset, name, value):
         cleaned = (value or "").strip()

@@ -130,8 +130,8 @@ class BookingAttemptModelTests(TestCase):
         self.assertEqual(attempt.failure_code, "BOOKING_SLOT_UNAVAILABLE")
         self.assertEqual(attempt.failure_details, {"conflict_type": "BOOKING"})
         self.assertEqual(attempt.resolution, BookingAttempt.Resolution.UNRESOLVED)
-        self.assertIsNotNone(attempt.created)
-        self.assertIsNotNone(attempt.modified)
+        self.assertIsNotNone(attempt.created_at)
+        self.assertIsNotNone(attempt.modified_at)
         self.assertEqual(self.staff_profile.club, attempt.club)
         self.assertEqual(self.court, attempt.court)
         self.assertEqual(self.staff_profile.user, attempt.attempted_by)
@@ -148,7 +148,7 @@ class BookingAttemptModelTests(TestCase):
             customer_phone=booking_customer_display_phone(booking),
             requested_start=booking.start_time,
             requested_end=booking.end_time,
-            requested_at=booking.created,
+            requested_at=booking.created_at,
             requested_source=booking.source,
             requested_recurring=False,
             outcome=BookingAttempt.Outcome.SUCCESS,
@@ -191,7 +191,7 @@ class BookingAttemptModelTests(TestCase):
             notes="Original note",
             requested_start=booking.start_time,
             requested_end=booking.end_time,
-            requested_at=booking.created,
+            requested_at=booking.created_at,
             requested_source=booking.source,
             requested_recurring=False,
             outcome=BookingAttempt.Outcome.SUCCESS,

@@ -30,6 +30,9 @@ class ClubLocationValidationMixin:
 
 
 class ClubListSerializer(serializers.ModelSerializer):
+    created = serializers.DateTimeField(source="created_at", read_only=True)
+    modified = serializers.DateTimeField(source="modified_at", read_only=True)
+
     class Meta:
         model = Club
         fields = (
@@ -46,6 +49,9 @@ class ClubListSerializer(serializers.ModelSerializer):
 
 
 class ClubDetailSerializer(serializers.ModelSerializer):
+    created = serializers.DateTimeField(source="created_at", read_only=True)
+    modified = serializers.DateTimeField(source="modified_at", read_only=True)
+
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:

@@ -523,8 +523,8 @@ class Command(BaseCommand):
                     },
                 )
                 Transaction.objects.filter(pk=transaction_obj.pk).update(
-                    created=created_at + timedelta(minutes=index),
-                    modified=created_at + timedelta(minutes=index),
+                    created_at=created_at + timedelta(minutes=index),
+                    modified_at=created_at + timedelta(minutes=index),
                 )
                 transaction_obj.refresh_from_db()
                 transactions[(club_key, booking_key)] = transaction_obj
@@ -544,8 +544,8 @@ class Command(BaseCommand):
                     },
                 )
                 Transaction.objects.filter(pk=transaction_obj.pk).update(
-                    created=created_at + timedelta(minutes=20),
-                    modified=created_at + timedelta(minutes=20),
+                    created_at=created_at + timedelta(minutes=20),
+                    modified_at=created_at + timedelta(minutes=20),
                 )
                 transaction_obj.refresh_from_db()
                 transactions[("A", "court2_digital")] = transaction_obj

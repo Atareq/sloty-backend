@@ -19,7 +19,7 @@ class TransactionAdmin(admin.ModelAdmin):
         "is_cancelled",
         "cancelled_by",
         "cancelled_at",
-        "created",
+        "created_at",
     )
     list_filter = (
         "payment_method",
@@ -27,7 +27,7 @@ class TransactionAdmin(admin.ModelAdmin):
         "club",
         "court",
         "occurred_at",
-        "created",
+        "created_at",
     )
     search_fields = (
         "client_request_id",
@@ -54,8 +54,8 @@ class TransactionAdmin(admin.ModelAdmin):
         "cancelled_by",
         "cancelled_at",
         "cancellation_reason",
-        "created",
-        "modified",
+        "created_at",
+        "modified_at",
     )
 
 
@@ -76,8 +76,8 @@ class TransactionAttemptAdmin(admin.ModelAdmin):
         "outcome",
         "failure_code",
         "failure_details",
-        "created",
-        "modified",
+        "created_at",
+        "modified_at",
     )
     list_display = (
         "id",
@@ -93,7 +93,7 @@ class TransactionAttemptAdmin(admin.ModelAdmin):
         "attempted_by",
         "client_request_id",
         "occurred_at",
-        "created",
+        "created_at",
     )
     list_filter = (
         "outcome",
@@ -103,7 +103,7 @@ class TransactionAttemptAdmin(admin.ModelAdmin):
         "club",
         "court",
         "occurred_at",
-        "created",
+        "created_at",
     )
     search_fields = (
         "client_request_id",

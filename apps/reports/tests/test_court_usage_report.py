@@ -102,23 +102,23 @@ class CourtUsageReportAPITestCase(APITestCase):
         self.create_transaction(
             self.confirmed,
             amount=Decimal("100.00"),
-            created=self.time_at(day=30),
+            created_at=self.time_at(day=30),
         )
         self.create_transaction(
             self.completed,
             amount=Decimal("450.00"),
-            created=self.time_at(day=8),
+            created_at=self.time_at(day=8),
         )
         self.create_transaction(
             self.no_show,
             amount=Decimal("50.00"),
-            created=self.time_at(day=6),
+            created_at=self.time_at(day=6),
         )
         self.create_transaction(
             self.confirmed,
             amount=Decimal("60.00"),
             is_cancelled=True,
-            created=self.time_at(day=6),
+            created_at=self.time_at(day=6),
         )
 
     def create_user(self, username, **extra_fields):
@@ -193,7 +193,7 @@ class CourtUsageReportAPITestCase(APITestCase):
         return persist_booking(court, **extra_fields)
 
     def create_transaction(self, booking, **extra_fields):
-        created = extra_fields.pop("created", self.time_at(13))
+        created = extra_fields.pop("created_at", self.time_at(13))
         data = {
             "booking": booking,
             "amount": Decimal("100.00"),
@@ -201,7 +201,7 @@ class CourtUsageReportAPITestCase(APITestCase):
         }
         data.update(extra_fields)
         transaction = Transaction.objects.create(**data)
-        Transaction.objects.filter(pk=transaction.pk).update(created=created)
+        Transaction.objects.filter(pk=transaction.pk).update(created_at=created)
         transaction.refresh_from_db()
         return transaction
 

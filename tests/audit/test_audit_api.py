@@ -165,8 +165,8 @@ class AuditModelServiceTests(AuditAPITestCase):
     def test_audit_logs_order_newest_first_by_default(self):
         older = self.create_audit_log(self.club, entity_id=1)
         newer = self.create_audit_log(self.club, entity_id=2)
-        AuditLog.objects.filter(pk=older.pk).update(created=self.time_at(10))
-        AuditLog.objects.filter(pk=newer.pk).update(created=self.time_at(11))
+        AuditLog.objects.filter(pk=older.pk).update(created_at=self.time_at(10))
+        AuditLog.objects.filter(pk=newer.pk).update(created_at=self.time_at(11))
         self.assertEqual(
             list(AuditLog.objects.values_list("id", flat=True)), [newer.id, older.id]
         )
@@ -442,9 +442,9 @@ class AuditFilterRegressionTests(AuditAPITestCase):
             entity_type="Booking",
             entity_id=303,
         )
-        AuditLog.objects.filter(pk=self.booking_log.pk).update(created=self.time_at(10))
+        AuditLog.objects.filter(pk=self.booking_log.pk).update(created_at=self.time_at(10))
         AuditLog.objects.filter(pk=self.transaction_log.pk).update(
-            created=self.time_at(12)
+            created_at=self.time_at(12)
         )
         self.booking_log.refresh_from_db()
         self.transaction_log.refresh_from_db()
@@ -790,7 +790,7 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             created_by=self.staff,
         )
         Transaction.objects.filter(pk=transaction_obj.pk).update(
-            created=self.time_at(22)
+            created_at=self.time_at(22)
         )
         create_response = self.client.post(
             self.settlement_list_url(self.club),

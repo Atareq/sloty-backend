@@ -144,7 +144,7 @@ class ClubPlayerCRUDTests(PlayerAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["display_name"], "Retrieve Player")
         self.assertNotIn("last_used_at", response.data)
-        self.assertNotIn("updated_at", response.data)
+        self.assertNotIn("modified_at", response.data)
 
     def test_patch_club_player_is_rejected(self):
         """
@@ -444,7 +444,7 @@ class PlayerProfileViewSetTests(PlayerAPITestCase):
         self.assertEqual(response.data["recommended_club_player_id"], v2.id)
         for row in response.data["club_player_versions"]:
             self.assertNotIn("last_used_at", row)
-            self.assertNotIn("updated_at", row)
+            self.assertNotIn("modified_at", row)
 
     def test_recommended_id_is_club_player_from_latest_booking(self):
         p = self.create_profile("+201077770008", full_name="Ahmed")
@@ -471,7 +471,7 @@ class PlayerProfileViewSetTests(PlayerAPITestCase):
             total_price=Decimal("300.00"),
         )
         Booking.objects.filter(pk=booking.pk).update(
-            created=timezone.now() - timedelta(hours=1)
+            created_at=timezone.now() - timedelta(hours=1)
         )
         response = self.client.get(self.profile_detail_url(self.club, p.pk))
         self.assertEqual(response.status_code, status.HTTP_200_OK)

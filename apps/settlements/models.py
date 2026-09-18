@@ -3,12 +3,13 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
 
+from apps.common.models import TimeStampedModel
 from apps.clubs.models import Club
 from apps.courts.models import Court
 from apps.transactions.models import Transaction
 
 
-class Settlement(models.Model):
+class Settlement(TimeStampedModel):
     club = models.ForeignKey(
         Club,
         on_delete=models.CASCADE,
@@ -33,7 +34,6 @@ class Settlement(models.Model):
         on_delete=models.SET_NULL,
         related_name="settled_settlements",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
 
     authorization_config = {
         "scopes": {
@@ -68,8 +68,8 @@ class Settlement(models.Model):
         if hasattr(self, "annotated_period_start"):
             return self.annotated_period_start
         return (
-            self.lines.order_by("transaction__created")
-            .values_list("transaction__created", flat=True)
+            self.lines.order_by("transaction__created_at")
+            .values_list("transaction__created_at", flat=True)
             .first()
         )
 
@@ -78,8 +78,8 @@ class Settlement(models.Model):
         if hasattr(self, "annotated_period_end"):
             return self.annotated_period_end
         return (
-            self.lines.order_by("-transaction__created")
-            .values_list("transaction__created", flat=True)
+            self.lines.order_by("-transaction__created_at")
+            .values_list("transaction__created_at", flat=True)
             .first()
         )
 
@@ -91,7 +91,7 @@ class Settlement(models.Model):
             )
 
 
-class SettlementTransaction(models.Model):
+class SettlementTransaction(TimeStampedModel):
     settlement = models.ForeignKey(
         Settlement,
         on_delete=models.CASCADE,
@@ -106,7 +106,6 @@ class SettlementTransaction(models.Model):
         max_digits=10,
         decimal_places=2,
     )
-    created = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [

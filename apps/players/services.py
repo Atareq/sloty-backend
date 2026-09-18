@@ -56,7 +56,7 @@ def get_current_club_player(club, player_profile) -> ClubPlayer | None:
             club_player__player_profile=player_profile,
         )
         .select_related("club_player")
-        .order_by("-created", "-id")
+        .order_by("-created_at", "-id")
         .first()
     )
     if booking is not None:
@@ -75,7 +75,7 @@ def get_current_club_player(club, player_profile) -> ClubPlayer | None:
 def last_used_club_player_id_subquery(club):
     """
     Subquery: ClubPlayer id on the latest Booking for OuterRef PlayerProfile
-    at this club. Recency is Booking.created, not a field on ClubPlayer.
+    at this club. Recency is Booking.created_at, not a field on ClubPlayer.
     """
     from apps.bookings.models import Booking
 
@@ -85,7 +85,7 @@ def last_used_club_player_id_subquery(club):
             club_player_id__isnull=False,
             club_player__player_profile_id=OuterRef("pk"),
         )
-        .order_by("-created", "-id")
+        .order_by("-created_at", "-id")
         .values("club_player_id")[:1]
     )
 
@@ -95,7 +95,7 @@ def get_last_used_club_player(club, player_profile) -> ClubPlayer | None:
     Return the ClubPlayer version last attached to a Booking for this
     (club, player_profile).
 
-    Latest booking is ordered by Booking.created, then id. The booking's
+    Latest booking is ordered by Booking.created_at, then id. The booking's
     club_player.player_profile_id is the match key — that ClubPlayer row
     is the last-used version. Returns None when this person has no
     club-scoped booking with a resolved club_player.
@@ -109,7 +109,7 @@ def get_last_used_club_player(club, player_profile) -> ClubPlayer | None:
             club_player__player_profile=player_profile,
         )
         .select_related("club_player")
-        .order_by("-created", "-id")
+        .order_by("-created_at", "-id")
         .first()
     )
     if booking is None:
@@ -199,5 +199,5 @@ def link_player_to_user(player_profile: PlayerProfile, user) -> PlayerProfile:
                 message="This user account is already linked to a profile.",
             )
         locked_profile.user = user
-        locked_profile.save(update_fields=["user", "updated_at", "modified"])
+        locked_profile.save(update_fields=["user", "modified_at", "modified_at"])
     return locked_profile

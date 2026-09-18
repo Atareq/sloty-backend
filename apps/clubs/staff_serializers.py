@@ -29,7 +29,7 @@ class StaffDetailSerializer(serializers.ModelSerializer):
     club = serializers.PrimaryKeyRelatedField(read_only=True)
     court_ids = serializers.SerializerMethodField()
     courts = serializers.SerializerMethodField()
-    created = serializers.DateTimeField(read_only=True)
+    created = serializers.DateTimeField(source="created_at", read_only=True)
 
     class Meta:
         model = StaffProfile
