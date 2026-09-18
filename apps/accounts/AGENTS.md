@@ -49,6 +49,10 @@ Authentication answers **only** “Who are you?”. It must not decide club/cour
 - `/api/v1/auth/password/change/`: authenticated own-password endpoint. It accepts `current_password`, `new_password`, and `new_password_confirmation`, applies Django validators, and returns `204 No Content`.
 - Auth failure codes: expired access tokens raise `SESSION_EXPIRED`; malformed/expired refresh tokens use `TOKEN_NOT_VALID`; inactive accounts return `USER_INACTIVE`; deleted accounts return `USER_DELETED`; password-hash mismatches return `PASSWORD_CHANGED`.
 
+**CAPTCHA:** `/api/v1/auth/token/` accepts an optional write-only `captcha_token`.
+It is read only when `CAPTCHA_ENABLED` is true, verified **before** credentials,
+and never echoed back. See [`apps/common/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/AGENTS.md) section 6c.
+
 **JWT rule (locked):** Token claims are UX convenience only. They are never authority. Authority is:
 
 ```text

@@ -12,6 +12,7 @@ from rest_framework_simplejwt.serializers import (
 from apps.accounts.models import User
 from apps.clubs.models import Club
 from apps.common.exceptions import SlotyAPIException
+from apps.common.captcha import captcha_enabled, verify_captcha
 from apps.profiles.models import Profile
 
 
@@ -90,6 +91,13 @@ def build_token_claims(*, user, club_slug=None):
 
 class SlotyTokenObtainPairSerializer(TokenObtainPairSerializer):
     club_slug = serializers.SlugField(required=False, allow_blank=True)
+    # Write-only: the token is proof for the provider, never part of the
+    # response and never handed to a service. The field is declared
+    # unconditionally so the OpenAPI schema is stable, but it is only read when
+    # CAPTCHA_ENABLED is true.
+    captcha_token = serializers.CharField(
+        required=False, allow_blank=True, write_only=True
+    )
 
     @classmethod
     def get_token(cls, user):
@@ -100,6 +108,18 @@ class SlotyTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
         club_slug = attrs.pop("club_slug", "")
+        captcha_token = attrs.pop("captcha_token", "")
+
+        # Verified before the credential check so a failed CAPTCHA costs an
+        # attacker a password guess without telling them anything about the
+        # account. Disabled deployments skip this entirely.
+        if captcha_enabled():
+            request = self.context.get("request")
+            verify_captcha(
+                captcha_token,
+                remote_ip=request.META.get("REMOTE_ADDR") if request else None,
+            )
+
         super().validate(attrs)
 
         claims = build_token_claims(user=self.user, club_slug=club_slug or None)

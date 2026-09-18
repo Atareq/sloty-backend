@@ -140,6 +140,31 @@ Rules:
 - Profile migration is complete: Courts, Bookings, Transactions, Settlements, Dashboard, Audit, Reports, Players, and Clubs consume Profile-backed `RequestAccessContext`. Dashboard and Reports are read models using `ClubScopedViewMixin` plus source-domain `scoped_queryset` aggregations. Audit is club-only and matrix-denied to Staff; court/collector scope is not applied to audit rows. Global `ClubViewSet` remains URL-unscoped but Profile-filtered.
 - **Not a presence/activity tracker**: The Spine has no request-level side effects beyond authorization/scoping. There is no heartbeat endpoint.
 
+### 6c. CAPTCHA ([`apps/common/captcha.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/captcha.py))
+
+Off by default (`CAPTCHA_ENABLED=false`). Everything is configured from `.env`.
+
+- **One entry point**: `verify_captcha(token, *, remote_ip)` raises `SlotyAPIException`
+  and returns `None` on success *and* when disabled, so callers invoke it
+  unconditionally. No domain app imports an HTTP client or names a vendor.
+- **Disabled is the cheap path**: no token read, no serializer requirement, no
+  network call. This is the switch operations reaches for during an incident.
+- **Fails closed**: an unreachable provider raises `CAPTCHA_UNAVAILABLE` (503).
+  Letting requests through during a provider outage would turn that outage into
+  an open door; `CAPTCHA_ENABLED=false` is the documented workaround and needs
+  no deploy.
+- **Applied to login only.** It is never applied to public availability — that
+  is a link players are meant to open from a shared URL (see
+  `apps/dashboard/AGENTS.md`, public availability contract).
+- Verified **before** the credential check, so a failed challenge reveals nothing
+  about the account.
+- Codes: `CAPTCHA_REQUIRED` (400), `CAPTCHA_INVALID` (400), `CAPTCHA_UNAVAILABLE` (503).
+- Default provider is Cloudflare Turnstile. `CAPTCHA_MIN_SCORE` applies only to
+  score-based providers (reCAPTCHA v3) and is ignored when the provider returns
+  no score.
+- Uses `urllib` from the standard library; a single POST does not justify a new
+  dependency. Logs only the exception class — never the token, secret, or body.
+
 ### 7. Runtime Release Metadata ([`apps/common/release_metadata.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/release_metadata.py))
 - **Endpoint**: authenticated `GET /api/system/version/` (`IsAuthenticated`, same default as business APIs).
 - **Source of truth**: `/etc/sloty/backend-release.json` written on the host after a successful production deploy and health check. Not GitHub, not `master`, not `.git`, and not the database.
@@ -164,6 +189,7 @@ Rules:
   - `test_base_permission_and_matrix.py`: Matrix verification, default deny, custom actions, object permission hook.
   - `test_scoped_resources.py`: Model configuration, club/court/future scoping, fail-closed behavior, relation loading, and DRF ViewSet composition.
   - `test_egypt_locations.py` / `test_locations_api.py`: Choice validation and API endpoint.
+  - `test_captcha.py`: Disabled no-op path, each failure mode, fail-closed provider outage, score threshold, and login integration.
   - `test_version_api.py`: Runtime release metadata endpoint.
   - `test_sql_query_stats_middleware.py`: Middleware counting and threshold logging.
 - Deployment/release metadata tests: [`tests/deploy/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/deploy/).
