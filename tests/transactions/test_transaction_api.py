@@ -489,6 +489,7 @@ class TransactionCreateTests(TransactionAPITestCase):
         self.assertEqual(response.data["amount"], "100.00")
 
     def test_first_payment_must_meet_court_minimum_deposit(self):
+        # No working-hour prices on this court yet, so any deposit is allowed.
         self.court.minimum_deposit = Decimal("75.00")
         self.court.save(update_fields=["minimum_deposit"])
         self.client.force_authenticate(user=self.platform_admin)

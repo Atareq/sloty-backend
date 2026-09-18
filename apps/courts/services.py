@@ -183,6 +183,58 @@ def get_court_pricing_summary(court):
     return cached
 
 
+def lowest_working_hour_price_for_court(court):
+    """
+    Return the minimum CourtWorkingHourPricePeriod.price for ``court``, or
+    None when the court has no configured working-hour prices yet.
+    """
+    if getattr(court, "pk", None) is None:
+        return None
+    cached = getattr(court, "_prefetched_objects_cache", None)
+    if cached is not None and "working_hours" in cached:
+        return get_court_pricing_summary(court)["minimum_slot_price"]
+    return (
+        CourtWorkingHourPricePeriod.objects.filter(working_hour__court_id=court.pk)
+        .order_by("price")
+        .values_list("price", flat=True)
+        .first()
+    )
+
+
+def lowest_price_from_weekly_payload(working_hours):
+    prices = [
+        period["price"]
+        for row in working_hours
+        for period in row.get("pricing_periods", [])
+    ]
+    return min(prices) if prices else None
+
+
+def validate_minimum_deposit_against_lowest_price(
+    *,
+    minimum_deposit,
+    lowest_price,
+    field="minimum_deposit",
+):
+    """
+    Enforce: minimum_deposit >= MIN(configured working-hour prices).
+
+    When ``lowest_price`` is None (no pricing configured yet), the invariant
+    is not enforceable and validation is a no-op.
+    """
+    if lowest_price is None:
+        return
+    if minimum_deposit < lowest_price:
+        raise coded_error(
+            field,
+            _(
+                "Minimum deposit cannot be lower than the court's lowest "
+                "working-hour price."
+            ),
+            "MINIMUM_DEPOSIT_BELOW_LOWEST_WORKING_HOUR_PRICE",
+        )
+
+
 def validate_slot_duration_against_pricing(court, slot_duration_minutes):
     for working_hour in court.working_hours.all():
         periods = list(working_hour.pricing_periods.all())
@@ -226,6 +278,11 @@ def replace_weekly_working_hours(*, court, working_hours):
         validate_weekly_working_hours_payload(
             court=locked_court,
             working_hours=working_hours,
+        )
+        validate_minimum_deposit_against_lowest_price(
+            minimum_deposit=locked_court.minimum_deposit,
+            lowest_price=lowest_price_from_weekly_payload(working_hours),
+            field="pricing_periods",
         )
         for weekday in CourtWorkingHour.Weekday.values:
             row = by_weekday.get(

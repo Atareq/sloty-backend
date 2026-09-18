@@ -10,6 +10,11 @@
 - **Pricing Periods as Price Authority**:
   - `Court.default_price` is legacy migration data and must never be used for slot generation, new booking creation, or rescheduling price calculation.
   - Pricing is defined exclusively by child `CourtWorkingHourPricePeriod` rows tied to `CourtWorkingHour`.
+- **Minimum Deposit vs. Lowest Working-Hour Price**:
+  - When a court has any configured working-hour prices, `Court.minimum_deposit` must be `>=` the minimum `CourtWorkingHourPricePeriod.price` across **all** weekdays for that court.
+  - Enforced on Court update (`Court.clean` + `CourtUpdateSerializer`), weekly working-hours replacement (`replace_weekly_working_hours`), and individual price-period `full_clean()`.
+  - If the court has no working-hour prices yet, the invariant is not enforceable and existing create/configure behavior is preserved.
+  - Other courts' prices never affect this court.
 - **Contiguous Operating Hours**:
   - Every open weekday must have contiguous, non-overlapping pricing periods aligned with `Court.slot_duration_minutes`.
   - A weekday with no pricing periods represents a closed day.
@@ -26,7 +31,7 @@
 - [`Court`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/models.py):
   - `slot_duration_minutes`: Grid interval for slots (default 60).
   - `requires_digital_payment_reference`: Policy flag requiring reference for digital payments.
-  - `minimum_deposit`: Minimum required first payment and late-cancellation retained amount.
+  - `minimum_deposit`: Minimum required first payment and late-cancellation retained amount. Must not be lower than the court's lowest working-hour price once pricing exists (see Domain Invariants).
   - `internal_hold_expiry_hours`: Duration before unconfirmed `HOLD` bookings become eligible for expiry (default 12).
   - `cancellation_refund_notice_days`: Notice window required for full cancellation refund (null = unconfigured; 0 = until start).
 - [`CourtWorkingHour`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/models.py):
@@ -40,7 +45,8 @@
   - `calculate_booking_price()`: Calculates agreed booking price from working-hour pricing periods.
   - `time_to_minutes()` / `datetime_for_local_date()`: Enforces timezone-aware Cairo time and midnight end conversions.
 - [`apps/courts/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/services.py):
-  - `replace_weekly_working_hours()`: Replaces all working hours and pricing periods for a court atomically.
+  - `replace_weekly_working_hours()`: Replaces all working hours and pricing periods for a court atomically. Also enforces `minimum_deposit >=` the lowest price in the proposed weekly payload.
+  - `validate_minimum_deposit_against_lowest_price()` / `lowest_working_hour_price_for_court()`: Shared helpers for the deposit-vs-pricing invariant.
 
 ## API Boundaries & Key Invariants
 

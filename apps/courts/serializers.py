@@ -6,6 +6,7 @@ from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePer
 from apps.courts.services import (
     get_court_pricing_summary,
     pricing_configured_for_court,
+    validate_minimum_deposit_against_lowest_price,
     validate_slot_duration_against_pricing,
 )
 
@@ -251,6 +252,12 @@ class CourtUpdateSerializer(serializers.ModelSerializer):
             validate_positive(
                 attrs["internal_hold_expiry_hours"],
                 "internal_hold_expiry_hours",
+            )
+        if "minimum_deposit" in attrs:
+            validate_minimum_deposit_against_lowest_price(
+                minimum_deposit=attrs["minimum_deposit"],
+                lowest_price=get_court_pricing_summary(court)["minimum_slot_price"],
+                field="minimum_deposit",
             )
 
         return attrs
