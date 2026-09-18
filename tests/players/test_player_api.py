@@ -32,7 +32,7 @@ from apps.clubs.models import Club
 from apps.courts.models import Court
 from apps.players.models import ClubPlayer, PlayerProfile
 from apps.profiles.models import Profile
-from tests.profile_factories import grant_owner_club, grant_staff_courts
+from tests.profile_factories import grant_admin, grant_owner_club, grant_staff_courts
 
 
 class PlayerAPITestCase(APITestCase):
@@ -143,7 +143,8 @@ class ClubPlayerCRUDTests(PlayerAPITestCase):
         response = self.client.get(self.player_detail_url(self.club, cp.pk))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["display_name"], "Retrieve Player")
-        self.assertNotIn("last_used_at", response.data)
+        self.assertIn("last_used_at", response.data)
+        self.assertIsNone(response.data["last_used_at"])
         self.assertNotIn("updated_at", response.data)
 
     def test_patch_club_player_is_rejected(self):
@@ -236,6 +237,99 @@ class ClubPlayerRoleTests(PlayerAPITestCase):
     def test_staff_can_create_club_player(self):
         response = self._create_player(self.staff, "+201033331003", "Staff Player")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_admin_can_list_players_for_unowned_club(self):
+        admin_user = self.create_user("role-admin")
+        grant_admin(admin_user)
+        # Verify no ownership relationship exists for admin
+        self.assertFalse(hasattr(admin_user.profile, "owner_profile"))
+
+        other_club = self.create_club("Admin Other Club", slug="admin-other-club")
+        p_target = self.create_profile("+201033332001", full_name="Target Player")
+        p_other = self.create_profile("+201033332002", full_name="Other Player")
+        cp_target = self.create_club_player(self.club, p_target, "Target Player")
+        cp_other = self.create_club_player(other_club, p_other, "Other Player")
+
+        self.client.force_authenticate(user=admin_user)
+        response = self.client.get(self.player_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [r["id"] for r in response.data["results"]]
+        self.assertIn(cp_target.id, ids)
+        self.assertNotIn(cp_other.id, ids)
+        self.assertEqual(response.data["count"], 1)
+
+    def test_staff_can_list_assigned_club_players_and_is_denied_other_club(self):
+        other_club = self.create_club("Staff Other Club", slug="staff-other-club")
+        other_owner = self.create_user("staff-other-owner")
+        grant_owner_club(other_owner, other_club)
+
+        p_assigned = self.create_profile("+201033333001", full_name="Assigned Player")
+        p_other = self.create_profile("+201033333002", full_name="Other Club Player")
+        cp_assigned = self.create_club_player(self.club, p_assigned, "Assigned Player")
+        cp_other = self.create_club_player(other_club, p_other, "Other Club Player")
+
+        self.client.force_authenticate(user=self.staff)
+
+        # 1. Staff can list their assigned club players
+        response = self.client.get(self.player_list_url(self.club))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [r["id"] for r in response.data["results"]]
+        self.assertIn(cp_assigned.id, ids)
+        self.assertNotIn(cp_other.id, ids)
+
+        # 2. Staff is denied access to other club's players (403 CLUB_ACCESS_REVOKED)
+        other_response = self.client.get(self.player_list_url(other_club))
+        self.assertEqual(other_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(other_response.data["success"])
+        self.assertEqual(other_response.data["code"], "CLUB_ACCESS_REVOKED")
+        self.assertEqual(
+            other_response.data.get("details"),
+            {"club_slug": other_club.slug},
+        )
+        self.assertNotIn(str(cp_other.id), str(other_response.data))
+
+    def test_disabled_owner_profile_cannot_list_players(self):
+        disabled_owner = self.create_user("disabled-owner")
+        owner_profile = grant_owner_club(disabled_owner, self.club)
+        owner_profile.is_enabled = False
+        owner_profile.save(update_fields=["is_enabled"])
+
+        p = self.create_profile("+201033334001", full_name="Secret Player")
+        cp = self.create_club_player(self.club, p, "Secret Player")
+
+        self.client.force_authenticate(user=disabled_owner)
+        response = self.client.get(self.player_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "CLUB_ACCESS_REVOKED")
+        self.assertEqual(
+            response.data.get("details"),
+            {"club_slug": self.club.slug},
+        )
+        self.assertNotIn(str(cp.id), str(response.data))
+
+    def test_disabled_staff_profile_cannot_list_players(self):
+        disabled_staff = self.create_user("disabled-staff")
+        staff_profile = grant_staff_courts(disabled_staff, self.club)
+        staff_profile.is_enabled = False
+        staff_profile.save(update_fields=["is_enabled"])
+
+        p = self.create_profile("+201033334002", full_name="Secret Staff Player")
+        cp = self.create_club_player(self.club, p, "Secret Staff Player")
+
+        self.client.force_authenticate(user=disabled_staff)
+        response = self.client.get(self.player_list_url(self.club))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(response.data["code"], "CLUB_ACCESS_REVOKED")
+        self.assertEqual(
+            response.data.get("details"),
+            {"club_slug": self.club.slug},
+        )
+        self.assertNotIn(str(cp.id), str(response.data))
 
 
 class ClubPlayerSamePhoneTwoClubsTests(PlayerAPITestCase):
@@ -375,6 +469,244 @@ class ClubPlayerFilterTests(PlayerAPITestCase):
         ids = [r["id"] for r in response.data["results"]]
         self.assertIn(self.cp1.id, ids)
         self.assertNotIn(self.cp2.id, ids)
+
+    def test_search_by_egyptian_local_phone(self):
+        url = self.player_list_url(self.club) + "?search=01066661001"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [r["id"] for r in response.data["results"]]
+        self.assertIn(self.cp1.id, ids)
+        self.assertNotIn(self.cp2.id, ids)
+
+
+class ClubPlayerOrderingTests(PlayerAPITestCase):
+    """
+    Tests for ordering ClubPlayer list results by last_used_at and created_at.
+    """
+
+    def setUp(self):
+        self.owner = self.create_user("ordering-owner")
+        self.club = self.create_club("Ordering Club", slug="ordering-club")
+        grant_owner_club(self.owner, self.club)
+        self.client.force_authenticate(user=self.owner)
+
+        self.court = Court.objects.create(
+            club=self.club,
+            name="Ordering Court",
+            default_price=Decimal("300.00"),
+            slot_duration_minutes=60,
+        )
+
+        self.p_new = self.create_profile("+201012345678", full_name="Newest Used")
+        self.cp_new = self.create_club_player(
+            self.club, self.p_new, "Ahmed H.", player_number=15
+        )
+
+        self.p_old = self.create_profile("+201012345679", full_name="Oldest Used")
+        self.cp_old = self.create_club_player(
+            self.club, self.p_old, "Ahmed Hassan", player_number=11
+        )
+
+        self.p_unused = self.create_profile("+201012345680", full_name="Never Used")
+        self.cp_unused = self.create_club_player(
+            self.club, self.p_unused, "Ahmed Unused", player_number=20
+        )
+
+        self.time_old = timezone.now() - timedelta(days=10)
+        self.time_new = timezone.now() - timedelta(days=1)
+
+        b_old = Booking.objects.create(
+            club=self.club,
+            court=self.court,
+            club_player=self.cp_old,
+            start_time=self.time_old,
+            end_time=self.time_old + timedelta(hours=1),
+            total_price=Decimal("300.00"),
+        )
+        Booking.objects.filter(pk=b_old.pk).update(created=self.time_old)
+
+        b_new_earlier = Booking.objects.create(
+            club=self.club,
+            court=self.court,
+            club_player=self.cp_new,
+            start_time=self.time_old + timedelta(days=1),
+            end_time=self.time_old + timedelta(days=1, hours=1),
+            total_price=Decimal("300.00"),
+        )
+        Booking.objects.filter(pk=b_new_earlier.pk).update(
+            created=self.time_old + timedelta(days=1)
+        )
+
+        b_new_latest = Booking.objects.create(
+            club=self.club,
+            court=self.court,
+            club_player=self.cp_new,
+            start_time=self.time_new,
+            end_time=self.time_new + timedelta(hours=1),
+            total_price=Decimal("300.00"),
+        )
+        Booking.objects.filter(pk=b_new_latest.pk).update(created=self.time_new)
+
+    def test_last_used_at_is_latest_booking_for_that_club_player(self):
+        """1. last_used_at is the latest Booking for that ClubPlayer."""
+        response = self.client.get(self.player_detail_url(self.club, self.cp_new.pk))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(response.data["last_used_at"])
+        from django.utils.dateparse import parse_datetime
+
+        parsed = parse_datetime(response.data["last_used_at"])
+        self.assertEqual(parsed, self.time_new)
+
+    def test_order_by_desc_last_used_at_returns_newest_used_first(self):
+        """2. order_by=-last_used_at returns newest-used first."""
+        url = self.player_list_url(self.club) + "?order_by=-last_used_at"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data["results"]
+        ids = [r["id"] for r in results]
+        self.assertEqual(ids[:2], [self.cp_new.id, self.cp_old.id])
+
+    def test_order_by_asc_last_used_at_returns_oldest_used_first(self):
+        """3. order_by=last_used_at works."""
+        url = self.player_list_url(self.club) + "?order_by=last_used_at"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data["results"]
+        ids = [r["id"] for r in results]
+        self.assertEqual(ids[:2], [self.cp_old.id, self.cp_new.id])
+
+    def test_never_used_players_returned_and_sorted_after_used_players_desc(self):
+        """4. Never-used ClubPlayers sort after used players when descending."""
+        url = self.player_list_url(self.club) + "?order_by=-last_used_at"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data["results"]
+        ids = [r["id"] for r in results]
+        self.assertIn(self.cp_unused.id, ids)
+        unused_index = ids.index(self.cp_unused.id)
+        self.assertGreater(unused_index, ids.index(self.cp_new.id))
+        self.assertGreater(unused_index, ids.index(self.cp_old.id))
+        unused_item = next(r for r in results if r["id"] == self.cp_unused.id)
+        self.assertIsNone(unused_item["last_used_at"])
+
+    def test_booking_belonging_to_another_club_player_does_not_affect_value(self):
+        """5. A Booking belonging to another ClubPlayer does not affect the value."""
+        response = self.client.get(self.player_detail_url(self.club, self.cp_unused.pk))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["last_used_at"])
+
+        other_club = self.create_club("Other Ordering Club", slug="other-ordering-club")
+        other_court = Court.objects.create(
+            club=other_club,
+            name="Other Court",
+            default_price=Decimal("300.00"),
+            slot_duration_minutes=60,
+        )
+        Booking.objects.create(
+            club=other_club,
+            court=other_court,
+            club_player=self.cp_unused,
+            start_time=timezone.now(),
+            end_time=timezone.now() + timedelta(hours=1),
+            total_price=Decimal("300.00"),
+        )
+        response = self.client.get(self.player_detail_url(self.club, self.cp_unused.pk))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["last_used_at"])
+
+    def test_search_by_phone_and_order_by_last_used_at_together(self):
+        """6. Search by phone + order_by=-last_used_at works together."""
+        url = (
+            self.player_list_url(self.club)
+            + "?search=0101234567&order_by=-last_used_at"
+        )
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [r["id"] for r in response.data["results"]]
+        self.assertEqual(ids, [self.cp_new.id, self.cp_old.id])
+        self.assertNotIn(self.cp_unused.id, ids)
+
+        url_exact = (
+            self.player_list_url(self.club)
+            + "?search=01012345678&order_by=-last_used_at"
+        )
+        resp_exact = self.client.get(url_exact)
+        self.assertEqual(resp_exact.status_code, status.HTTP_200_OK)
+        ids_exact = [r["id"] for r in resp_exact.data["results"]]
+        self.assertEqual(ids_exact, [self.cp_new.id])
+        self.assertEqual(
+            resp_exact.data["results"][0]["last_used_at"],
+            response.data["results"][0]["last_used_at"],
+        )
+
+    def test_order_by_created_at_and_desc_created_at(self):
+        """Order by created_at and -created_at works."""
+        url_asc = self.player_list_url(self.club) + "?order_by=created_at"
+        resp_asc = self.client.get(url_asc)
+        self.assertEqual(resp_asc.status_code, status.HTTP_200_OK)
+        ids_asc = [r["id"] for r in resp_asc.data["results"]]
+        self.assertEqual(ids_asc, [self.cp_new.id, self.cp_old.id, self.cp_unused.id])
+
+        url_desc = self.player_list_url(self.club) + "?order_by=-created_at"
+        resp_desc = self.client.get(url_desc)
+        self.assertEqual(resp_desc.status_code, status.HTTP_200_OK)
+        ids_desc = [r["id"] for r in resp_desc.data["results"]]
+        self.assertEqual(ids_desc, [self.cp_unused.id, self.cp_old.id, self.cp_new.id])
+
+    def test_unallowed_ordering_fields_fall_back_to_default(self):
+        """Arbitrary fields in order_by are ignored and do not cause errors."""
+        url = self.player_list_url(self.club) + "?order_by=player_number"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [r["id"] for r in response.data["results"]]
+        self.assertEqual(ids, sorted(ids))
+
+
+class ClubPlayerPaginationTests(PlayerAPITestCase):
+    """ClubPlayer list pagination obeys standard DRF PageNumberPagination."""
+
+    def setUp(self):
+        self.owner = self.create_user("page-owner")
+        self.club = self.create_club("Page Club", slug="page-club")
+        grant_owner_club(self.owner, self.club)
+        self.client.force_authenticate(user=self.owner)
+
+    def test_pagination_over_20_records(self):
+        created_cps = []
+        for i in range(1, 26):
+            profile = self.create_profile(f"+20108888{i:04d}", full_name=f"Player {i}")
+            cp = self.create_club_player(
+                self.club, profile, display_name=f"Player {i}", player_number=i
+            )
+            created_cps.append(cp)
+
+        # Page 1
+        url = self.player_list_url(self.club)
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 25)
+        self.assertIsNone(response.data["previous"])
+        self.assertIsNotNone(response.data["next"])
+        self.assertIn("page=2", response.data["next"])
+        self.assertEqual(len(response.data["results"]), 20)
+
+        page_1_ids = [r["id"] for r in response.data["results"]]
+
+        # Page 2
+        response_p2 = self.client.get(response.data["next"])
+        self.assertEqual(response_p2.status_code, status.HTTP_200_OK)
+        self.assertEqual(response_p2.data["count"], 25)
+        self.assertIsNotNone(response_p2.data["previous"])
+        self.assertIsNone(response_p2.data["next"])
+        self.assertEqual(len(response_p2.data["results"]), 5)
+
+        page_2_ids = [r["id"] for r in response_p2.data["results"]]
+
+        all_ids = set(page_1_ids + page_2_ids)
+        expected_ids = {cp.id for cp in created_cps}
+        self.assertEqual(all_ids, expected_ids)
+        self.assertEqual(len(page_1_ids) + len(page_2_ids), 25)
+        self.assertTrue(set(page_1_ids).isdisjoint(set(page_2_ids)))
 
 
 class PlayerProfileViewSetTests(PlayerAPITestCase):

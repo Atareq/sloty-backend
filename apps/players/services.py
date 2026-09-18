@@ -90,6 +90,23 @@ def last_used_club_player_id_subquery(club):
     )
 
 
+def last_used_at_subquery(club):
+    """
+    Subquery: created datetime on the latest Booking for OuterRef ClubPlayer
+    at this club. Recency is Booking.created, not a field on ClubPlayer.
+    """
+    from apps.bookings.models import Booking
+
+    return Subquery(
+        Booking.objects.filter(
+            club=club,
+            club_player_id=OuterRef("pk"),
+        )
+        .order_by("-created", "-id")
+        .values("created")[:1]
+    )
+
+
 def get_last_used_club_player(club, player_profile) -> ClubPlayer | None:
     """
     Return the ClubPlayer version last attached to a Booking for this

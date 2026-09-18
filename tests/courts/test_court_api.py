@@ -308,12 +308,8 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         self.other_club = self.create_club("Other Hours Club", slug="other-hours-club")
         grant_owner_club(self.owner, self.club)
         grant_owner_club(self.other_owner, self.other_club)
-        self.court = self.create_court(
-            self.club, "Hours Court", minimum_deposit=Decimal("300.00")
-        )
-        self.other_court = self.create_court(
-            self.other_club, "Other Hours Court", minimum_deposit=Decimal("300.00")
-        )
+        self.court = self.create_court(self.club, "Hours Court")
+        self.other_court = self.create_court(self.other_club, "Other Hours Court")
 
     def post_hours(self, club, court, **extra_fields):
         data = {
@@ -869,7 +865,7 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
 
 class CourtMinimumDepositPricingInvariantTests(CourtAPITestCase):
     """
-    minimum_deposit >= MIN(all CourtWorkingHourPricePeriod.price for that court).
+    0 <= minimum_deposit <= MIN(all CourtWorkingHourPricePeriod.price for that court).
     """
 
     def setUp(self):
@@ -906,7 +902,41 @@ class CourtMinimumDepositPricingInvariantTests(CourtAPITestCase):
             )
         return {"working_hours": rows}
 
-    def test_minimum_deposit_equal_to_lowest_price_passes(self):
+    def test_deposit_zero_allowed_when_lowest_price_200(self):
+        self.seed_multi_day_prices(
+            self.court,
+            {
+                CourtWorkingHour.Weekday.MONDAY: "200.00",
+                CourtWorkingHour.Weekday.TUESDAY: "250.00",
+            },
+        )
+        response = self.client.patch(
+            self.court_detail_url(self.club, self.court),
+            {"minimum_deposit": "0.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.court.refresh_from_db()
+        self.assertEqual(self.court.minimum_deposit, Decimal("0.00"))
+
+    def test_deposit_below_lowest_price_allowed(self):
+        self.seed_multi_day_prices(
+            self.court,
+            {
+                CourtWorkingHour.Weekday.MONDAY: "200.00",
+                CourtWorkingHour.Weekday.TUESDAY: "300.00",
+            },
+        )
+        response = self.client.patch(
+            self.court_detail_url(self.club, self.court),
+            {"minimum_deposit": "100.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.court.refresh_from_db()
+        self.assertEqual(self.court.minimum_deposit, Decimal("100.00"))
+
+    def test_deposit_equal_to_lowest_price_allowed(self):
         self.seed_multi_day_prices(
             self.court,
             {
@@ -925,24 +955,7 @@ class CourtMinimumDepositPricingInvariantTests(CourtAPITestCase):
         self.court.refresh_from_db()
         self.assertEqual(self.court.minimum_deposit, Decimal("200.00"))
 
-    def test_minimum_deposit_above_lowest_price_passes(self):
-        self.seed_multi_day_prices(
-            self.court,
-            {
-                CourtWorkingHour.Weekday.MONDAY: "200.00",
-                CourtWorkingHour.Weekday.TUESDAY: "300.00",
-            },
-        )
-        response = self.client.patch(
-            self.court_detail_url(self.club, self.court),
-            {"minimum_deposit": "250.00"},
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.court.refresh_from_db()
-        self.assertEqual(self.court.minimum_deposit, Decimal("250.00"))
-
-    def test_minimum_deposit_below_lowest_price_fails(self):
+    def test_deposit_above_lowest_price_fails(self):
         self.seed_multi_day_prices(
             self.court,
             {
@@ -953,16 +966,97 @@ class CourtMinimumDepositPricingInvariantTests(CourtAPITestCase):
         )
         response = self.client.patch(
             self.court_detail_url(self.club, self.court),
-            {"minimum_deposit": "199.00"},
+            {"minimum_deposit": "201.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(
+            response.data["code"],
+            "MINIMUM_DEPOSIT_ABOVE_LOWEST_WORKING_HOUR_PRICE",
+        )
+        self.assertEqual(
+            response.data["message"],
+            "الحد الأدنى للعربون لا يمكن أن يزيد عن 200 ج.م، لأنه أقل سعر حجز للملعب.",
+        )
+        self.assertEqual(
+            response.data.get("details"),
+            {"lowest_working_hour_price": 200, "currency": "EGP"},
+        )
+        self.assertNotIn("lowest working-hour price", str(response.data))
+        self.court.refresh_from_db()
+        self.assertEqual(self.court.minimum_deposit, Decimal("0.00"))
+
+    def test_deposit_above_lowest_price_dynamic_arabic_message_150(self):
+        self.seed_multi_day_prices(
+            self.court,
+            {
+                CourtWorkingHour.Weekday.MONDAY: "150.00",
+                CourtWorkingHour.Weekday.TUESDAY: "250.00",
+            },
+        )
+        response = self.client.patch(
+            self.court_detail_url(self.club, self.court),
+            {"minimum_deposit": "151.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data["success"])
+        self.assertEqual(
+            response.data["code"],
+            "MINIMUM_DEPOSIT_ABOVE_LOWEST_WORKING_HOUR_PRICE",
+        )
+        expected_message = (
+            "الحد الأدنى للعربون لا يمكن أن يزيد عن 150 ج.م، لأنه أقل سعر حجز للملعب."
+        )
+        self.assertEqual(response.data["message"], expected_message)
+        self.assertIn("150", response.data["message"])
+        self.assertNotIn("200", response.data["message"])
+        self.assertEqual(
+            response.data.get("details"),
+            {"lowest_working_hour_price": 150, "currency": "EGP"},
+        )
+        self.assertNotIn("lowest working-hour price", str(response.data))
+
+    def test_deposit_zero_allowed_when_lowest_price_zero(self):
+        self.seed_multi_day_prices(
+            self.court,
+            {
+                CourtWorkingHour.Weekday.MONDAY: "0.00",
+                CourtWorkingHour.Weekday.TUESDAY: "100.00",
+            },
+        )
+        response = self.client.patch(
+            self.court_detail_url(self.club, self.court),
+            {"minimum_deposit": "0.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.court.refresh_from_db()
+        self.assertEqual(self.court.minimum_deposit, Decimal("0.00"))
+
+    def test_positive_deposit_rejected_when_lowest_price_zero(self):
+        self.seed_multi_day_prices(
+            self.court,
+            {
+                CourtWorkingHour.Weekday.MONDAY: "0.00",
+                CourtWorkingHour.Weekday.TUESDAY: "100.00",
+            },
+        )
+        response = self.client.patch(
+            self.court_detail_url(self.club, self.court),
+            {"minimum_deposit": "1.00"},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(
-            self.field_error_code(response, "minimum_deposit"),
-            "MINIMUM_DEPOSIT_BELOW_LOWEST_WORKING_HOUR_PRICE",
+            response.data["code"],
+            "MINIMUM_DEPOSIT_ABOVE_LOWEST_WORKING_HOUR_PRICE",
         )
-        self.court.refresh_from_db()
-        self.assertEqual(self.court.minimum_deposit, Decimal("0.00"))
+        self.assertEqual(
+            response.data.get("details"),
+            {"lowest_working_hour_price": 0, "currency": "EGP"},
+        )
 
     def test_no_working_hour_prices_allows_any_non_negative_deposit(self):
         response = self.client.patch(
@@ -974,14 +1068,14 @@ class CourtMinimumDepositPricingInvariantTests(CourtAPITestCase):
         self.court.refresh_from_db()
         self.assertEqual(self.court.minimum_deposit, Decimal("50.00"))
 
-    def test_weekly_put_rejects_prices_that_raise_lowest_above_deposit(self):
+    def test_weekly_put_rejects_prices_that_lower_lowest_below_deposit(self):
         self.court.minimum_deposit = Decimal("200.00")
         self.court.save(update_fields=["minimum_deposit"])
         response = self.client.put(
             self.nested_working_hour_url(self.club, self.court),
             self.weekly_payload_for_prices(
                 {
-                    CourtWorkingHour.Weekday.MONDAY: "250.00",
+                    CourtWorkingHour.Weekday.MONDAY: "199.00",
                     CourtWorkingHour.Weekday.FRIDAY: "300.00",
                 }
             ),
@@ -989,8 +1083,12 @@ class CourtMinimumDepositPricingInvariantTests(CourtAPITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(
-            self.field_error_code(response, "pricing_periods"),
-            "MINIMUM_DEPOSIT_BELOW_LOWEST_WORKING_HOUR_PRICE",
+            response.data["code"],
+            "MINIMUM_DEPOSIT_ABOVE_LOWEST_WORKING_HOUR_PRICE",
+        )
+        self.assertEqual(
+            response.data.get("details"),
+            {"lowest_working_hour_price": 199, "currency": "EGP"},
         )
         self.assertFalse(
             CourtWorkingHourPricePeriod.objects.filter(
@@ -998,7 +1096,7 @@ class CourtMinimumDepositPricingInvariantTests(CourtAPITestCase):
             ).exists()
         )
 
-    def test_weekly_put_accepts_prices_when_deposit_covers_lowest(self):
+    def test_weekly_put_accepts_prices_when_deposit_does_not_exceed_lowest(self):
         self.court.minimum_deposit = Decimal("200.00")
         self.court.save(update_fields=["minimum_deposit"])
         response = self.client.put(
@@ -1020,6 +1118,55 @@ class CourtMinimumDepositPricingInvariantTests(CourtAPITestCase):
         )
         self.assertEqual(min(prices), Decimal("200.00"))
 
+    def test_weekly_put_allows_configuring_pricing_when_court_deposit_is_zero(self):
+        # Default court creation has minimum_deposit = 0.00.
+        # Adding working hours with positive prices must succeed.
+        self.assertEqual(self.court.minimum_deposit, Decimal("0.00"))
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload_for_prices(
+                {
+                    CourtWorkingHour.Weekday.MONDAY: "200.00",
+                    CourtWorkingHour.Weekday.FRIDAY: "250.00",
+                }
+            ),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        prices = list(
+            CourtWorkingHourPricePeriod.objects.filter(
+                working_hour__court=self.court
+            ).values_list("price", flat=True)
+        )
+        self.assertEqual(min(prices), Decimal("200.00"))
+
+    def test_unrelated_court_updates_pass_when_deposit_is_zero(self):
+        self.seed_multi_day_prices(
+            self.court,
+            {
+                CourtWorkingHour.Weekday.MONDAY: "200.00",
+                CourtWorkingHour.Weekday.TUESDAY: "300.00",
+            },
+        )
+        self.assertEqual(self.court.minimum_deposit, Decimal("0.00"))
+        response = self.client.patch(
+            self.court_detail_url(self.club, self.court),
+            {"name": "Renamed Court"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.court.refresh_from_db()
+        self.assertEqual(self.court.name, "Renamed Court")
+
+        response = self.client.patch(
+            self.court_detail_url(self.club, self.court),
+            {"is_active": False},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.court.refresh_from_db()
+        self.assertFalse(self.court.is_active)
+
     def test_other_court_pricing_does_not_affect_this_court(self):
         self.seed_multi_day_prices(
             self.other_court,
@@ -1032,30 +1179,50 @@ class CourtMinimumDepositPricingInvariantTests(CourtAPITestCase):
                 CourtWorkingHour.Weekday.TUESDAY: "300.00",
             },
         )
+        # 100.00 <= 200.00 (this court's lowest) -> passes,
+        # even though other court has 50.00
         response = self.client.patch(
             self.court_detail_url(self.club, self.court),
-            {"minimum_deposit": "199.00"},
+            {"minimum_deposit": "100.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.court.refresh_from_db()
+        self.assertEqual(self.court.minimum_deposit, Decimal("100.00"))
+
+        # 201.00 > 200.00 -> fails
+        response = self.client.patch(
+            self.court_detail_url(self.club, self.court),
+            {"minimum_deposit": "201.00"},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(
-            self.field_error_code(response, "minimum_deposit"),
-            "MINIMUM_DEPOSIT_BELOW_LOWEST_WORKING_HOUR_PRICE",
+            response.data["code"],
+            "MINIMUM_DEPOSIT_ABOVE_LOWEST_WORKING_HOUR_PRICE",
+        )
+        self.assertEqual(
+            response.data.get("details"),
+            {"lowest_working_hour_price": 200, "currency": "EGP"},
         )
 
-    def test_model_clean_rejects_deposit_below_lowest_price(self):
+    def test_model_clean_rejects_deposit_above_lowest_price(self):
         from django.core.exceptions import ValidationError
 
         self.seed_multi_day_prices(
             self.court,
             {CourtWorkingHour.Weekday.MONDAY: "200.00"},
         )
-        self.court.minimum_deposit = Decimal("199.00")
+        self.court.minimum_deposit = Decimal("201.00")
         with self.assertRaises(ValidationError) as raised:
             self.court.full_clean()
         self.assertIn("minimum_deposit", raised.exception.message_dict)
+        self.assertEqual(
+            raised.exception.message_dict["minimum_deposit"][0],
+            "الحد الأدنى للعربون لا يمكن أن يزيد عن 200 ج.م، لأنه أقل سعر حجز للملعب.",
+        )
 
-    def test_price_period_full_clean_rejects_raising_lowest_above_deposit(self):
+    def test_price_period_full_clean_rejects_lowering_lowest_below_deposit(self):
         from django.core.exceptions import ValidationError
 
         self.court.minimum_deposit = Decimal("200.00")
@@ -1067,8 +1234,12 @@ class CourtMinimumDepositPricingInvariantTests(CourtAPITestCase):
             working_hour=working_hour,
             starts_at=time(10, 0),
             ends_at=time(16, 0),
-            price=Decimal("250.00"),
+            price=Decimal("199.00"),
         )
         with self.assertRaises(ValidationError) as raised:
             period.full_clean()
         self.assertIn("price", raised.exception.message_dict)
+        self.assertEqual(
+            raised.exception.message_dict["price"][0],
+            "الحد الأدنى للعربون لا يمكن أن يزيد عن 199 ج.م، لأنه أقل سعر حجز للملعب.",
+        )

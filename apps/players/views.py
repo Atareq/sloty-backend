@@ -21,7 +21,11 @@ from apps.common.authorization.mixins import (
 )
 from apps.common.authorization.permissions import SlotyBasePermission
 from apps.common.authorization.scopes import ResourceScope
-from apps.players.filters import ClubPlayerFilterSet, PlayerProfileFilterSet
+from apps.players.filters import (
+    ClubPlayerFilterSet,
+    ClubPlayerOrderingFilter,
+    PlayerProfileFilterSet,
+)
 from apps.players.models import ClubPlayer, PlayerProfile
 from apps.players.serializers import (
     ClubPlayerCreateSerializer,
@@ -32,6 +36,7 @@ from apps.players.serializers import (
 from apps.players.services import (
     find_or_create_player_profile,
     get_current_club_player,
+    last_used_at_subquery,
     last_used_club_player_id_subquery,
 )
 
@@ -68,12 +73,17 @@ class ClubPlayerViewSet(
     authorization_scope = ResourceScope.CLUB
     authorization_select_related = ("player_profile",)
     permission_classes = (SlotyBasePermission,)
-    filter_backends = (DjangoFilterBackend,)
+    filter_backends = (DjangoFilterBackend, ClubPlayerOrderingFilter)
     http_method_names = ("get", "post", "head", "options")
     filterset_class = ClubPlayerFilterSet
+    ordering_fields = ("last_used_at", "created_at")
+    ordering = ("id",)
 
     def filter_scoped_queryset(self, queryset):
-        return queryset.order_by("id")
+        club = self.get_access_context().club
+        return queryset.annotate(last_used_at=last_used_at_subquery(club)).order_by(
+            "id"
+        )
 
     def get_serializer_class(self):
         if self.action == "create":

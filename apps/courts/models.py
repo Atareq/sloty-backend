@@ -113,15 +113,17 @@ class Court(models.Model):
                 )
         if self.pk and self.minimum_deposit is not None:
             # Lazy import avoids a models ↔ services import cycle at module load.
-            from apps.courts.services import lowest_working_hour_price_for_court
+            from apps.courts.services import (
+                lowest_working_hour_price_for_court,
+                minimum_deposit_above_lowest_price_message,
+            )
 
             lowest_price = lowest_working_hour_price_for_court(self)
-            if lowest_price is not None and self.minimum_deposit < lowest_price:
+            if lowest_price is not None and self.minimum_deposit > lowest_price:
                 raise ValidationError(
                     {
-                        "minimum_deposit": (
-                            "Minimum deposit cannot be lower than the court's "
-                            "lowest working-hour price."
+                        "minimum_deposit": minimum_deposit_above_lowest_price_message(
+                            lowest_price
                         )
                     }
                 )
@@ -235,10 +237,13 @@ class CourtWorkingHourPricePeriod(models.Model):
             )
             sibling_prices.append(self.price)
             lowest_price = min(sibling_prices)
-            if court.minimum_deposit < lowest_price:
-                errors["price"] = (
-                    "Minimum deposit cannot be lower than the court's "
-                    "lowest working-hour price."
+            if court.minimum_deposit > lowest_price:
+                from apps.courts.services import (
+                    minimum_deposit_above_lowest_price_message,
+                )
+
+                errors["price"] = minimum_deposit_above_lowest_price_message(
+                    lowest_price
                 )
         if errors:
             raise ValidationError(errors)
