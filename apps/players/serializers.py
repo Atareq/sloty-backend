@@ -87,6 +87,9 @@ class ClubPlayerSerializer(serializers.ModelSerializer):
     """
 
     player_profile = PlayerProfileSerializer(read_only=True)
+    last_used_at = serializers.DateTimeField(
+        read_only=True, allow_null=True, default=None
+    )
 
     class Meta:
         model = ClubPlayer
@@ -95,6 +98,7 @@ class ClubPlayerSerializer(serializers.ModelSerializer):
             "player_profile",
             "display_name",
             "player_number",
+            "last_used_at",
         )
         read_only_fields = fields
 

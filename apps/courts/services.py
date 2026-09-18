@@ -1,7 +1,8 @@
 from django.db import transaction
 from django.utils.translation import gettext_lazy as _
-from rest_framework import serializers
+from rest_framework import serializers, status
 
+from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
 from apps.courts.pricing import (
     compare_adjacent_period_bounds,
@@ -210,6 +211,16 @@ def lowest_price_from_weekly_payload(working_hours):
     return min(prices) if prices else None
 
 
+def minimum_deposit_above_lowest_price_message(lowest_price) -> str:
+    price_val = (
+        int(lowest_price) if lowest_price == int(lowest_price) else float(lowest_price)
+    )
+    return (
+        f"الحد الأدنى للعربون لا يمكن أن يزيد عن {price_val} ج.م، "
+        "لأنه أقل سعر حجز للملعب."
+    )
+
+
 def validate_minimum_deposit_against_lowest_price(
     *,
     minimum_deposit,
@@ -217,21 +228,27 @@ def validate_minimum_deposit_against_lowest_price(
     field="minimum_deposit",
 ):
     """
-    Enforce: minimum_deposit >= MIN(configured working-hour prices).
+    Enforce: 0 <= minimum_deposit <= MIN(configured working-hour prices).
 
     When ``lowest_price`` is None (no pricing configured yet), the invariant
     is not enforceable and validation is a no-op.
     """
     if lowest_price is None:
         return
-    if minimum_deposit < lowest_price:
-        raise coded_error(
-            field,
-            _(
-                "Minimum deposit cannot be lower than the court's lowest "
-                "working-hour price."
-            ),
-            "MINIMUM_DEPOSIT_BELOW_LOWEST_WORKING_HOUR_PRICE",
+    if minimum_deposit > lowest_price:
+        price_val = (
+            int(lowest_price)
+            if lowest_price == int(lowest_price)
+            else float(lowest_price)
+        )
+        raise SlotyAPIException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="MINIMUM_DEPOSIT_ABOVE_LOWEST_WORKING_HOUR_PRICE",
+            message=minimum_deposit_above_lowest_price_message(lowest_price),
+            details={
+                "lowest_working_hour_price": price_val,
+                "currency": "EGP",
+            },
         )
 
 

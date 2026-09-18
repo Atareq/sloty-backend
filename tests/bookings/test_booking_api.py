@@ -66,7 +66,7 @@ class BookingAPITestCase(ProfileIdentityMixin, APITestCase):
         }
         data.update(extra_fields)
         # Working hours are created immediately below; keep the deposit
-        # invariant (deposit >= lowest working-hour price) satisfied by default.
+        # invariant (0 <= deposit <= lowest working-hour price) satisfied by default.
         data.setdefault("minimum_deposit", data["default_price"])
         court = Court.objects.create(**data)
         self.create_working_hours(
@@ -82,13 +82,13 @@ class BookingAPITestCase(ProfileIdentityMixin, APITestCase):
         """
         Set ``minimum_deposit`` while keeping the deposit-vs-pricing invariant.
 
-        If existing working-hour prices are higher than ``amount``, they are
-        lowered to ``amount`` so ``minimum_deposit >= lowest price`` holds.
+        If existing working-hour prices are lower than ``amount``, they are
+        raised to ``amount`` so ``minimum_deposit <= lowest price`` holds.
         """
         amount = Decimal(amount)
         periods = CourtWorkingHourPricePeriod.objects.filter(working_hour__court=court)
         current_min = periods.order_by("price").values_list("price", flat=True).first()
-        if current_min is not None and amount < current_min:
+        if current_min is not None and amount > current_min:
             periods.update(price=amount)
         court.minimum_deposit = amount
         court.save(update_fields=["minimum_deposit"])
@@ -2247,8 +2247,8 @@ class BookingLifecycleActionTests(BookingAPITestCase):
     def ensure_priced_interval(self, court, start_time, end_time):
         local_start = timezone.localtime(start_time)
         local_end = timezone.localtime(end_time)
-        # Price must remain <= minimum_deposit so the court invariant holds.
-        price = min(court.default_price, court.minimum_deposit)
+        # Price must remain >= minimum_deposit so the court invariant holds.
+        price = max(court.default_price, court.minimum_deposit)
         self.create_working_hours(
             court,
             weekday=local_start.weekday(),
@@ -2643,7 +2643,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             parse_datetime(response.data["next_end_time"]),
             booking.end_time + timedelta(days=7),
         )
-        self.assertEqual(response.data["next_total_price"], "150.00")
+        self.assertEqual(response.data["next_total_price"], "300.00")
         self.assertEqual(response.data["next_required_deposit"], "150.00")
         self.assertTrue(response.data["requires_digital_payment_reference"])
         self.assertTrue(response.data["requires_payment_reference"])
