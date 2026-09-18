@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.common.egypt_locations import get_location_payload
+from apps.common.throttling import AnonymousScopedRateThrottle
 from apps.common.release_metadata import get_backend_release_payload
 from apps.common.serializers import (
     BackendVersionSerializer,
@@ -15,6 +16,8 @@ from apps.common.serializers import (
 
 class EgyptLocationAPIView(APIView):
     permission_classes = (AllowAny,)
+    throttle_classes = (AnonymousScopedRateThrottle,)
+    throttle_scope = "public_static"
     serializer_class = EgyptLocationPayloadSerializer
 
     @extend_schema(
@@ -26,8 +29,11 @@ class EgyptLocationAPIView(APIView):
 
 
 class HealthCheckAPIView(APIView):
+    # Deliberately unthrottled: this is the deploy probe that
+    # scripts/deploy-sloty-backend polls. Rate limiting it would fail deploys.
     authentication_classes = ()
     permission_classes = (AllowAny,)
+    throttle_classes = ()
     serializer_class = HealthCheckResponseSerializer
 
     @extend_schema(

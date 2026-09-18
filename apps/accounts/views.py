@@ -15,6 +15,12 @@ from rest_framework.views import APIView
 from rest_framework.viewsets import GenericViewSet
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
+from apps.common.throttling import (
+    AnonymousScopedRateThrottle,
+    LoginIPRateThrottle,
+    LoginUsernameRateThrottle,
+)
+
 from apps.accounts.filters import UserFilter
 from apps.accounts.models import User
 from apps.accounts.permissions import CanAccessUsers
@@ -32,10 +38,18 @@ from apps.profiles.models import Profile
 
 class SlotyTokenObtainPairView(TokenObtainPairView):
     serializer_class = SlotyTokenObtainPairSerializer
+    # Two buckets: one per source IP, one per submitted username. IP alone does
+    # not stop a distributed attack on a single account; username alone does not
+    # stop one host spraying many accounts.
+    throttle_classes = (LoginIPRateThrottle, LoginUsernameRateThrottle)
 
 
 class SlotyTokenRefreshView(TokenRefreshView):
     serializer_class = SlotyTokenRefreshSerializer
+    # Looser than login: legitimate clients refresh on a timer, and a valid
+    # refresh token is already proof of a prior successful authentication.
+    throttle_classes = (AnonymousScopedRateThrottle,)
+    throttle_scope = "auth_refresh"
 
 
 @extend_schema(

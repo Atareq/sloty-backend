@@ -20,6 +20,13 @@ def env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def env_str(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip()
+
+
 def env_int(name: str, default: int) -> int:
     value = os.environ.get(name)
     if value is None or not value.strip():
@@ -99,6 +106,23 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + APPS + DEBUG_APPS
 
 AUTH_USER_MODEL = "accounts.User"
 
+# Rate limits for the unauthenticated surface only. Authenticated club traffic is
+# deliberately not throttled — see apps/common/throttling.py for why.
+# Every rate is env-tunable so operations can retune without a deploy. Setting a
+# rate to an empty value disables that bucket.
+THROTTLE_RATES = {
+    "auth_login_ip": env_str("THROTTLE_AUTH_LOGIN_IP", "10/min"),
+    "auth_login_username": env_str("THROTTLE_AUTH_LOGIN_USERNAME", "5/min"),
+    "auth_refresh": env_str("THROTTLE_AUTH_REFRESH", "60/min"),
+    "public_availability": env_str("THROTTLE_PUBLIC_AVAILABILITY", "120/min"),
+    "public_static": env_str("THROTTLE_PUBLIC_STATIC", "60/min"),
+}
+
+# Number of trusted reverse proxies in front of the app. Behind Nginx this must
+# be set (normally 1) or DRF reads the proxy address as the client and throttles
+# every anonymous caller as if they were one user.
+NUM_PROXIES = env_int("NUM_PROXIES", 0) or None
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
@@ -108,6 +132,11 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": ("rest_framework.pagination.PageNumberPagination"),
     "EXCEPTION_HANDLER": "apps.common.exceptions.sloty_exception_handler",
     "PAGE_SIZE": 20,
+    # No DEFAULT_THROTTLE_CLASSES: throttling is opt-in per view so that adding
+    # a new authenticated business endpoint can never accidentally rate limit
+    # staff. The rates below are consumed by the views that declare a scope.
+    "DEFAULT_THROTTLE_RATES": THROTTLE_RATES,
+    "NUM_PROXIES": NUM_PROXIES,
 }
 
 JWT_ACCESS_TOKEN_MINUTES = env_int("JWT_ACCESS_TOKEN_MINUTES", 60)
@@ -143,6 +172,29 @@ else:
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
+
+# Cache backend. Redis is used when REDIS_URL is set (both Docker stacks set it);
+# otherwise Django falls back to a per-process local-memory cache so plain SQLite
+# development runs and the test suite keep working with no extra service.
+#
+# Anything that needs a *shared* counter across gunicorn workers — rate limiting
+# above all — is only correct on Redis. LocMemCache is per process.
+REDIS_URL = os.environ.get("REDIS_URL", "").strip()
+
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "sloty-locmem",
         }
     }
 

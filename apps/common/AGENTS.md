@@ -140,6 +140,35 @@ Rules:
 - Profile migration is complete: Courts, Bookings, Transactions, Settlements, Dashboard, Audit, Reports, Players, and Clubs consume Profile-backed `RequestAccessContext`. Dashboard and Reports are read models using `ClubScopedViewMixin` plus source-domain `scoped_queryset` aggregations. Audit is club-only and matrix-denied to Staff; court/collector scope is not applied to audit rows. Global `ClubViewSet` remains URL-unscoped but Profile-filtered.
 - **Not a presence/activity tracker**: The Spine has no request-level side effects beyond authorization/scoping. There is no heartbeat endpoint.
 
+### 6b. Rate Limiting ([`apps/common/throttling.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/throttling.py))
+
+Throttling covers the **unauthenticated surface only**. Authenticated club traffic
+is never throttled — busy-evening staff load is business traffic, not abuse.
+
+| Scope | Endpoint | Throttle class |
+| :--- | :--- | :--- |
+| `auth_login_ip` | `POST /api/v1/auth/token/` | `LoginIPRateThrottle` |
+| `auth_login_username` | `POST /api/v1/auth/token/` | `LoginUsernameRateThrottle` (SHA-256 of the submitted username) |
+| `auth_refresh` | `POST /api/v1/auth/token/refresh/` | `AnonymousScopedRateThrottle` |
+| `public_availability` | `GET /api/v1/public/clubs/{slug}/courts/{id}/availability/` | `AnonymousScopedRateThrottle` |
+| `public_static` | `GET /api/v1/egypt-locations/` | `AnonymousScopedRateThrottle` |
+| — | `GET /health/` | **never throttled** (`throttle_classes = ()`) |
+
+- There is no `DEFAULT_THROTTLE_CLASSES`. Throttling is opt-in per view so a new
+  authenticated business endpoint can never accidentally rate limit staff.
+- Rates come from `.env` (`THROTTLE_*`). A blank value disables that bucket.
+- **A shared cache is mandatory in production.** DRF keeps counters in the Django
+  cache; on LocMemCache they are per gunicorn worker and the real limit becomes
+  `workers x rate`. `apps/common/checks.py::throttle_cache_must_be_shared`
+  (`common.E001`) fails `manage.py check --deploy` when `REDIS_URL` is unset.
+- `NUM_PROXIES` must be set behind Nginx or every anonymous caller shares one bucket.
+- `FreshRateMixin` re-reads rates through `api_settings` on each request, because
+  DRF binds `SimpleRateThrottle.THROTTLE_RATES` once at import time.
+- Login throttling applies to **every** attempt whether or not the account exists.
+  Preserving that is a hard requirement: a 429 that fired only for real usernames
+  would be an account-enumeration oracle.
+- 429 responses use the standard envelope with code `THROTTLED` plus `Retry-After`.
+
 ### 7. Runtime Release Metadata ([`apps/common/release_metadata.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/release_metadata.py))
 - **Endpoint**: authenticated `GET /api/system/version/` (`IsAuthenticated`, same default as business APIs).
 - **Source of truth**: `/etc/sloty/backend-release.json` written on the host after a successful production deploy and health check. Not GitHub, not `master`, not `.git`, and not the database.
@@ -164,6 +193,7 @@ Rules:
   - `test_base_permission_and_matrix.py`: Matrix verification, default deny, custom actions, object permission hook.
   - `test_scoped_resources.py`: Model configuration, club/court/future scoping, fail-closed behavior, relation loading, and DRF ViewSet composition.
   - `test_egypt_locations.py` / `test_locations_api.py`: Choice validation and API endpoint.
+  - `test_throttling.py`: Per-scope limits, health-probe exemption, authenticated bypass, enumeration safety, and the `common.E001` deploy check.
   - `test_version_api.py`: Runtime release metadata endpoint.
   - `test_sql_query_stats_middleware.py`: Middleware counting and threshold logging.
 - Deployment/release metadata tests: [`tests/deploy/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/deploy/).

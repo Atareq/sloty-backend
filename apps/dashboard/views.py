@@ -2,6 +2,7 @@ from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.generics import GenericAPIView
+from apps.common.throttling import AnonymousScopedRateThrottle
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
@@ -106,6 +107,10 @@ class CourtAvailabilityAPIView(DashboardAPIView):
 
 class PublicCourtAvailabilityAPIView(GenericAPIView):
     permission_classes = (AllowAny,)
+    # This is a link players are meant to open and share, so the limit is set
+    # for abuse rather than for traffic. Tighten it and the product breaks.
+    throttle_classes = (AnonymousScopedRateThrottle,)
+    throttle_scope = "public_availability"
     query_serializer_class = AvailabilityQuerySerializer
     response_serializer_class = PublicAvailabilityResponseSerializer
 
