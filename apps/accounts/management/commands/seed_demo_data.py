@@ -240,6 +240,7 @@ class Command(BaseCommand):
                 "sport_type": Court.SportType.FOOTBALL,
                 "players_count": 10,
                 "default_price": Decimal("200.00"),
+                "minimum_deposit": Decimal("200.00"),
                 "slot_duration_minutes": 60,
                 "is_active": True,
                 "requires_digital_payment_reference": False,
@@ -358,6 +359,7 @@ class Command(BaseCommand):
                     defaults={
                         "sport_type": Court.SportType.FOOTBALL,
                         "default_price": price,
+                        "minimum_deposit": price,
                         "slot_duration_minutes": 60,
                         "is_active": True,
                         "requires_digital_payment_reference": index == 2,
