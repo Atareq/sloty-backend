@@ -1561,7 +1561,49 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertEqual(self.slot_by_hour(response, 9)["label"], "بانتظار العربون")
         self.assertEqual(self.slot_by_hour(response, 10)["label"], "متاح")
 
-    def test_date_range_too_large_returns_slot_period_error(self):
+    def test_short_date_range_still_works(self):
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {
+                "court": self.court.id,
+                "date_from": "2026-05-20",
+                "date_to": "2026-05-22",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["date_from"], "2026-05-20")
+        self.assertEqual(response.data["date_to"], "2026-05-22")
+
+    def test_thirty_two_day_inclusive_range_is_accepted(self):
+        # 2026-09-17 → 2026-10-18 = 32 inclusive calendar days.
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {
+                "court": self.court.id,
+                "date_from": "2026-09-17",
+                "date_to": "2026-10-18",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["date_from"], "2026-09-17")
+        self.assertEqual(response.data["date_to"], "2026-10-18")
+
+    def test_exact_forty_five_day_inclusive_range_is_accepted(self):
+        # 2026-09-17 → 2026-10-31 = 45 inclusive calendar days.
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {
+                "court": self.court.id,
+                "date_from": "2026-09-17",
+                "date_to": "2026-10-31",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["date_from"], "2026-09-17")
+        self.assertEqual(response.data["date_to"], "2026-10-31")
+
+    def test_forty_six_day_inclusive_range_returns_slot_period_error(self):
+        # 2026-05-01 → 2026-06-15 = 46 inclusive calendar days.
         response = self.client.get(
             self.booking_slots_url(self.club),
             {
@@ -1572,6 +1614,32 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assert_api_error(response, "SLOT_PERIOD_TOO_LARGE")
+
+    def test_date_from_after_date_to_returns_validation_error(self):
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {
+                "court": self.court.id,
+                "date_from": "2026-05-22",
+                "date_to": "2026-05-20",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_api_error(response, "VALIDATION_ERROR")
+        self.assertIn("date_to", response.data["field_errors"])
+
+    def test_malformed_slot_date_returns_validation_error(self):
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {
+                "court": self.court.id,
+                "date_from": "not-a-date",
+                "date_to": "2026-05-20",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_api_error(response, "VALIDATION_ERROR")
+        self.assertIn("date_from", response.data["field_errors"])
 
     def test_longer_opening_hours_do_not_add_per_slot_queries(self):
         query_counts = []
