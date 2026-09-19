@@ -38,7 +38,12 @@ def format_money(value):
 
 
 def _serializer_access(serializer):
-    return serializer.context.get("access_context") or serializer.context["club_access"]
+    request = serializer.context.get("request")
+    return (
+        serializer.context.get("access_context")
+        or serializer.context.get("club_access")
+        or getattr(request, "access_context", None)
+    )
 
 
 def _court_is_in_authorized_scope(access, court):
@@ -143,8 +148,11 @@ class BookingLastStatusActorMixin(serializers.Serializer):
             obj.last_status_changed_by_type == Booking.LastStatusActorType.INTERNAL_USER
             and obj.last_status_changed_by is not None
         ):
-            full_name = obj.last_status_changed_by.get_full_name().strip()
-            return full_name or obj.last_status_changed_by.username
+            actor_user = getattr(obj.last_status_changed_by, "user", None)
+            if actor_user:
+                full_name = actor_user.get_full_name().strip()
+                return full_name or actor_user.username
+            return str(obj.last_status_changed_by)
         return None
 
 
@@ -327,14 +335,14 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        request = self.context["request"]
+        access = _serializer_access(self)
         validated_data.pop("is_recurring", None)
         requested_at = validated_data.pop("requested_at", None)
         court = validated_data.pop("court")
         start_time = validated_data.pop("start_time")
         end_time = validated_data.pop("end_time")
         return create_booking(
-            created_by=request.user,
+            created_by=access.profile if access else None,
             court=court,
             start_time=start_time,
             end_time=end_time,
@@ -368,8 +376,9 @@ class BookingAttemptListSerializer(
     serializers.ModelSerializer,
 ):
     court_name = serializers.CharField(source="court.name", read_only=True)
+    attempted_by = serializers.PrimaryKeyRelatedField(read_only=True)
     attempted_by_username = serializers.CharField(
-        source="attempted_by.username",
+        source="attempted_by.user.username",
         read_only=True,
         default="",
     )
@@ -680,14 +689,8 @@ class BookingUpdateSerializer(serializers.ModelSerializer):
         with transaction.atomic():
             updated_booking = super().update(instance, validated_data)
             if changed:
-                request = self.context.get("request")
-                actor = getattr(request, "user", None)
-                access = getattr(request, "access_context", None)
-                actor = (
-                    access.profile
-                    if access and access.profile
-                    else getattr(getattr(request, "user", None), "profile", None)
-                )
+                access = _serializer_access(self)
+                actor = access.profile if access else None
                 record_audit_log(
                     club=updated_booking.club,
                     court=updated_booking.court,

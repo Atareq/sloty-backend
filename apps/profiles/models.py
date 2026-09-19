@@ -38,6 +38,14 @@ class Profile(models.Model):
         identity = self.user or "unlinked"
         return f"{identity} ({self.role})"
 
+    def __eq__(self, other):
+        if isinstance(other, Profile):
+            return self.pk is not None and self.pk == other.pk
+        return super().__eq__(other)
+
+    def __hash__(self):
+        return super().__hash__()
+
     def clean(self):
         super().clean()
         if self.role != self.Role.PLAYER and self.user_id is None:

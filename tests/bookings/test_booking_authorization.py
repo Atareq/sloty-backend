@@ -78,10 +78,10 @@ class BookingAuthorizationConfigTests(BookingAPITestCase):
         grant_staff_court(self.staff, self.court_a)
         grant_staff_court(self.other_staff, self.court_a)
         self.owner_booking = self.create_booking(
-            self.court_a, created_by=self.owner, customer_phone="+201000000101"
+            self.court_a, created_by=self.owner.profile, customer_phone="+201000000101"
         )
         self.staff_booking = self.create_booking(
-            self.court_a, created_by=self.staff, customer_phone="+201000000102"
+            self.court_a, created_by=self.staff.profile, customer_phone="+201000000102"
         )
         self.other_court_booking = self.create_booking(
             self.court_b, customer_phone="+201000000103"
@@ -200,10 +200,10 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
         grant_staff_court(self.peer_staff, self.court)
         grant_owner_club(self.outsider, self.other_club)
         self.owner_booking = self.create_booking(
-            self.court, created_by=self.owner, customer_phone="+201000000201"
+            self.court, created_by=self.owner.profile, customer_phone="+201000000201"
         )
         self.staff_booking = self.create_booking(
-            self.court, created_by=self.staff, customer_phone="+201000000202"
+            self.court, created_by=self.staff.profile, customer_phone="+201000000202"
         )
         self.other_court_booking = self.create_booking(
             self.same_club_other_court,
@@ -226,7 +226,7 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
         data = {
             "club": court.club,
             "court": court,
-            "attempted_by": attempted_by,
+            "attempted_by": getattr(attempted_by, "profile", attempted_by),
             "client_request_id": uuid4(),
             "customer_name": "Attempt Customer",
             "customer_phone": "+201000009901",
@@ -308,7 +308,7 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
     def test_staff_can_complete_peer_booking_on_assigned_court(self):
         booking = self.create_booking(
             self.court,
-            created_by=self.staff,
+            created_by=self.staff.profile,
             status=Booking.Status.CONFIRMED,
             customer_phone="+201000000205",
         )

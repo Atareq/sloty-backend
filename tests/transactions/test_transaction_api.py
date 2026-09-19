@@ -394,7 +394,7 @@ class TransactionClubPlayerIdentityTests(TransactionAPITestCase):
             price=court.default_price,
         )
         booking = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(20),
             end_time=self.time_at(21),

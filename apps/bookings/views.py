@@ -93,6 +93,7 @@ class BookingViewSet(
 
     authorization_model = Booking
     authorization_scope = ResourceScope.COURT
+    authorization_select_related = ("last_status_changed_by__user",)
     permission_classes = (SlotyBasePermission,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = BookingFilter
@@ -193,7 +194,7 @@ class BookingViewSet(
         booking = cancel_booking(
             access=access,
             booking=booking,
-            actor=request.user,
+            actor=access.profile,
             reason=data.get("reason", ""),
             refund_payment_method=data.get("refund_payment_method"),
             refund_reference=data.get("refund_reference", ""),
@@ -230,7 +231,7 @@ class BookingViewSet(
         booking = complete_booking(
             access=access,
             booking=booking,
-            actor=request.user,
+            actor=access.profile,
             confirm_collect_remaining_cash=data["confirm_collect_remaining_cash"],
             continue_recurring=data.get("continue_recurring"),
             next_deposit_payment_method=data.get("next_deposit_payment_method"),
@@ -253,7 +254,7 @@ class BookingViewSet(
         booking = no_show_booking(
             access=access,
             booking=booking,
-            actor=request.user,
+            actor=access.profile,
             reason=data.get("reason", ""),
         )
         return self.lifecycle_response(booking)
@@ -270,7 +271,7 @@ class BookingViewSet(
         booking = reschedule_booking(
             access=access,
             booking=booking,
-            actor=request.user,
+            actor=access.profile,
             court=data["court"],
             start_time=data["start_time"],
             end_time=data["end_time"],
@@ -287,7 +288,7 @@ class BookingViewSet(
     def expire(self, request, *args, **kwargs):
         self.validate_action_payload()
         access, booking = self.get_lifecycle_context()
-        booking = expire_booking(access=access, booking=booking, actor=request.user)
+        booking = expire_booking(access=access, booking=booking, actor=access.profile)
         return self.lifecycle_response(booking)
 
     @extend_schema(
@@ -302,7 +303,7 @@ class BookingViewSet(
         booking = end_booking_recurrence(
             access=access,
             booking=booking,
-            actor=request.user,
+            actor=access.profile,
             reason=data.get("reason", ""),
         )
         return self.lifecycle_response(booking)
@@ -344,12 +345,13 @@ class BookingAttemptViewSet(
 ):
     """
     Authorization: club+court via BookingAttempt.authorization_config.
-    Staff are additionally restricted to attempted_by=request.user in
+    Staff are additionally restricted to attempted_by=context.profile in
     filter_scoped_queryset(). Dismiss remains attempter-only for every role.
     """
 
     authorization_model = BookingAttempt
     authorization_scope = ResourceScope.COURT
+    authorization_select_related = ("attempted_by__user",)
     permission_classes = (SlotyBasePermission,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = BookingAttemptFilter
@@ -363,12 +365,17 @@ class BookingAttemptViewSet(
     def filter_scoped_queryset(self, queryset):
         context = self.get_access_context()
         if context.role == Role.STAFF:
-            queryset = queryset.filter(attempted_by=context.user)
+            queryset = queryset.filter(attempted_by=context.profile)
         return queryset.order_by("-created", "-id")
 
     def check_object_permission(self, request, obj) -> bool:
         if self.action == "dismiss":
-            return obj.attempted_by_id == request.user.id
+            context = self.get_access_context()
+            return (
+                context is not None
+                and context.profile is not None
+                and obj.attempted_by_id == context.profile.id
+            )
         return True
 
     def get_serializer_class(self):
@@ -399,7 +406,7 @@ class BookingAttemptViewSet(
         attempt = dismiss_booking_attempt(
             access=access,
             attempt=attempt,
-            actor=request.user,
+            actor=access.profile,
         )
         return Response(
             BookingAttemptDetailSerializer(

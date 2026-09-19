@@ -73,7 +73,7 @@ class SamePhoneSameClubTests(BookingPlayerIdentityTestCase):
         court = self.create_court(club, "Court 1")
         admin = self.create_platform_admin()
         booking_one = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -81,7 +81,7 @@ class SamePhoneSameClubTests(BookingPlayerIdentityTestCase):
             customer_phone="+201012345678",
         )
         booking_two = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(12),
             end_time=self.time_at(13),
@@ -108,7 +108,7 @@ class SamePhoneDifferentClubsTests(BookingPlayerIdentityTestCase):
         court_b = self.create_court(club_b, "Court B")
         admin = self.create_platform_admin()
         booking_a = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court_a,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -116,7 +116,7 @@ class SamePhoneDifferentClubsTests(BookingPlayerIdentityTestCase):
             customer_phone="+201099999999",
         )
         booking_b = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court_b,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -183,7 +183,7 @@ class ClubIsolationTests(BookingPlayerIdentityTestCase):
         )
         club_b_player = ClubPlayer.objects.create(club=club_b, player_profile=profile)
         booking = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court_a,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -239,7 +239,7 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
         court = self.create_court(club, "Court 1")
         admin = self.create_platform_admin()
         booking = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -266,7 +266,7 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
         court = self.create_court(club, "Court 1")
         admin = self.create_platform_admin()
         first_booking = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -280,7 +280,7 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
             player_number=10,
         )
         second_booking = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(12),
             end_time=self.time_at(13),
@@ -291,7 +291,7 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
         self.assertEqual(second_booking.club_player_id, v2.id)
         # Next booking without club_player_id uses latest booking identity (v2)
         third_booking = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(14),
             end_time=self.time_at(15),
@@ -312,7 +312,7 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
         court = self.create_court(club, "Court 1")
         admin = self.create_platform_admin()
         first_booking = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -327,7 +327,7 @@ class ClubPlayerVersioningBookingHistoryTests(BookingPlayerIdentityTestCase):
             player_number=10,
         )
         historical_booking = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(14),
             end_time=self.time_at(15),
@@ -355,7 +355,7 @@ class RecurringBookingIdentityPropagationTests(BookingPlayerIdentityTestCase):
         admin = self.create_platform_admin()
         self.client.force_authenticate(user=admin)
         anchor = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -404,7 +404,7 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
         admin = self.create_platform_admin("consumer-admin")
         self.client.force_authenticate(user=admin)
         booking = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -456,7 +456,7 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
         court = self.create_court(club, "Phone Split Court")
         admin = self.create_platform_admin("phone-split-admin")
         first = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -464,7 +464,7 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
             customer_phone="+201088880010",
         )
         second = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(12),
             end_time=self.time_at(13),
@@ -482,7 +482,7 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
         admin = self.create_platform_admin("patch-identity-admin")
         self.client.force_authenticate(user=admin)
         booking = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -516,7 +516,7 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
         court = self.create_court(club, "Idempotency Court")
         admin = self.create_platform_admin("idempotency-identity-admin")
         first = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -525,7 +525,7 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
             client_request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         )
         second = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(12),
             end_time=self.time_at(13),
@@ -538,7 +538,7 @@ class Sprint4ConsumerIdentityTests(BookingPlayerIdentityTestCase):
             first.club_player.player_profile_id, second.club_player.player_profile_id
         )
         replay = create_booking(
-            created_by=admin,
+            created_by=admin.profile,
             court=court,
             start_time=self.time_at(10),
             end_time=self.time_at(11),

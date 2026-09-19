@@ -263,7 +263,7 @@ class BookingCreationTests(BookingAPITestCase):
         attempt = BookingAttempt.objects.get()
         self.assertEqual(attempt.club, self.club)
         self.assertEqual(attempt.court, self.court)
-        self.assertEqual(attempt.attempted_by, self.platform_admin)
+        self.assertEqual(attempt.attempted_by, self.platform_admin.profile)
         self.assertEqual(str(attempt.client_request_id), client_request_id)
         self.assertEqual(attempt.customer_name, "Ahmed Hassan")
         self.assertEqual(str(attempt.customer_phone), "+201000000002")
@@ -997,7 +997,7 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         data = {
             "club": court.club,
             "court": court,
-            "attempted_by": attempted_by,
+            "attempted_by": getattr(attempted_by, "profile", attempted_by),
             "client_request_id": uuid4(),
             "customer_name": "Attempt Customer",
             "customer_phone": "+201000009901",
@@ -1046,7 +1046,7 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
 
     def test_attempt_filters_by_status_court_employee_and_requested_date(self):
         accepted_booking = self.create_booking(
-            self.court, created_by=self.staff, customer_phone="+201000009902"
+            self.court, created_by=self.staff.profile, customer_phone="+201000009902"
         )
         accepted_attempt = self.create_attempt(
             self.court,
@@ -1080,7 +1080,7 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
             self.booking_attempt_list_url(self.club),
             {
                 "court": self.court.id,
-                "attempted_by": self.staff.id,
+                "attempted_by": self.staff.profile.id,
                 "date": "2026-05-20",
             },
         )
@@ -1173,7 +1173,7 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         self.assertTrue(dismissed_slot["is_available"])
 
     def test_accepted_attempt_cannot_be_dismissed(self):
-        booking = self.create_booking(self.court, created_by=self.staff)
+        booking = self.create_booking(self.court, created_by=self.staff.profile)
         attempt = self.create_attempt(
             self.court,
             self.staff,
@@ -1255,10 +1255,10 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         self.assertEqual(Settlement.objects.count(), 0)
 
     def test_removing_staff_profile_preserves_attempt_and_booking_history(self):
-        booking = self.create_booking(self.court, created_by=self.staff)
+        booking = self.create_booking(self.court, created_by=self.staff.profile)
         attempt = self.create_attempt(
             self.court,
-            self.staff,
+            self.staff.profile,
             booking=booking,
             outcome=BookingAttempt.Outcome.SUCCESS,
             failure_code="",
@@ -1266,7 +1266,9 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         )
         self.staff.profile.delete()
         attempt.refresh_from_db()
-        self.assertEqual(attempt.attempted_by, self.staff)
+        booking.refresh_from_db()
+        self.assertIsNone(attempt.attempted_by)
+        self.assertIsNone(booking.created_by)
         self.assertEqual(attempt.booking, booking)
         self.assertTrue(User.objects.filter(pk=self.staff.pk).exists())
         self.assertTrue(Booking.objects.filter(pk=booking.pk).exists())
@@ -4260,7 +4262,7 @@ class BookingQueryScalingTests(BookingAPITestCase):
         return BookingAttempt.objects.create(
             club=self.club,
             court=self.court,
-            attempted_by=self.platform_admin,
+            attempted_by=self.platform_admin.profile,
             client_request_id=uuid4(),
             customer_name=f"Attempt Customer {hour}",
             customer_phone=f"+2010000093{hour:02d}",
@@ -4574,11 +4576,13 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             end_time=self.time_at(11).isoformat(),
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data["last_status_changed_by"], self.staff_a.id)
+        self.assertEqual(
+            response.data["last_status_changed_by"], self.staff_a.profile.id
+        )
         self.assertEqual(response.data["last_status_changed_by_name"], "Ahmed Mohamed")
         booking = Booking.objects.get(pk=response.data["id"])
         self.assertEqual(booking.status, Booking.Status.HOLD)
-        self.assertEqual(booking.last_status_changed_by, self.staff_a)
+        self.assertEqual(booking.last_status_changed_by, self.staff_a.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
             Booking.LastStatusActorType.INTERNAL_USER,
@@ -4588,8 +4592,8 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         future_start = timezone.now() + timedelta(days=2)
         booking = self.create_booking(
             self.court,
-            created_by=self.staff_a,
-            last_status_changed_by=self.staff_a,
+            created_by=self.staff_a.profile,
+            last_status_changed_by=self.staff_a.profile,
             last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
             start_time=future_start,
             end_time=future_start + timedelta(hours=1),
@@ -4602,11 +4606,13 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             {"reason": "Cancelled by Mahmoud"},
         )
         self.assertEqual(cancel_resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(cancel_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(
+            cancel_resp.data["last_status_changed_by"], self.staff_b.profile.id
+        )
         self.assertEqual(cancel_resp.data["last_status_changed_by_name"], "Mahmoud Ali")
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CANCELLED)
-        self.assertEqual(booking.last_status_changed_by, self.staff_b)
+        self.assertEqual(booking.last_status_changed_by, self.staff_b.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
             Booking.LastStatusActorType.INTERNAL_USER,
@@ -4614,15 +4620,17 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         self.client.force_authenticate(user=self.owner)
         detail_resp = self.client.get(self.booking_detail_url(self.club, booking))
         self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(detail_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(
+            detail_resp.data["last_status_changed_by"], self.staff_b.profile.id
+        )
         self.assertEqual(detail_resp.data["last_status_changed_by_name"], "Mahmoud Ali")
 
     def test_no_show_updates_actor(self):
         booking = self.create_booking(
             self.court,
             status=Booking.Status.CONFIRMED,
-            created_by=self.staff_a,
-            last_status_changed_by=self.staff_a,
+            created_by=self.staff_a.profile,
+            last_status_changed_by=self.staff_a.profile,
             last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
@@ -4635,13 +4643,15 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             {"reason": "Customer did not show up"},
         )
         self.assertEqual(no_show_resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(no_show_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(
+            no_show_resp.data["last_status_changed_by"], self.staff_b.profile.id
+        )
         self.assertEqual(
             no_show_resp.data["last_status_changed_by_name"], "Mahmoud Ali"
         )
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.NO_SHOW)
-        self.assertEqual(booking.last_status_changed_by, self.staff_b)
+        self.assertEqual(booking.last_status_changed_by, self.staff_b.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
             Booking.LastStatusActorType.INTERNAL_USER,
@@ -4651,8 +4661,8 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         booking = self.create_booking(
             self.court,
             status=Booking.Status.CONFIRMED,
-            created_by=self.staff_a,
-            last_status_changed_by=self.staff_a,
+            created_by=self.staff_a.profile,
+            last_status_changed_by=self.staff_a.profile,
             last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
@@ -4665,13 +4675,15 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             self.club, booking, "complete", self.staff_b
         )
         self.assertEqual(complete_resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(complete_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(
+            complete_resp.data["last_status_changed_by"], self.staff_b.profile.id
+        )
         self.assertEqual(
             complete_resp.data["last_status_changed_by_name"], "Mahmoud Ali"
         )
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.COMPLETED)
-        self.assertEqual(booking.last_status_changed_by, self.staff_b)
+        self.assertEqual(booking.last_status_changed_by, self.staff_b.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
             Booking.LastStatusActorType.INTERNAL_USER,
@@ -4682,8 +4694,8 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         booking = self.create_booking(
             self.court,
             status=Booking.Status.HOLD,
-            created_by=self.staff_a,
-            last_status_changed_by=self.staff_a,
+            created_by=self.staff_a.profile,
+            last_status_changed_by=self.staff_a.profile,
             last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
@@ -4702,14 +4714,16 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         self.assertEqual(tx_resp.status_code, status.HTTP_201_CREATED)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CONFIRMED)
-        self.assertEqual(booking.last_status_changed_by, self.staff_b)
+        self.assertEqual(booking.last_status_changed_by, self.staff_b.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
             Booking.LastStatusActorType.INTERNAL_USER,
         )
         detail_resp = self.client.get(self.booking_detail_url(self.club, booking))
         self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(detail_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(
+            detail_resp.data["last_status_changed_by"], self.staff_b.profile.id
+        )
         self.assertEqual(detail_resp.data["last_status_changed_by_name"], "Mahmoud Ali")
 
     def test_automatic_expiry_sets_system_actor(self):
@@ -4718,8 +4732,8 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         booking = self.create_booking(
             self.court,
             status=Booking.Status.HOLD,
-            created_by=self.staff_a,
-            last_status_changed_by=self.staff_a,
+            created_by=self.staff_a.profile,
+            last_status_changed_by=self.staff_a.profile,
             last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
@@ -4743,19 +4757,21 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         booking = self.create_booking(
             self.court,
             status=Booking.Status.HOLD,
-            created_by=self.staff_a,
-            last_status_changed_by=self.staff_a,
+            created_by=self.staff_a.profile,
+            last_status_changed_by=self.staff_a.profile,
             last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
         )
         expire_resp = self.post_lifecycle(self.club, booking, "expire", self.staff_b)
         self.assertEqual(expire_resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(expire_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(
+            expire_resp.data["last_status_changed_by"], self.staff_b.profile.id
+        )
         self.assertEqual(expire_resp.data["last_status_changed_by_name"], "Mahmoud Ali")
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.EXPIRED)
-        self.assertEqual(booking.last_status_changed_by, self.staff_b)
+        self.assertEqual(booking.last_status_changed_by, self.staff_b.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
             Booking.LastStatusActorType.INTERNAL_USER,
@@ -4767,8 +4783,8 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         booking = self.create_booking(
             self.court,
             status=Booking.Status.CONFIRMED,
-            created_by=self.staff_a,
-            last_status_changed_by=self.staff_a,
+            created_by=self.staff_a.profile,
+            last_status_changed_by=self.staff_a.profile,
             last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
@@ -4788,11 +4804,11 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             access=MockAccess(),
             transaction_obj=tx,
             reason="Mistake in payment",
-            actor=self.staff_b,
+            actor=self.staff_b.profile,
         )
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.HOLD)
-        self.assertEqual(booking.last_status_changed_by, self.staff_b)
+        self.assertEqual(booking.last_status_changed_by, self.staff_b.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
             Booking.LastStatusActorType.INTERNAL_USER,
@@ -4800,15 +4816,17 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         self.client.force_authenticate(user=self.owner)
         detail_resp = self.client.get(self.booking_detail_url(self.club, booking))
         self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(detail_resp.data["last_status_changed_by"], self.staff_b.id)
+        self.assertEqual(
+            detail_resp.data["last_status_changed_by"], self.staff_b.profile.id
+        )
         self.assertEqual(detail_resp.data["last_status_changed_by_name"], "Mahmoud Ali")
 
     def test_reschedule_preserves_last_status_actor(self):
         booking = self.create_booking(
             self.court,
             status=Booking.Status.HOLD,
-            created_by=self.staff_a,
-            last_status_changed_by=self.staff_a,
+            created_by=self.staff_a.profile,
+            last_status_changed_by=self.staff_a.profile,
             last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
@@ -4827,14 +4845,14 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         )
         self.assertEqual(reschedule_resp.status_code, status.HTTP_200_OK)
         self.assertEqual(
-            reschedule_resp.data["last_status_changed_by"], self.staff_a.id
+            reschedule_resp.data["last_status_changed_by"], self.staff_a.profile.id
         )
         self.assertEqual(
             reschedule_resp.data["last_status_changed_by_name"], "Ahmed Mohamed"
         )
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.HOLD)
-        self.assertEqual(booking.last_status_changed_by, self.staff_a)
+        self.assertEqual(booking.last_status_changed_by, self.staff_a.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
             Booking.LastStatusActorType.INTERNAL_USER,
@@ -4844,7 +4862,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         booking = self.create_booking(
             self.court,
             status=Booking.Status.CONFIRMED,
-            created_by=self.staff_a,
+            created_by=self.staff_a.profile,
             last_status_changed_by=None,
             last_status_changed_by_type=None,
             start_time=self.time_at(20),
@@ -4864,8 +4882,8 @@ class BookingLastStatusActorTests(BookingAPITestCase):
     def test_no_n_plus_one_queries_on_booking_list(self):
         self.create_booking(
             self.court,
-            created_by=self.staff_a,
-            last_status_changed_by=self.staff_a,
+            created_by=self.staff_a.profile,
+            last_status_changed_by=self.staff_a.profile,
             last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
@@ -4878,8 +4896,10 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         for i in range(1, 20):
             self.create_booking(
                 self.court,
-                created_by=self.staff_b if i % 2 == 0 else self.staff_a,
-                last_status_changed_by=self.staff_b if i % 2 == 0 else self.staff_a,
+                created_by=self.staff_b.profile if i % 2 == 0 else self.staff_a.profile,
+                last_status_changed_by=(
+                    self.staff_b.profile if i % 2 == 0 else self.staff_a.profile
+                ),
                 last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
                 start_time=self.time_at(10) + timedelta(days=i),
                 end_time=self.time_at(11) + timedelta(days=i),
@@ -4899,16 +4919,16 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         grant_staff_court(other_user, other_court)
         booking_a = self.create_booking(
             self.court,
-            created_by=self.staff_a,
-            last_status_changed_by=self.staff_a,
+            created_by=self.staff_a.profile,
+            last_status_changed_by=self.staff_a.profile,
             last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
         )
         booking_b = self.create_booking(
             other_court,
-            created_by=other_user,
-            last_status_changed_by=other_user,
+            created_by=other_user.profile,
+            last_status_changed_by=other_user.profile,
             last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
@@ -4921,7 +4941,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         self.assertIn(booking_a.id, result_ids)
         self.assertNotIn(booking_b.id, result_ids)
         item_a = [r for r in results if r["id"] == booking_a.id][0]
-        self.assertEqual(item_a["last_status_changed_by"], self.staff_a.id)
+        self.assertEqual(item_a["last_status_changed_by"], self.staff_a.profile.id)
         self.assertEqual(item_a["last_status_changed_by_name"], "Ahmed Mohamed")
 
 

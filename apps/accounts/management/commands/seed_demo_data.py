@@ -157,7 +157,7 @@ class Command(BaseCommand):
         courts = self.create_courts(users, clubs)
         self.create_working_hours(courts)
         profiles = self.create_profiles(users, clubs, courts)
-        bookings = self.create_bookings(users, clubs, courts)
+        bookings = self.create_bookings(clubs, courts, profiles)
         transactions = self.create_transactions(users, bookings)
         settlements = self.create_settlements(users, clubs, courts, transactions)
         audit_logs = self.create_audit_logs(
@@ -448,7 +448,7 @@ class Command(BaseCommand):
         )
         return timezone.make_aware(naive, timezone.get_current_timezone())
 
-    def create_bookings(self, users, clubs, courts):
+    def create_bookings(self, clubs, courts, profiles):
         bookings = {}
         for club_index, (club_key, club) in enumerate(clubs.items()):
             for booking_index, (booking_key, status, customer_label, hour) in enumerate(
@@ -479,7 +479,7 @@ class Command(BaseCommand):
                         "status": status,
                         "source": Booking.Source.MANUAL,
                         "notes": "Demo seed booking.",
-                        "created_by": users[f"staff_{club_key.lower()}"],
+                        "created_by": profiles[f"staff_{club_key.lower()}"],
                     },
                 )
                 bookings[(club_key, booking_key)] = booking
@@ -513,7 +513,7 @@ class Command(BaseCommand):
                             "status": status,
                             "source": Booking.Source.MANUAL,
                             "notes": "Demo seed booking.",
-                            "created_by": users["owner_a"],
+                            "created_by": profiles["owner_a"],
                         },
                     )
                     bookings[(club_key, f"court2_{index}")] = booking

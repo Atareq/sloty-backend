@@ -1,6 +1,5 @@
 from decimal import Decimal
 
-from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models
@@ -112,14 +111,14 @@ class Booking(models.Model):
     no_show_at = models.DateTimeField(blank=True, null=True, db_index=True)
     expired_at = models.DateTimeField(blank=True, null=True, db_index=True)
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        "profiles.Profile",
         blank=True,
         null=True,
         on_delete=models.SET_NULL,
         related_name="created_bookings",
     )
     last_status_changed_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        "profiles.Profile",
         blank=True,
         null=True,
         on_delete=models.SET_NULL,
@@ -278,7 +277,7 @@ class BookingAttempt(models.Model):
         related_name="booking_attempts",
     )
     attempted_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        "profiles.Profile",
         blank=True,
         null=True,
         on_delete=models.SET_NULL,

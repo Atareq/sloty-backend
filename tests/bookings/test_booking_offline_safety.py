@@ -192,7 +192,7 @@ class BookingOfflineSafetyTests(APITestCase):
             start_time=start,
             end_time=start + timezone.timedelta(hours=1),
             total_price=Decimal("300.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             customer_name="Financial Safety Customer",
             customer_phone="+201044556677",
         )

@@ -790,11 +790,11 @@ def create_booking_transaction(
 
                 if locked_booking.status == Booking.Status.HOLD:
                     locked_booking.status = Booking.Status.CONFIRMED
-                    locked_booking.save(update_fields=["status", "modified"])
-                    locked_booking.last_status_changed_by = created_by
+                    status_actor = getattr(created_by, "profile", created_by)
+                    locked_booking.last_status_changed_by = status_actor
                     locked_booking.last_status_changed_by_type = (
                         Booking.LastStatusActorType.INTERNAL_USER
-                        if created_by
+                        if status_actor
                         else None
                     )
                     locked_booking.save(
@@ -856,9 +856,10 @@ def recalculate_booking_status_after_transaction_cancel(booking, *, actor=None):
         booking
     ) == Decimal("0.00"):
         booking.status = Booking.Status.HOLD
-        booking.last_status_changed_by = actor
+        status_actor = getattr(actor, "profile", actor)
+        booking.last_status_changed_by = status_actor
         booking.last_status_changed_by_type = (
-            Booking.LastStatusActorType.INTERNAL_USER if actor else None
+            Booking.LastStatusActorType.INTERNAL_USER if status_actor else None
         )
         booking.save(
             update_fields=[
@@ -933,7 +934,7 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
         booking_before_data = booking_audit_snapshot(locked_booking)
         old_booking_status = locked_booking.status
         locked_transaction.is_cancelled = True
-        locked_transaction.cancelled_by = actor
+        locked_transaction.cancelled_by = getattr(actor, "user", actor)
         locked_transaction.cancelled_at = timezone.now()
         locked_transaction.cancellation_reason = reason
         locked_transaction.save(

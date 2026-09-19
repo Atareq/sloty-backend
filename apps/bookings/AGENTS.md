@@ -59,8 +59,10 @@
   - `recurrence_status`: `ACTIVE`, `RENEWED`, `ENDED` (null for non-recurring).
   - `previous_recurring_booking`: Pointer to prior recurrence occurrence.
   - Traceability: `cancellation_reason`, `no_show_reason`, `reschedule_reason`, `completed_at`, `cancelled_at`, `no_show_at`, `expired_at`, `last_status_changed_by`.
+  - Traceability: `cancellation_reason`, `no_show_reason`, `reschedule_reason`, `completed_at`, `cancelled_at`, `no_show_at`, `expired_at`, `created_by` (`Profile`), `last_status_changed_by` (`Profile`).
 - [`BookingAttempt`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/bookings/models.py):
   - Preserves requested parameters, `outcome` (`SUCCESS`/`REJECTED`), `failure_code`, `failure_details`, and `resolution` (`UNRESOLVED`, `DISMISSED`, `RESOLVED`).
+  - Preserves requested parameters, `attempted_by` (`Profile`), `outcome` (`SUCCESS`/`REJECTED`), `failure_code`, `failure_details`, and `resolution` (`UNRESOLVED`, `DISMISSED`, `RESOLVED`).
 
 ## Customer Identity Architecture (Locked — Sprint 3 Integration Complete)
 ### Customer Identity Architecture
@@ -175,6 +177,7 @@ Request → Authentication → resolve_club_scope → Spine scoped QuerySet (clu
 - **Out-of-scope rows:** omitted from the queryset → HTTP 404 on retrieve and lifecycle actions (no existence leak via 403).
 - **Create / slots / reschedule target court:** the court in the request body must be inside the same Spine court queryset; denial remains HTTP 403.
 - **BookingAttempt:** Club + Court, then Staff narrowed to `attempted_by=request.user`. Owner/Admin can list/retrieve club+court attempts but may dismiss only their own (`check_object_permission`).
+- **BookingAttempt:** Club + Court, then Staff narrowed to `attempted_by=context.profile`. Owner/Admin can list/retrieve club+court attempts but may dismiss only their own (`check_object_permission`).
 - Do **not** create `bookings/authorization.py` to re-express court assignment. `actor_requires_staff_cancel_reason()` remains a service business rule (Staff cancel requires a reason).
 - Booking ViewSets consume the Profile-backed Authorization Spine.
 
