@@ -184,19 +184,22 @@ sudo systemctl is-active --quiet sloty-backend.service
 
 The backup and restore commands are `scripts/backup-sloty-db` and
 `scripts/restore-sloty-db`. The host installer is
-`scripts/install-host-dependencies`; it installs `rclone` and the PostgreSQL 17
-client package when needed, then validates `pg_dump` and `pg_restore`. These
-are host tools, not Python requirements. The installer does not restart
-services.
+`scripts/install-host-dependencies`; it installs only `rclone` when needed and
+validates PostgreSQL 17 `pg_dump`, `pg_restore`, and `psql`. These are host
+tools, not Python requirements. Debian `needrestart` is set to list-only mode
+during package installation; schedule any reported service restarts or reboot
+separately during a maintenance window.
 
-Prepare a private local directory and install the repo-owned systemd units as
-symlinks. Keep `/etc/sloty/env/backup.env` root-only (`root:root`, mode `0600`);
-systemd reads both environment files before starting the backup as `sloty`.
-The backend service itself does not load `backup.env`.
+Prepare the root-only Sloty backup parent and install the repo-owned systemd
+units as symlinks. Keep `/etc/sloty/env/backup.env` root-only (`root:root`, mode
+`0600`); systemd reads both environment files before starting the backup as
+`root`. The script creates `/var/backups/sloty/postgres` as `root:root` mode
+`0700`; archive files are mode `0600`. The backend service itself does not load
+`backup.env`.
 
 ```bash
 sudo /srv/sloty/backend/scripts/install-host-dependencies
-sudo install -d -o sloty -g sloty -m 0700 /var/backups/sloty/postgres
+sudo install -d -o root -g root -m 0700 /var/backups/sloty
 sudo ln -sfn /srv/sloty/backend/scripts/systemd/sloty-db-backup.service /etc/systemd/system/sloty-db-backup.service
 sudo ln -sfn /srv/sloty/backend/scripts/systemd/sloty-db-backup.timer /etc/systemd/system/sloty-db-backup.timer
 sudo systemctl daemon-reload
@@ -237,7 +240,6 @@ restoring and will not drop or clean the target.
 
 ```bash
 sudo systemd-run --wait --pipe --collect --unit=sloty-db-restore-test \
-  --property=User=sloty \
   --property=EnvironmentFile=/etc/sloty/env/prod.env \
   --property=EnvironmentFile=/etc/sloty/env/backup.env \
   /srv/sloty/backend/scripts/restore-sloty-db \

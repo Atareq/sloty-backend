@@ -5,8 +5,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=sloty
-Group=sloty
+User=root
+Group=root
 EnvironmentFile=/etc/sloty/env/prod.env
 EnvironmentFile=/etc/sloty/env/backup.env
 ExecStart=/srv/sloty/backend/scripts/backup-sloty-db
@@ -16,5 +16,5 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/backups/sloty/postgres
+ReadWritePaths=/var/backups/sloty
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

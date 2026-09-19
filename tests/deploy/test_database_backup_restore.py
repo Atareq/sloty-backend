@@ -24,11 +24,20 @@ def harness(tmp_path):
     backup_dir = tmp_path / "backups"
     home_dir = tmp_path / "home"
     bin_dir.mkdir()
-    backup_dir.mkdir(mode=0o700)
     home_dir.mkdir()
     events_path = tmp_path / "events.log"
     command_log = tmp_path / "commands.log"
 
+    _write_executable(
+        bin_dir / "install",
+        """#!/usr/bin/env bash
+[[ "$#" == 9 && "$1" == '-d' && "$2" == '-o' && "$3" == 'root' &&
+  "$4" == '-g' && "$5" == 'root' && "$6" == '-m' && "$7" == '0700' &&
+  "$8" == '--' && "$9" == "$SLOTY_BACKUP_DIR" ]] || exit 34
+mkdir -p -- "$9"
+chmod 0700 -- "$9"
+""",
+    )
     _write_executable(
         bin_dir / "date",
         "#!/usr/bin/env bash\n"
@@ -232,7 +241,10 @@ def test_failed_upload_preserves_the_valid_local_dump(harness):
         "pg_restore-list",
         "rclone-upload",
     ]
-    assert (harness["backup_dir"] / BACKUP_NAME).read_bytes() == ARCHIVE_CONTENT
+    backup_path = harness["backup_dir"] / BACKUP_NAME
+    assert backup_path.read_bytes() == ARCHIVE_CONTENT
+    assert harness["backup_dir"].stat().st_mode & 0o777 == 0o700
+    assert backup_path.stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.parametrize(
@@ -256,7 +268,30 @@ def test_failed_remote_verification_preserves_the_local_dump(
     assert (harness["backup_dir"] / BACKUP_NAME).read_bytes() == ARCHIVE_CONTENT
 
 
-def test_backup_cleanup_removes_dumps_older_than_seven_days(harness):
+@pytest.mark.parametrize(
+    "env_overrides",
+    [
+        {"STUB_RCLONE_UPLOAD_FAIL": "1"},
+        {"STUB_REMOTE_SIZE": "1"},
+    ],
+    ids=["upload-failure", "verification-failure"],
+)
+def test_failed_backup_does_not_prune_older_dumps(harness, env_overrides):
+    harness["backup_dir"].mkdir(mode=0o700)
+    stale = harness["backup_dir"] / "sloty_prod-old.dump"
+    stale.write_bytes(ARCHIVE_CONTENT)
+    old_time = time.time() - 8 * 24 * 60 * 60
+    os.utime(stale, (old_time, old_time))
+
+    result = _run(BACKUP_SCRIPT, harness, env_overrides=env_overrides)
+
+    assert result.returncode != 0
+    assert stale.exists()
+    assert (harness["backup_dir"] / BACKUP_NAME).exists()
+
+
+def test_backup_prunes_old_dumps_only_after_verified_upload(harness):
+    harness["backup_dir"].mkdir(mode=0o700)
     stale = harness["backup_dir"] / "sloty_prod-old.dump"
     recent = harness["backup_dir"] / "sloty_prod-recent.dump"
     stale.write_bytes(ARCHIVE_CONTENT)
@@ -264,16 +299,12 @@ def test_backup_cleanup_removes_dumps_older_than_seven_days(harness):
     old_time = time.time() - 8 * 24 * 60 * 60
     os.utime(stale, (old_time, old_time))
 
-    result = _run(
-        BACKUP_SCRIPT,
-        harness,
-        env_overrides={"STUB_RCLONE_UPLOAD_FAIL": "1"},
-    )
+    result = _run(BACKUP_SCRIPT, harness)
 
-    assert result.returncode != 0
+    assert result.returncode == 0, result.stderr
     assert not stale.exists()
     assert recent.exists()
-    assert (harness["backup_dir"] / BACKUP_NAME).exists()
+    assert not (harness["backup_dir"] / BACKUP_NAME).exists()
 
 
 def test_local_restore_requires_target_validates_then_restores_safely(harness):
@@ -342,6 +373,7 @@ def test_production_restore_requires_exact_confirmation(harness):
 def test_remote_restore_downloads_validates_before_restore_and_cleans_on_success(
     harness,
 ):
+    harness["backup_dir"].mkdir(mode=0o700)
     result = _run(
         RESTORE_SCRIPT,
         harness,
@@ -363,6 +395,7 @@ def test_remote_restore_downloads_validates_before_restore_and_cleans_on_success
 
 
 def test_invalid_remote_restore_is_not_restored_and_partial_is_removed(harness):
+    harness["backup_dir"].mkdir(mode=0o700)
     result = _run(
         RESTORE_SCRIPT,
         harness,
@@ -404,11 +437,16 @@ def test_backup_systemd_timer_installer_and_templates_are_repository_owned():
     backup_template = (REPO_ROOT / "env/backup.env.example").read_text(encoding="utf-8")
 
     assert "Type=oneshot" in service
+    assert "User=root" in service
+    assert "Group=root" in service
     assert "EnvironmentFile=/etc/sloty/env/prod.env" in service
     assert "EnvironmentFile=/etc/sloty/env/backup.env" in service
     assert "ExecStart=/srv/sloty/backend/scripts/backup-sloty-db" in service
     assert "ProtectSystem=strict" in service
-    assert "ReadWritePaths=/var/backups/sloty/postgres" in service
+    assert "ReadWritePaths=/var/backups/sloty" in service
+    assert "install -d -o root -g root -m 0700" in (
+        BACKUP_SCRIPT.read_text(encoding="utf-8")
+    )
     assert "OnCalendar=*-*-* 09:00:00 Africa/Cairo" in timer
     assert "Persistent=true" in timer
     assert "R2_ACCOUNT_ID=" in backup_template
@@ -418,6 +456,11 @@ def test_backup_systemd_timer_installer_and_templates_are_repository_owned():
     assert "R2_ENDPOINT=" in backup_template
     assert "API_Token" not in backup_template
     assert "rclone" in installer
-    assert "postgresql-client-17" in installer
-    assert "pg_dump" in installer and "pg_restore" in installer
-    assert "systemctl restart" not in installer
+    assert "PACKAGES+=(rclone)" in installer
+    assert "postgresql-client-17" not in installer
+    assert "for command_name in pg_dump pg_restore psql rclone" in installer
+    assert "NEEDRESTART_MODE=l" in installer
+    assert "DEBIAN_FRONTEND=noninteractive" in installer
+    assert "systemctl" not in installer
+    assert "invoke-rc.d" not in installer
+    assert "service " not in installer

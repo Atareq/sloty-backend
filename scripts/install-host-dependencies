@@ -6,45 +6,41 @@ if (( EUID != 0 )); then
   exit 1
 fi
 
-NEED_POSTGRESQL_17=false
-if ! command -v pg_dump >/dev/null 2>&1 ||
-  ! command -v pg_restore >/dev/null 2>&1; then
-  NEED_POSTGRESQL_17=true
-else
-  PG_DUMP_VERSION="$(pg_dump --version)"
-  PG_RESTORE_VERSION="$(pg_restore --version)"
-  if [[ ! "$PG_DUMP_VERSION" =~ \(PostgreSQL\)[[:space:]]17\.[0-9]+ ]] ||
-    [[ ! "$PG_RESTORE_VERSION" =~ \(PostgreSQL\)[[:space:]]17\.[0-9]+ ]]; then
-    NEED_POSTGRESQL_17=true
-  fi
-fi
-
 PACKAGES=()
 command -v rclone >/dev/null 2>&1 || PACKAGES+=(rclone)
-[[ "$NEED_POSTGRESQL_17" == false ]] || PACKAGES+=(postgresql-client-17)
 
-if ((${#PACKAGES[@]})); then
+if (( ${#PACKAGES[@]} )); then
   command -v apt-get >/dev/null 2>&1 || {
-    printf 'Install these host packages manually: %s\n' "${PACKAGES[*]}" >&2
+    printf 'Install this host package manually: %s\n' "${PACKAGES[*]}" >&2
     exit 1
   }
-  apt-get update
-  apt-get install --yes --no-install-recommends "${PACKAGES[@]}"
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get update
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l \
+    apt-get install --yes --no-install-recommends "${PACKAGES[@]}"
 fi
 
-for command_name in pg_dump pg_restore rclone; do
+for command_name in pg_dump pg_restore psql rclone; do
   command -v "$command_name" >/dev/null 2>&1 || {
-    printf 'Required command is still missing: %s\n' "$command_name" >&2
+    if [[ "$command_name" == rclone ]]; then
+      printf 'Required command is still missing: %s\n' "$command_name" >&2
+    else
+      printf 'Required PostgreSQL 17 client command is missing: %s\n' \
+        "$command_name" >&2
+      printf 'Install PostgreSQL 17 client tools during a planned maintenance window.\n' >&2
+    fi
     exit 1
   }
 done
 
 PG_DUMP_VERSION="$(pg_dump --version)"
 PG_RESTORE_VERSION="$(pg_restore --version)"
+PSQL_VERSION="$(psql --version)"
 if [[ ! "$PG_DUMP_VERSION" =~ \(PostgreSQL\)[[:space:]]17\.[0-9]+ ]] ||
-  [[ ! "$PG_RESTORE_VERSION" =~ \(PostgreSQL\)[[:space:]]17\.[0-9]+ ]]; then
+  [[ ! "$PG_RESTORE_VERSION" =~ \(PostgreSQL\)[[:space:]]17\.[0-9]+ ]] ||
+  [[ ! "$PSQL_VERSION" =~ \(PostgreSQL\)[[:space:]]17\.[0-9]+ ]]; then
   printf 'PostgreSQL 17 client tools are required for the production database.\n' >&2
   exit 1
 fi
 
 printf 'Host dependencies are ready: rclone and PostgreSQL 17 client tools.\n'
+printf 'needrestart is list-only; schedule any reported restarts or reboot separately.\n'

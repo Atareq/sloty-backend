@@ -5,18 +5,17 @@ SCRIPT_DIR="$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)"
 # shellcheck source=scripts/lib/sloty-db-backup.sh
 source "${SCRIPT_DIR}/lib/sloty-db-backup.sh"
 
-sloty_require_commands pg_dump pg_restore rclone date find wc mv rm
+sloty_require_commands pg_dump pg_restore rclone date find wc mv rm install
 sloty_require_database_connection
 sloty_require_backup_database
 sloty_configure_rclone
 
 BACKUP_DIR="${SLOTY_BACKUP_DIR:-/var/backups/sloty/postgres}"
+umask 077
+[[ ! -L "$BACKUP_DIR" ]] || sloty_die "Sloty backup directory must not be a symlink"
+install -d -o root -g root -m 0700 -- "$BACKUP_DIR"
 [[ -d "$BACKUP_DIR" && -w "$BACKUP_DIR" ]] ||
   sloty_die "Sloty backup directory must exist and be writable"
-
-umask 077
-find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type f \
-  -name 'sloty_prod-*.dump' -mtime +6 -delete
 
 TIMESTAMP="$(TZ=Africa/Cairo date +'%Y-%m-%dT%H%M%S%z')"
 BACKUP_NAME="sloty_prod-${TIMESTAMP}.dump"
@@ -77,4 +76,6 @@ done <<< "$REMOTE_LISTING"
   sloty_die "Remote backup size does not match the local archive"
 
 rm -- "$BACKUP_PATH"
+find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type f \
+  -name 'sloty_prod-*.dump' -mtime +6 -delete
 printf 'Backup completed successfully.\n'
