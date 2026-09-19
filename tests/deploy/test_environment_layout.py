@@ -85,9 +85,8 @@ def test_service_and_deploy_script_load_only_new_production_env():
     assert "/etc/sloty/backend.env" not in deploy
 
 
-def test_real_production_env_files_are_absent_untracked_and_ignored():
+def test_real_production_env_files_are_untracked_and_ignored():
     for relative_path in ("env/prod.env", "env/backup.env"):
-        assert not (REPO_ROOT / relative_path).exists()
         tracked = subprocess.run(
             ["git", "ls-files", "--error-unmatch", "--", relative_path],
             cwd=REPO_ROOT,

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Sloty PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 Africa/Cairo
+Persistent=true
+Unit=sloty-db-backup.service
+
+[Install]
+WantedBy=timers.target

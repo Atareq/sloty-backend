@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( EUID != 0 )); then
+  printf 'Run this installer as root (for example, with sudo).\n' >&2
+  exit 1
+fi
+
+NEED_POSTGRESQL_17=false
+if ! command -v pg_dump >/dev/null 2>&1 ||
+  ! command -v pg_restore >/dev/null 2>&1; then
+  NEED_POSTGRESQL_17=true
+else
+  PG_DUMP_VERSION="$(pg_dump --version)"
+  PG_RESTORE_VERSION="$(pg_restore --version)"
+  if [[ ! "$PG_DUMP_VERSION" =~ \(PostgreSQL\)[[:space:]]17\.[0-9]+ ]] ||
+    [[ ! "$PG_RESTORE_VERSION" =~ \(PostgreSQL\)[[:space:]]17\.[0-9]+ ]]; then
+    NEED_POSTGRESQL_17=true
+  fi
+fi
+
+PACKAGES=()
+command -v rclone >/dev/null 2>&1 || PACKAGES+=(rclone)
+[[ "$NEED_POSTGRESQL_17" == false ]] || PACKAGES+=(postgresql-client-17)
+
+if ((${#PACKAGES[@]})); then
+  command -v apt-get >/dev/null 2>&1 || {
+    printf 'Install these host packages manually: %s\n' "${PACKAGES[*]}" >&2
+    exit 1
+  }
+  apt-get update
+  apt-get install --yes --no-install-recommends "${PACKAGES[@]}"
+fi
+
+for command_name in pg_dump pg_restore rclone; do
+  command -v "$command_name" >/dev/null 2>&1 || {
+    printf 'Required command is still missing: %s\n' "$command_name" >&2
+    exit 1
+  }
+done
+
+PG_DUMP_VERSION="$(pg_dump --version)"
+PG_RESTORE_VERSION="$(pg_restore --version)"
+if [[ ! "$PG_DUMP_VERSION" =~ \(PostgreSQL\)[[:space:]]17\.[0-9]+ ]] ||
+  [[ ! "$PG_RESTORE_VERSION" =~ \(PostgreSQL\)[[:space:]]17\.[0-9]+ ]]; then
+  printf 'PostgreSQL 17 client tools are required for the production database.\n' >&2
+  exit 1
+fi
+
+printf 'Host dependencies are ready: rclone and PostgreSQL 17 client tools.\n'

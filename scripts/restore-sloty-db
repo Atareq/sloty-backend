@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)"
+# shellcheck source=scripts/lib/sloty-db-backup.sh
+source "${SCRIPT_DIR}/lib/sloty-db-backup.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  restore-sloty-db --database TARGET_DB (--file LOCAL.dump | --remote R2_FILENAME)
+                   [--confirm-production sloty_prod]
+
+The target database must already exist. The script never drops or cleans it.
+EOF
+}
+
+TARGET_DB=""
+LOCAL_DUMP=""
+REMOTE_NAME=""
+PRODUCTION_CONFIRMATION=""
+while (($#)); do
+  case "$1" in
+    --database)
+      (($# >= 2)) || sloty_die "--database requires a target name"
+      TARGET_DB="$2"
+      shift 2
+      ;;
+    --file)
+      (($# >= 2)) || sloty_die "--file requires a local dump path"
+      LOCAL_DUMP="$2"
+      shift 2
+      ;;
+    --remote)
+      (($# >= 2)) || sloty_die "--remote requires an R2 dump filename"
+      REMOTE_NAME="$2"
+      shift 2
+      ;;
+    --confirm-production)
+      (($# >= 2)) || sloty_die "--confirm-production requires the exact database name"
+      PRODUCTION_CONFIRMATION="$2"
+      shift 2
+      ;;
+    --help | -h)
+      usage
+      exit 0
+      ;;
+    *) sloty_die "Unknown argument" ;;
+  esac
+done
+
+[[ -n "$TARGET_DB" ]] || sloty_die "An explicit --database target is required"
+[[ "$TARGET_DB" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]] ||
+  sloty_die "Target database name is invalid"
+if [[ "$TARGET_DB" == "sloty_prod" &&
+      "$PRODUCTION_CONFIRMATION" != "sloty_prod" ]]; then
+  sloty_die "Production restore requires --confirm-production sloty_prod"
+fi
+if [[ "$TARGET_DB" != "sloty_prod" && -n "$PRODUCTION_CONFIRMATION" ]]; then
+  sloty_die "Production confirmation is only valid for sloty_prod"
+fi
+
+[[ -n "$LOCAL_DUMP" || -n "$REMOTE_NAME" ]] ||
+  sloty_die "Specify exactly one of --file or --remote"
+[[ -z "$LOCAL_DUMP" || -z "$REMOTE_NAME" ]] ||
+  sloty_die "Specify exactly one of --file or --remote"
+
+sloty_require_database_connection
+sloty_require_commands pg_restore
+umask 077
+
+BACKUP_DIR="${SLOTY_BACKUP_DIR:-/var/backups/sloty/postgres}"
+PARTIAL_PATH=""
+DOWNLOADED_PATH=""
+cleanup_partial() {
+  if [[ -n "$PARTIAL_PATH" && -e "$PARTIAL_PATH" ]]; then
+    rm -f -- "$PARTIAL_PATH"
+  fi
+}
+trap cleanup_partial EXIT
+
+if [[ -n "$REMOTE_NAME" ]]; then
+  [[ "$REMOTE_NAME" =~ ^sloty_prod-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}[+-][0-9]{4}\.dump$ ]] ||
+    sloty_die "Remote object must be a timestamped Sloty dump filename"
+  sloty_require_commands rclone mktemp mv rm
+  sloty_configure_rclone
+  [[ -d "$BACKUP_DIR" && -w "$BACKUP_DIR" ]] ||
+    sloty_die "Sloty backup directory must exist and be writable"
+
+  DOWNLOADED_PATH="${BACKUP_DIR}/${REMOTE_NAME}"
+  PARTIAL_PATH="${BACKUP_DIR}/.${REMOTE_NAME}.partial"
+  [[ ! -e "$DOWNLOADED_PATH" && ! -e "$PARTIAL_PATH" ]] ||
+    sloty_die "A local file with this backup name already exists"
+
+  printf 'Downloading selected R2 backup...\n'
+  : > "$PARTIAL_PATH"
+  sloty_rclone copyto "sloty:${R2_BUCKET}/db/${REMOTE_NAME}" "$PARTIAL_PATH"
+  printf 'Validating backup...\n'
+  pg_restore --list "$PARTIAL_PATH" >/dev/null
+  mv -- "$PARTIAL_PATH" "$DOWNLOADED_PATH"
+  PARTIAL_PATH=""
+  LOCAL_DUMP="$DOWNLOADED_PATH"
+else
+  [[ -f "$LOCAL_DUMP" && -r "$LOCAL_DUMP" ]] ||
+    sloty_die "Local dump file does not exist or is unreadable"
+fi
+
+if [[ -n "$REMOTE_NAME" ]]; then
+  :
+else
+  printf 'Validating backup...\n'
+  pg_restore --list "$LOCAL_DUMP" >/dev/null
+fi
+
+printf 'Restoring into %s...\n' "$TARGET_DB"
+pg_restore \
+  --exit-on-error \
+  --single-transaction \
+  --dbname="$TARGET_DB" \
+  "$LOCAL_DUMP"
+
+if [[ -n "$REMOTE_NAME" ]]; then
+  rm -- "$DOWNLOADED_PATH"
+fi
+printf 'Restore completed successfully.\n'

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)"
+# shellcheck source=scripts/lib/sloty-db-backup.sh
+source "${SCRIPT_DIR}/lib/sloty-db-backup.sh"
+
+sloty_require_commands pg_dump pg_restore rclone date find wc mv rm
+sloty_require_database_connection
+sloty_require_backup_database
+sloty_configure_rclone
+
+BACKUP_DIR="${SLOTY_BACKUP_DIR:-/var/backups/sloty/postgres}"
+[[ -d "$BACKUP_DIR" && -w "$BACKUP_DIR" ]] ||
+  sloty_die "Sloty backup directory must exist and be writable"
+
+umask 077
+find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type f \
+  -name 'sloty_prod-*.dump' -mtime +6 -delete
+
+TIMESTAMP="$(TZ=Africa/Cairo date +'%Y-%m-%dT%H%M%S%z')"
+BACKUP_NAME="sloty_prod-${TIMESTAMP}.dump"
+BACKUP_PATH="${BACKUP_DIR}/${BACKUP_NAME}"
+PARTIAL_PATH="${BACKUP_DIR}/.${BACKUP_NAME}.partial"
+R2_DIRECTORY="sloty:${R2_BUCKET}/db"
+R2_OBJECT="${R2_DIRECTORY}/${BACKUP_NAME}"
+
+[[ ! -e "$BACKUP_PATH" && ! -e "$PARTIAL_PATH" ]] ||
+  sloty_die "A backup with this timestamp already exists"
+
+cleanup_partial() {
+  if [[ -n "${PARTIAL_PATH:-}" && -e "$PARTIAL_PATH" ]]; then
+    rm -f -- "$PARTIAL_PATH"
+  fi
+}
+trap cleanup_partial EXIT
+
+printf 'Creating backup...\n'
+pg_dump \
+  --format=custom \
+  --compress=zstd:9 \
+  --file="$PARTIAL_PATH" \
+  --dbname="$DB_NAME"
+[[ -s "$PARTIAL_PATH" ]] || sloty_die "pg_dump produced an empty archive"
+
+printf 'Validating backup...\n'
+pg_restore --list "$PARTIAL_PATH" >/dev/null
+mv -- "$PARTIAL_PATH" "$BACKUP_PATH"
+PARTIAL_PATH=""
+
+LOCAL_SIZE="$(wc -c < "$BACKUP_PATH")"
+[[ "$LOCAL_SIZE" =~ ^[0-9]+$ ]] || sloty_die "Could not determine local archive size"
+
+printf 'Uploading backup...\n'
+# R2 returned 501 for the post-PUT HEAD check in the observed environment.
+# The explicit list/size check below verifies the uploaded object.
+sloty_rclone copyto "$BACKUP_PATH" "$R2_OBJECT"
+
+printf 'Verifying remote backup...\n'
+REMOTE_LISTING="$(sloty_rclone lsf \
+  --format=sp \
+  --separator=$'\t' \
+  --files-only \
+  "$R2_DIRECTORY/")"
+REMOTE_SIZE=""
+REMOTE_FOUND=false
+while IFS=$'\t' read -r listed_size listed_name; do
+  [[ "$listed_name" == "$BACKUP_NAME" ]] || continue
+  [[ "$REMOTE_FOUND" == false ]] || sloty_die "Remote backup listing is ambiguous"
+  REMOTE_FOUND=true
+  REMOTE_SIZE="$listed_size"
+done <<< "$REMOTE_LISTING"
+
+[[ "$REMOTE_FOUND" == true && "$REMOTE_SIZE" =~ ^[0-9]+$ ]] ||
+  sloty_die "Remote backup was not found in the R2 listing"
+[[ "$REMOTE_SIZE" == "$LOCAL_SIZE" ]] ||
+  sloty_die "Remote backup size does not match the local archive"
+
+rm -- "$BACKUP_PATH"
+printf 'Backup completed successfully.\n'

@@ -180,6 +180,83 @@ sudo systemctl restart sloty-backend.service
 sudo systemctl is-active --quiet sloty-backend.service
 ```
 
+### PostgreSQL Backups and Restore
+
+The backup and restore commands are `scripts/backup-sloty-db` and
+`scripts/restore-sloty-db`. The host installer is
+`scripts/install-host-dependencies`; it installs `rclone` and the PostgreSQL 17
+client package when needed, then validates `pg_dump` and `pg_restore`. These
+are host tools, not Python requirements. The installer does not restart
+services.
+
+Prepare a private local directory and install the repo-owned systemd units as
+symlinks. Keep `/etc/sloty/env/backup.env` root-only (`root:root`, mode `0600`);
+systemd reads both environment files before starting the backup as `sloty`.
+The backend service itself does not load `backup.env`.
+
+```bash
+sudo /srv/sloty/backend/scripts/install-host-dependencies
+sudo install -d -o sloty -g sloty -m 0700 /var/backups/sloty/postgres
+sudo ln -sfn /srv/sloty/backend/scripts/systemd/sloty-db-backup.service /etc/systemd/system/sloty-db-backup.service
+sudo ln -sfn /srv/sloty/backend/scripts/systemd/sloty-db-backup.timer /etc/systemd/system/sloty-db-backup.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now sloty-db-backup.timer
+```
+
+The timer runs once daily at 09:00 `Africa/Cairo`, independent of the host
+timezone, and catches up once after downtime. The service writes a PostgreSQL
+custom archive compressed with Zstandard level 9, validates it with
+`pg_restore --list`, uploads only to `sloty-prod-backups/db/`, and compares the
+listed remote filename and size with the local archive before deleting it.
+Rclone uses environment-backed Cloudflare S3 settings and `/dev/null` as its
+config path; it does not create a persistent `rclone.conf`. Its S3 `no_head`
+setting skips the post-PUT HEAD request that R2 rejected; the script performs
+its own list-based size/name check afterward. See the
+[PostgreSQL 17 `pg_dump` options](https://www.postgresql.org/docs/17/app-pgdump.html)
+and [rclone S3 options](https://rclone.org/s3/). No ACL header is forced.
+
+Successful uploads remove their local temporary archive. Failed uploads or
+remote verification leave a valid local dump for recovery; dumps older than
+seven days are pruned at the next run. R2 lifecycle retention remains configured
+on the bucket, not by this script.
+
+To run the first backup and inspect its result without showing environment
+contents:
+
+```bash
+sudo systemctl start sloty-db-backup.service
+sudo systemctl --no-pager --full status sloty-db-backup.service
+sudo journalctl -u sloty-db-backup.service --since today --no-pager
+```
+
+For a restore test, first create an empty `sloty_restore_test` database owned
+by or accessible to the configured DB role. Replace the sample object name with
+one listed under the R2 `db/` prefix. `systemd-run` supplies the same env files
+without shell-parsing them; the restore command validates the archive before
+restoring and will not drop or clean the target.
+
+```bash
+sudo systemd-run --wait --pipe --collect --unit=sloty-db-restore-test \
+  --property=User=sloty \
+  --property=EnvironmentFile=/etc/sloty/env/prod.env \
+  --property=EnvironmentFile=/etc/sloty/env/backup.env \
+  /srv/sloty/backend/scripts/restore-sloty-db \
+  --database sloty_restore_test \
+  --remote 'sloty_prod-YYYY-MM-DDTHHMMSS+0300.dump'
+```
+
+Restoring to `sloty_prod` additionally requires
+`--confirm-production sloty_prod`. Do not use that confirmation for a test
+restore. To disable and remove only the scheduled backup units while preserving
+local and R2 archives:
+
+```bash
+sudo systemctl disable --now sloty-db-backup.timer
+sudo systemctl stop sloty-db-backup.service
+sudo rm /etc/systemd/system/sloty-db-backup.timer /etc/systemd/system/sloty-db-backup.service
+sudo systemctl daemon-reload
+```
+
 Unauthenticated `GET /health/` is the dedicated deploy/systemd probe and returns
 `{"status": "ok"}` without touching PostgreSQL.
 
