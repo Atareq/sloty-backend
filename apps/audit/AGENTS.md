@@ -21,6 +21,7 @@
 
 - [`AuditLog`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/audit/models.py):
   - `club`, `court` (nullable), `actor` (nullable for system events like hold expiry).
+  - `club`, `court` (nullable), `actor` (nullable ForeignKey to `Profile` representing the operational actor, null for system events like hold expiry).
   - `action`: Fixed `Action` choices enum.
   - `entity_type`, `entity_id`: Logical reference to the audited entity.
   - `before_data`, `after_data`, `metadata`: JSON snapshot payloads.

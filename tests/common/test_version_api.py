@@ -118,13 +118,40 @@ class BackendVersionAPITests(APITestCase):
         self.assertIsNone(response.data["commit"])
         self.assertNotEqual(response.data.get("commit"), "abc")
 
-    def test_anonymous_access_is_denied(self):
+    def test_anonymous_access_is_allowed(self):
         self.client.force_authenticate(user=None)
+        self._write_metadata(
+            {
+                "service": "sloty-backend",
+                "release": VALID_RELEASE,
+                "commit": VALID_COMMIT,
+            }
+        )
 
         response = self._get()
 
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-        self.assertNotIn("release", response.data)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["service"], "sloty-backend")
+        self.assertEqual(response.data["release"], VALID_RELEASE)
+        self.assertEqual(response.data["commit"], VALID_COMMIT)
+
+    def test_no_authorization_header_returns_ok(self):
+        self.client.force_authenticate(user=None)
+        self.client.credentials()
+
+        response = self._get()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["service"], "sloty-backend")
+
+    def test_invalid_or_malformed_authorization_header_is_ignored(self):
+        self.client.force_authenticate(user=None)
+        self.client.credentials(HTTP_AUTHORIZATION="Bearer invalid-token-value")
+
+        response = self._get()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["service"], "sloty-backend")
 
     def test_authenticated_access_is_allowed(self):
         response = self._get()

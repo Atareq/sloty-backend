@@ -361,7 +361,8 @@ def test_deploy_script_uses_isolated_runtime_and_health_probe():
     assert "http://127.0.0.1:8020/health/" in script
     assert "Host: ${SLOTY_HEALTH_HOST}" in script
     assert "api.sloty.baronlearning.com" in script
-    assert "backend.env" in script
+    assert "/env/prod.env" in script
+    assert "/etc/sloty/backend.env" not in script
     assert "merge-base --is-ancestor" in script
     assert "--write-out" in script and "%{http_code}" in script
     assert "--location" not in script

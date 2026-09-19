@@ -266,7 +266,7 @@ Services should **not** normally contain `if user.role == ...` or re-check club/
 - Dashboard uses Spine context + matrix (`DashboardViewSet` actions) and source-domain `scoped_queryset` aggregations.
 - Audit uses v2 resource query mixin (club only, never court). Staff are matrix-denied.
 - Reports uses Spine context + matrix (`CourtUsageReportViewSet` list) and source-domain `scoped_queryset` aggregations.
-- Clubs memberships and club user lists use v2 resource query mixin (`ResourceScope.CLUB`). Global multi-club `ClubViewSet` uses `scoped_clubs_for_user()` and `CanManageClubs`. Legacy `ClubAccessContext` is retained for test helper compatibility.
+- Clubs memberships and club user lists use v2 resource query mixin (`ResourceScope.CLUB`). Global multi-club `ClubViewSet` uses `scoped_clubs_for_profile()` and `CanManageClubs`. Legacy `ClubAccessContext` is retained for test helper compatibility.
 
 ### Migration Notes
 

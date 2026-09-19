@@ -14,9 +14,10 @@ class UserModelTests(TestCase):
             username="pending-profile", password="test-pass-123"
         )
         self.assertTrue(user.check_password("test-pass-123"))
-        self.assertIsNone(user.role)
-        self.assertFalse(user.is_platform_super_admin())
         self.assertNotIn("role", {field.name for field in User._meta.local_fields})
+        self.assertNotIn("created_by", {field.name for field in User._meta.fields})
+        self.assertFalse(hasattr(user, "role"))
+        self.assertFalse(hasattr(user, "is_platform_super_admin"))
 
     def create_user(self, username: str, **extra_fields) -> User:
         return User.objects.create_user(
@@ -25,32 +26,16 @@ class UserModelTests(TestCase):
             **extra_fields,
         )
 
-    def test_admin_profile_controls_platform_helper(self):
+    def test_admin_profile_controls_platform_permission(self):
         user = self.create_user(username="platform-admin")
         AdminProfile.objects.create(user=user, role=Profile.Role.ADMIN)
 
-        self.assertTrue(user.is_platform_super_admin())
+        self.assertTrue(
+            IsPlatformSuperAdmin().has_permission(SimpleNamespace(user=user), view=None)
+        )
 
     def test_required_fields_do_not_include_role(self):
         self.assertEqual(User.REQUIRED_FIELDS, ["email"])
-
-    def test_created_by_can_be_null(self):
-        user = self.create_user(
-            username="created-by-null",
-            created_by=None,
-        )
-
-        self.assertIsNone(user.created_by)
-
-    def test_created_by_can_point_to_another_user(self):
-        creator = self.create_user(username="creator")
-
-        user = self.create_user(
-            username="created-by-user",
-            created_by=creator,
-        )
-
-        self.assertEqual(user.created_by, creator)
 
     def test_phone_number_allows_null_and_blank(self):
         field = User._meta.get_field("phone_number")

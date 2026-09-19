@@ -31,6 +31,7 @@ class AuditLogViewSet(
 
     authorization_model = AuditLog
     authorization_scope = ResourceScope.CLUB
+    authorization_select_related = ("actor__user",)
     permission_classes = (SlotyBasePermission,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = AuditLogFilter

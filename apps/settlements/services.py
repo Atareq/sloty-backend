@@ -10,6 +10,7 @@ from apps.bookings.identity import (
     booking_customer_display_phone,
 )
 from apps.common.exceptions import SlotyAPIException
+from apps.profiles.models import Profile
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
@@ -151,10 +152,15 @@ def create(club, user=None, *, settled_by, notes="", court=None) -> Settlement:
 
             from apps.audit.models import AuditLog
 
+            audit_actor = (
+                settled_by.profile
+                if settled_by is not None and hasattr(settled_by, "profile")
+                else (settled_by if isinstance(settled_by, Profile) else None)
+            )
             record_audit_log(
                 club=settlement.club,
                 court=settlement.court,
-                actor=settled_by,
+                actor=audit_actor,
                 action=AuditLog.Action.SETTLEMENT_CREATED,
                 entity_type="Settlement",
                 entity_id=settlement.id,

@@ -16,23 +16,13 @@ class UserAdmin(DjangoUserAdmin):
     )
     fieldsets = DjangoUserAdmin.fieldsets + (
         (
-            "Sloty profile",
-            {
-                "fields": (
-                    "phone_number",
-                    "created_by",
-                )
-            },
+            "Sloty account",
+            {"fields": ("phone_number",)},
         ),
     )
     add_fieldsets = DjangoUserAdmin.add_fieldsets + (
         (
-            "Sloty profile",
-            {
-                "fields": (
-                    "phone_number",
-                    "created_by",
-                )
-            },
+            "Sloty account",
+            {"fields": ("phone_number",)},
         ),
     )

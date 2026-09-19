@@ -33,7 +33,6 @@ class SeedDemoDataCommandTests(TestCase):
         self.run_seed_command()
 
         platform_admin = User.objects.get(username="platform_admin")
-        self.assertTrue(platform_admin.is_platform_super_admin())
         self.assertEqual(platform_admin.profile.role, Profile.Role.ADMIN)
         self.assertTrue(AdminProfile.objects.filter(user=platform_admin).exists())
         self.assertTrue(platform_admin.is_staff)
@@ -41,7 +40,6 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertEqual(platform_admin.get_full_name(), "Tarek Platform Admin")
 
         hossam_admin = User.objects.get(username="hossam_admin")
-        self.assertTrue(hossam_admin.is_platform_super_admin())
         self.assertEqual(hossam_admin.profile.role, Profile.Role.ADMIN)
         self.assertTrue(AdminProfile.objects.filter(user=hossam_admin).exists())
         self.assertTrue(hossam_admin.is_staff)
@@ -172,22 +170,21 @@ class SeedDemoDataCommandTests(TestCase):
         owner = users["owner"]
         staff = users["staff"]
 
-        self.assertTrue(admin.is_platform_super_admin())
         self.assertEqual(admin.profile.role, Profile.Role.ADMIN)
         self.assertTrue(AdminProfile.objects.filter(user=admin).exists())
-        self.assertIsNone(admin.created_by)
+        self.assertIsNone(admin.profile.created_by)
 
-        self.assertEqual(owner.created_by, admin)
+        self.assertEqual(owner.profile.created_by, admin.profile)
         self.assertEqual(owner.profile.role, Profile.Role.OWNER)
         self.assertTrue(hasattr(owner.profile, "owner_profile"))
 
-        self.assertEqual(staff.created_by, owner)
+        self.assertEqual(staff.profile.created_by, owner.profile)
         self.assertEqual(staff.profile.role, Profile.Role.STAFF)
         self.assertTrue(hasattr(staff.profile, "staff_profile"))
 
         club = Club.objects.get(slug="albaladya-test")
         self.assertEqual(club.name, "Albaladya Test")
-        self.assertEqual(club.created_by, admin)
+        self.assertEqual(club.created_by, admin.profile)
         self.assertEqual(club.governorate, "ASSIUT")
         self.assertEqual(club.city, "ASSIUT_MARKAZ")
         self.assertEqual(str(club.phone_number), "+201000000001")
@@ -201,7 +198,7 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertTrue(court.is_active)
         self.assertFalse(court.requires_digital_payment_reference)
         self.assertEqual(court.internal_hold_expiry_hours, 12)
-        self.assertEqual(court.created_by, owner)
+        self.assertEqual(court.created_by, owner.profile)
         self.assertEqual(staff.profile.staff_profile.club, club)
         self.assertTrue(
             staff.profile.staff_profile.court_accesses.filter(court=court).exists()
@@ -253,9 +250,10 @@ class SeedDemoDataCommandTests(TestCase):
         club = Club.objects.get(slug="albaladya-test")
         court = Court.objects.get(club=club, name="Albaladya Main Court")
         owner.email = "wrong@example.com"
-        owner.created_by = None
         owner.set_password("wrong-password")
-        owner.save(update_fields=["email", "created_by", "password"])
+        owner.save(update_fields=["email", "password"])
+        owner.profile.created_by = None
+        owner.profile.save(update_fields=["created_by"])
         club.name = "Wrong Club Name"
         club.save(update_fields=["name"])
         court.slot_duration_minutes = 30
@@ -290,10 +288,14 @@ class SeedDemoDataCommandTests(TestCase):
         )
 
         owner.refresh_from_db()
+        owner.profile.refresh_from_db()
         club.refresh_from_db()
         court.refresh_from_db()
         self.assertEqual(owner.email, "owner@sloty.test")
-        self.assertEqual(owner.created_by, User.objects.get(username="admin"))
+        self.assertEqual(
+            owner.profile.created_by,
+            User.objects.get(username="admin").profile,
+        )
         self.assertTrue(owner.check_password("Admin@123456"))
         self.assertEqual(club.name, "Albaladya Test")
         self.assertEqual(court.slot_duration_minutes, 60)

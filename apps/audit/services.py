@@ -1,11 +1,24 @@
+from typing import Optional
+
 from apps.audit.models import AuditLog
 from apps.bookings.identity import (
     booking_customer_display_name,
     booking_customer_display_phone,
 )
+from apps.profiles.models import Profile
 
 
-def user_display_name(user):
+def actor_display_name(actor: Optional[Profile]) -> str:
+    if actor is None:
+        return ""
+    user = getattr(actor, "user", None)
+    if user:
+        full_name = user.get_full_name().strip()
+        return full_name or user.username
+    return str(actor)
+
+
+def user_display_name(user) -> str:
     if user is None:
         return ""
     full_name = user.get_full_name().strip()
@@ -78,7 +91,7 @@ def settlement_audit_snapshot(settlement):
 def record_audit_log(
     *,
     club,
-    actor,
+    actor: Optional[Profile],
     action,
     entity_type,
     entity_id,
@@ -89,7 +102,7 @@ def record_audit_log(
 ):
     metadata = dict(metadata or {})
     display_snapshot = dict(metadata.get("display_snapshot") or {})
-    display_snapshot.setdefault("actor_name", user_display_name(actor))
+    display_snapshot.setdefault("actor_name", actor_display_name(actor))
     display_snapshot.setdefault("court_name", court.name if court is not None else "")
     metadata["display_snapshot"] = display_snapshot
     return AuditLog.objects.create(

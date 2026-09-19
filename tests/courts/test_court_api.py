@@ -128,7 +128,7 @@ class CourtAPITests(CourtAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         court = Court.objects.get(name="Court 1")
         self.assertEqual(court.club, self.club)
-        self.assertEqual(court.created_by, self.platform_admin)
+        self.assertEqual(court.created_by_id, self.platform_admin.profile.pk)
         self.assertEqual(court.default_price, 0)
         self.assertFalse(response.data["pricing_configured"])
         self.assertIsNone(response.data["minimum_slot_price"])

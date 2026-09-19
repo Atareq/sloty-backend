@@ -182,9 +182,36 @@ class Command(BaseCommand):
     def seed_albaladya_test(self):
         with transaction.atomic():
             users = self.create_albaladya_users()
-            club = self.create_albaladya_club(users)
-            court = self.create_albaladya_court(users, club)
-            profiles = self.create_albaladya_profiles(users, club, court)
+            admin, _ = AdminProfile.objects.update_or_create(
+                user=users["admin"],
+                defaults={
+                    "role": Profile.Role.ADMIN,
+                    "is_enabled": True,
+                    "created_by": None,
+                },
+            )
+            owner, _ = OwnerProfile.objects.update_or_create(
+                user=users["owner"],
+                defaults={
+                    "role": Profile.Role.OWNER,
+                    "is_enabled": True,
+                    "created_by": admin,
+                },
+            )
+            club = self.create_albaladya_club(admin)
+            owner.clubs.set([club])
+            court = self.create_albaladya_court(owner, club)
+            staff, _ = StaffProfile.objects.update_or_create(
+                user=users["staff"],
+                defaults={
+                    "role": Profile.Role.STAFF,
+                    "is_enabled": True,
+                    "club": club,
+                    "created_by": owner,
+                },
+            )
+            StaffCourtAccess.objects.get_or_create(staff_profile=staff, court=court)
+            profiles = {"admin": admin, "owner": owner, "staff": staff}
             self.replace_albaladya_working_hours(court)
         self.print_albaladya_summary(users, club, court, profiles)
 
@@ -206,18 +233,9 @@ class Command(BaseCommand):
             user.save(update_fields=["password"])
             users[spec["username"]] = user
 
-        for spec in ALBALADYA_USER_SPECS:
-            created_by_username = spec["created_by"]
-            created_by = (
-                users[created_by_username] if created_by_username is not None else None
-            )
-            user = users[spec["username"]]
-            if user.created_by_id != getattr(created_by, "id", None):
-                user.created_by = created_by
-                user.save(update_fields=["created_by"])
         return users
 
-    def create_albaladya_club(self, users):
+    def create_albaladya_club(self, admin_profile):
         club, _ = Club.objects.update_or_create(
             slug="albaladya-test",
             defaults={
@@ -227,12 +245,12 @@ class Command(BaseCommand):
                 "address": "Albaladya Test Club, Assiut",
                 "phone_number": "+201000000001",
                 "is_active": True,
-                "created_by": users["admin"],
+                "created_by": admin_profile,
             },
         )
         return club
 
-    def create_albaladya_court(self, users, club):
+    def create_albaladya_court(self, owner_profile, club):
         court, _ = Court.objects.update_or_create(
             club=club,
             name="Albaladya Main Court",
@@ -246,27 +264,10 @@ class Command(BaseCommand):
                 "requires_digital_payment_reference": False,
                 "internal_hold_expiry_hours": 12,
                 "notes": "Main court for local development and frontend testing.",
-                "created_by": users["owner"],
+                "created_by": owner_profile,
             },
         )
         return court
-
-    def create_albaladya_profiles(self, users, club, court):
-        admin, _ = AdminProfile.objects.update_or_create(
-            user=users["admin"],
-            defaults={"role": Profile.Role.ADMIN, "is_enabled": True},
-        )
-        owner, _ = OwnerProfile.objects.update_or_create(
-            user=users["owner"],
-            defaults={"role": Profile.Role.OWNER, "is_enabled": True},
-        )
-        owner.clubs.set([club])
-        staff, _ = StaffProfile.objects.update_or_create(
-            user=users["staff"],
-            defaults={"role": Profile.Role.STAFF, "is_enabled": True, "club": club},
-        )
-        StaffCourtAccess.objects.get_or_create(staff_profile=staff, court=court)
-        return {"admin": admin, "owner": owner, "staff": staff}
 
     def albaladya_working_hours_payload(self):
         rows = []
@@ -331,6 +332,14 @@ class Command(BaseCommand):
         return users
 
     def create_clubs(self, users):
+        admin_profile, _ = AdminProfile.objects.update_or_create(
+            user=users["platform_admin"],
+            defaults={
+                "role": Profile.Role.ADMIN,
+                "is_enabled": True,
+                "created_by": None,
+            },
+        )
         clubs = {}
         for spec in CLUB_SPECS:
             club, _ = Club.objects.update_or_create(
@@ -341,13 +350,14 @@ class Command(BaseCommand):
                     "city": spec["city"],
                     "address": spec["address"],
                     "is_active": True,
-                    "created_by": users["platform_admin"],
+                    "created_by": admin_profile,
                 },
             )
             clubs[spec["key"]] = club
         return clubs
 
     def create_courts(self, users, clubs):
+        admin_profile = users["platform_admin"].profile
         courts = {}
         for club_key, club in clubs.items():
             courts[club_key] = {}
@@ -364,7 +374,7 @@ class Command(BaseCommand):
                         "is_active": True,
                         "requires_digital_payment_reference": index == 2,
                         "internal_hold_expiry_hours": 12,
-                        "created_by": users["platform_admin"],
+                        "created_by": admin_profile,
                     },
                 )
                 courts[club_key][index] = court
@@ -393,18 +403,33 @@ class Command(BaseCommand):
         for username, _, _, role, _, _ in USER_SPECS:
             if role == Profile.Role.ADMIN:
                 profiles[username], _ = AdminProfile.objects.update_or_create(
-                    user=users[username], defaults={"role": role, "is_enabled": True}
+                    user=users[username],
+                    defaults={
+                        "role": role,
+                        "is_enabled": True,
+                        "created_by": None,
+                    },
                 )
+        platform_admin = profiles["platform_admin"]
         for club_key, club in clubs.items():
             suffix = club_key.lower()
             owner, _ = OwnerProfile.objects.update_or_create(
                 user=users[f"owner_{suffix}"],
-                defaults={"role": Profile.Role.OWNER, "is_enabled": True},
+                defaults={
+                    "role": Profile.Role.OWNER,
+                    "is_enabled": True,
+                    "created_by": platform_admin,
+                },
             )
             owner.clubs.set([club])
             staff, _ = StaffProfile.objects.update_or_create(
                 user=users[f"staff_{suffix}"],
-                defaults={"role": Profile.Role.STAFF, "is_enabled": True, "club": club},
+                defaults={
+                    "role": Profile.Role.STAFF,
+                    "is_enabled": True,
+                    "club": club,
+                    "created_by": owner,
+                },
             )
             StaffCourtAccess.objects.get_or_create(
                 staff_profile=staff, court=courts[club_key][1]
@@ -616,11 +641,12 @@ class Command(BaseCommand):
                     settlements,
                 )
                 seed_key = f"DEMO-{club_key}-{action.replace('_', '-')}"
-                actor = (
+                user_obj = (
                     users["platform_admin"]
                     if actor_type == "platform"
                     else users[f"{actor_type}_{club_key.lower()}"]
                 )
+                actor = getattr(user_obj, "profile", None)
                 audit_log, _ = AuditLog.objects.get_or_create(
                     club=club,
                     action=action,

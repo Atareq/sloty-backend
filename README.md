@@ -120,10 +120,65 @@ sudo /srv/sloty/backend/scripts/deploy-sloty-backend <SHA> <TAG>
 There is no `/usr/local/sbin` copy. The script discovers the repository root
 from git, snapshots its own `scripts/` bundle to `/tmp` before checkout, uses
 `<repo>/.venv` (`Python 3.12.14` from `/opt/sloty-runtime/python/`), loads
-`/etc/sloty/backend.env`, restarts only `sloty-backend.service`, and must not
-manage PostgreSQL, Nginx, or system Python. CI calculates the release tag once,
-deploys that exact SHA and tag, then creates or reuses the GitHub Release with
-the same values.
+`/etc/sloty/env/prod.env`, restarts only `sloty-backend.service`, and must not
+manage PostgreSQL, Nginx, or system Python. The canonical unit is
+`deploy/systemd/sloty-backend.service`; it loads only `prod.env`, never the
+backup credentials. CI calculates the release tag once, deploys that exact SHA
+and tag, then creates or reuses the GitHub Release with the same values.
+
+### Production Environment Files
+
+The repository tracks placeholder-only templates in `env/`. Django production
+configuration is defined by `config/settings/base.py`: `SECRET_KEY`, `DEBUG`,
+`ALLOWED_HOSTS`, PostgreSQL `DB_*` settings, optional `DB_SSLMODE`, and the
+optional JWT and SQL-query-stat settings. No email-specific environment
+variables are currently consumed by this backend. Backup-only R2 settings are
+listed separately in `env/backup.env.example` and are not loaded by Gunicorn.
+A future root-run backup service may load both files; no backup service is
+implemented by this change.
+
+On each trusted operator machine, secure local copies may use the same paths as
+the VPS. These files are private and are never part of Git:
+
+```text
+/etc/sloty/env/prod.env
+/etc/sloty/env/backup.env
+```
+
+To migrate the VPS without restarting against a missing env file, run the
+following in order. The `--no-clobber` copy preserves an already prepared new
+production file when retrying. Keep the old file until health verification
+passes.
+
+```bash
+sudo install -d -o root -g sloty -m 0750 /etc/sloty/env
+sudo cp -a /etc/sloty/backend.env /root/sloty-backend.env.before-env-migration
+sudo cp --no-clobber /etc/sloty/backend.env /etc/sloty/env/prod.env
+sudo chown root:sloty /etc/sloty/env/prod.env
+sudo chmod 0640 /etc/sloty/env/prod.env
+sudo touch /etc/sloty/env/backup.env
+sudo chown root:root /etc/sloty/env/backup.env
+sudo chmod 0600 /etc/sloty/env/backup.env
+sudoedit /etc/sloty/env/backup.env
+sudo cp -a "$(systemctl show -p FragmentPath --value sloty-backend.service)" /root/sloty-backend.service.before-env-migration
+sudo install -o root -g root -m 0644 /srv/sloty/backend/deploy/systemd/sloty-backend.service /etc/systemd/system/sloty-backend.service
+sudo systemctl daemon-reload
+sudo systemctl restart sloty-backend.service
+sudo systemctl is-active --quiet sloty-backend.service
+curl --fail --silent --show-error --header 'Host: api.sloty.baronlearning.com' http://127.0.0.1:8020/health/
+sudo rm /etc/sloty/backend.env
+```
+
+If verification fails, restore the old path and the saved unit, then reload
+and restart:
+
+```bash
+sudo cp -a /root/sloty-backend.env.before-env-migration /etc/sloty/backend.env
+sudo cp -a /root/sloty-backend.service.before-env-migration /etc/systemd/system/sloty-backend.service
+sudo systemctl daemon-reload
+sudo systemctl restart sloty-backend.service
+sudo systemctl is-active --quiet sloty-backend.service
+```
 
 Unauthenticated `GET /health/` is the dedicated deploy/systemd probe and returns
 `{"status": "ok"}` without touching PostgreSQL.
@@ -168,8 +223,8 @@ Business APIs verify club access from the current Profile through the
 Authorization Spine; clients must not treat JWT club/court claims as authority.
 
 `/api/v1/me/` always includes `account_created_by`. The value is a nested
-`{"id": ..., "name": ...}` object from `User.created_by`, or `null` for
-historical/system-created accounts.
+`{"id": ..., "name": ...}` object from `Profile.created_by`, or `null` for
+historical/system-created profiles.
 
 ## Club User Onboarding
 

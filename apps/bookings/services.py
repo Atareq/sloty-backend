@@ -45,6 +45,7 @@ from apps.players.services import (
     find_or_create_player_profile,
     get_or_create_club_player,
 )
+from apps.profiles.models import Profile
 from apps.transactions.models import Transaction
 from apps.transactions.services import (
     annotate_booking_paid_amount,
@@ -1210,10 +1211,15 @@ def create_booking(
                 requested_at=requested_at,
                 booking_data=booking_data,
             )
+            audit_actor = (
+                created_by.profile
+                if created_by is not None and hasattr(created_by, "profile")
+                else (created_by if isinstance(created_by, Profile) else None)
+            )
             record_audit_log(
                 club=created_booking.club,
                 court=created_booking.court,
-                actor=created_by,
+                actor=audit_actor,
                 action=AuditLog.Action.BOOKING_CREATED,
                 entity_type="Booking",
                 entity_id=created_booking.id,
@@ -1383,10 +1389,15 @@ def create_booking_refund_transaction(
         notes=notes,
         created_by=actor,
     )
+    refund_actor = (
+        actor.profile
+        if actor is not None and hasattr(actor, "profile")
+        else (actor if isinstance(actor, Profile) else None)
+    )
     record_audit_log(
         club=refund_transaction.club,
         court=refund_transaction.court,
-        actor=actor,
+        actor=refund_actor,
         action=AuditLog.Action.TRANSACTION_CREATED,
         entity_type="Transaction",
         entity_id=refund_transaction.id,
@@ -1414,10 +1425,15 @@ def create_lifecycle_audit_log(
     after_data,
     metadata=None,
 ):
+    audit_actor = (
+        actor.profile
+        if actor is not None and hasattr(actor, "profile")
+        else (actor if isinstance(actor, Profile) else None)
+    )
     return record_audit_log(
         club=booking.club,
         court=booking.court,
-        actor=actor,
+        actor=audit_actor,
         action=action,
         entity_type="Booking",
         entity_id=booking.id,
@@ -1927,10 +1943,15 @@ def complete_booking(
                         "modified",
                     ]
                 )
+                audit_actor = (
+                    actor.profile
+                    if actor is not None and hasattr(actor, "profile")
+                    else (actor if isinstance(actor, Profile) else None)
+                )
                 record_audit_log(
                     club=next_payment.club,
                     court=next_payment.court,
-                    actor=actor,
+                    actor=audit_actor,
                     action=AuditLog.Action.TRANSACTION_CREATED,
                     entity_type="Transaction",
                     entity_id=next_payment.id,
@@ -1952,10 +1973,15 @@ def complete_booking(
                         "modified",
                     ]
                 )
+                audit_actor = (
+                    actor.profile
+                    if actor is not None and hasattr(actor, "profile")
+                    else (actor if isinstance(actor, Profile) else None)
+                )
             record_audit_log(
                 club=next_booking.club,
                 court=next_booking.court,
-                actor=actor,
+                actor=audit_actor,
                 action=AuditLog.Action.BOOKING_CREATED,
                 entity_type="Booking",
                 entity_id=next_booking.id,

@@ -13,6 +13,7 @@ urlpatterns = [
     path("api/system/version/", VersionAPIView.as_view(), name="system_version"),
     path("admin/", admin.site.urls),
     path("api/v1/", include("apps.accounts.urls")),
+    path("api/v1/", include("apps.profiles.urls")),
     path("api/v1/", include("apps.common.urls")),
     path("api/v1/", include("apps.clubs.urls")),
     path("api/v1/", include("apps.courts.urls")),

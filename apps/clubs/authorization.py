@@ -1,8 +1,7 @@
 from apps.profiles.models import Profile
 
 
-def has_active_club_profile_scope(user, club) -> bool:
-    profile = getattr(user, "profile", None)
+def has_active_club_profile_scope(profile, club) -> bool:
     if profile is None or not profile.is_enabled:
         return False
     if profile.role == Profile.Role.ADMIN:
@@ -15,8 +14,7 @@ def has_active_club_profile_scope(user, club) -> bool:
     return False
 
 
-def has_active_owner_profile_scope(user, club) -> bool:
-    profile = getattr(user, "profile", None)
+def has_active_owner_profile_scope(profile, club) -> bool:
     return bool(
         profile
         and profile.is_enabled
@@ -25,13 +23,13 @@ def has_active_owner_profile_scope(user, club) -> bool:
     )
 
 
-def can_manage_club(user, club, action: str) -> bool:
-    if not user or not user.is_authenticated:
+def can_manage_club(profile, club, action: str) -> bool:
+    if profile is None or not profile.is_enabled:
         return False
-    if user.is_platform_super_admin():
+    if profile.role == Profile.Role.ADMIN:
         return True
     return (
-        has_active_owner_profile_scope(user, club)
+        has_active_owner_profile_scope(profile, club)
         if action in {"update", "partial_update"}
-        else has_active_club_profile_scope(user, club)
+        else has_active_club_profile_scope(profile, club)
     )

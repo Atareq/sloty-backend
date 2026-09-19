@@ -8,7 +8,7 @@ ARCHITECTURAL INVARIANTS:
 3. Default Deny: If role, viewset, or action is unconfigured, access is strictly denied.
 4. Global tenant endpoint note: ClubViewSet (/api/v1/clubs/) serves as the
    platform-level club onboarding & tenant discovery endpoint governed by
-   CanManageClubs and scoped_clubs_for_user. Its entries in ROLE_PERMISSIONS reflect
+   CanManageClubs and scoped_clubs_for_profile. Its entries in ROLE_PERMISSIONS reflect
    this policy for uniform reference and testing.
 """
 
@@ -84,15 +84,8 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         "CourtUsageReportViewSet": {"list", "retrieve"},
         "PlayerProfileViewSet": {"list", "retrieve", "create"},
         "ClubPlayerViewSet": {"list", "retrieve", "create"},
-        "StaffViewSet": {
-            "list",
-            "retrieve",
-            "create",
-            "update",
-            "partial_update",
-            "destroy",
-            "courts",
-        },
+        "OwnerViewSet": {"list", "retrieve", "create"},
+        "StaffViewSet": {"list", "retrieve"},
     },
     Role.OWNER: {
         "ClubViewSet": {"list", "retrieve", "update", "partial_update"},

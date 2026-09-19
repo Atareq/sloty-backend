@@ -1,6 +1,6 @@
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -44,7 +44,8 @@ class HealthCheckAPIView(APIView):
 
 
 class VersionAPIView(APIView):
-    permission_classes = (IsAuthenticated,)
+    authentication_classes = ()
+    permission_classes = (AllowAny,)
     serializer_class = BackendVersionSerializer
 
     @extend_schema(

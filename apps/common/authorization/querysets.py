@@ -15,22 +15,17 @@ from apps.common.authorization.scopes import ResourceScope, normalize_scope_key
 
 
 def _is_valid_club_context(context) -> bool:
-    user = getattr(context, "user", None)
     club = getattr(context, "club", None)
-    role = getattr(context, "role", None)
+    profile = getattr(context, "profile", None)
+    user = getattr(profile, "user", None)
+    role = getattr(profile, "role", None)
     if not user or not getattr(user, "is_authenticated", False) or club is None:
         return False
 
-    profile = getattr(context, "profile", None)
-    if (
-        not profile
-        or not profile.is_enabled
-        or profile.user_id != user.pk
-        or profile.role != role
-    ):
+    if not profile:
         return False
     if role == Role.ADMIN:
-        return user.is_platform_super_admin()
+        return True
     if role == Role.OWNER:
         owner_profile = getattr(context, "owner_profile", None)
         return bool(

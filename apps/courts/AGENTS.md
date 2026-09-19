@@ -34,6 +34,7 @@
   - `minimum_deposit`: Minimum required first payment and late-cancellation retained amount. Must not exceed the court's lowest working-hour price once pricing exists (see Domain Invariants).
   - `internal_hold_expiry_hours`: Duration before unconfirmed `HOLD` bookings become eligible for expiry (default 12).
   - `cancellation_refund_notice_days`: Notice window required for full cancellation refund (null = unconfigured; 0 = until start).
+  - `created_by`: Nullable ForeignKey to `Profile` recording the creator's application profile (admin or owner).
 - [`CourtWorkingHour`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/models.py):
   - One record per court per weekday (`0` = Monday to `6` = Sunday).
 - [`CourtWorkingHourPricePeriod`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/models.py):

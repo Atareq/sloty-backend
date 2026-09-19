@@ -3,12 +3,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import status
 from rest_framework.generics import RetrieveAPIView
-from rest_framework.mixins import (
-    CreateModelMixin,
-    ListModelMixin,
-    RetrieveModelMixin,
-    UpdateModelMixin,
-)
+from rest_framework.mixins import ListModelMixin, RetrieveModelMixin, UpdateModelMixin
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -22,7 +17,6 @@ from apps.accounts.serializers import (
     PasswordChangeSerializer,
     SlotyTokenObtainPairSerializer,
     SlotyTokenRefreshSerializer,
-    UserCreateSerializer,
     UserListSerializer,
     UserMeSerializer,
     UserUpdateSerializer,
@@ -59,20 +53,13 @@ class MeAPIView(RetrieveAPIView):
     serializer_class = UserMeSerializer
 
     def get_object(self):
-        return (
-            User.objects.select_related("created_by")
-            .select_related("profile")
-            .get(pk=self.request.user.pk)
+        return User.objects.select_related("profile__created_by__user").get(
+            pk=self.request.user.pk
         )
 
 
 @extend_schema_view(
     list=extend_schema(tags=["Accounts"], responses=UserListSerializer),
-    create=extend_schema(
-        tags=["Accounts"],
-        request=UserCreateSerializer,
-        responses=UserListSerializer,
-    ),
     retrieve=extend_schema(tags=["Accounts"], responses=UserListSerializer),
     partial_update=extend_schema(
         tags=["Accounts"],
@@ -82,20 +69,15 @@ class MeAPIView(RetrieveAPIView):
 )
 class UserViewSet(
     ListModelMixin,
-    CreateModelMixin,
     RetrieveModelMixin,
     UpdateModelMixin,
     GenericViewSet,
 ):
-    queryset = (
-        User.objects.select_related("created_by")
-        .select_related("profile")
-        .order_by("id")
-    )
+    queryset = User.objects.select_related("profile__created_by").order_by("id")
     permission_classes = (CanAccessUsers,)
     filter_backends = (DjangoFilterBackend,)
     filterset_class = UserFilter
-    http_method_names = ("get", "post", "patch", "head", "options")
+    http_method_names = ("get", "patch", "head", "options")
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
@@ -105,13 +87,9 @@ class UserViewSet(
         if not (user and user.is_authenticated):
             return User.objects.none()
 
-        if user.is_platform_super_admin():
-            return (
-                User.objects.select_related("created_by")
-                .select_related("profile")
-                .order_by("id")
-            )
         profile = getattr(user, "profile", None)
+        if profile and profile.is_enabled and profile.role == Profile.Role.ADMIN:
+            return User.objects.select_related("profile__created_by").order_by("id")
         if not profile or not profile.is_enabled or profile.role != Profile.Role.OWNER:
             return User.objects.none()
         owned_club_ids = profile.owner_profile.clubs.values("id")
@@ -123,17 +101,11 @@ class UserViewSet(
 
         return (
             User.objects.filter(id__in=Subquery(staff_user_ids))
-            .select_related("created_by")
-            .select_related("profile")
+            .select_related("profile__created_by")
             .order_by("id")
         )
 
     def get_serializer_class(self):
-        if self.action == "create":
-            return UserCreateSerializer
         if self.action in {"partial_update", "update"}:
             return UserUpdateSerializer
         return UserListSerializer
-
-    def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)

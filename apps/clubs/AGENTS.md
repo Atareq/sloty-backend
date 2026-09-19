@@ -31,6 +31,7 @@ ADMIN -> AdminProfile
 - `governorate` and `city` use `apps.common.egypt_locations`; city must belong
   to the selected governorate.
 - `slug` is unique and generated with a numeric collision suffix where needed.
+- `Club.created_by` records the creator's application `Profile` (admin).
 - A missing, malformed, or out-of-scope Profile must be denied with
   `CLUB_ACCESS_REVOKED`; JWT claims never override current database state.
 
@@ -44,7 +45,7 @@ ADMIN -> AdminProfile
 
 ## Authorization
 
-`scoped_clubs_for_user()` and `CanManageClubs` consume the Profile graph.
+`scoped_clubs_for_profile()` and `CanManageClubs` consume the Profile graph.
 Club-scoped operational endpoints use the shared Authorization Spine;
 `apps/clubs/authorization.py` contains only club-specific predicates.
 There is no `ClubAccessContext` or `ClubScopedAccessMixin`.
