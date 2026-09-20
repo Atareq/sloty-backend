@@ -6,7 +6,7 @@ can exist without a profile, and player profiles can exist before an account is
 created. A linked user cannot have two profiles, even disabled ones.
 
 ```text
-User -- OneToOne --> Profile (user, role, is_enabled, created, modified)
+User -- OneToOne --> Profile (user, created_by, role, is_enabled, created, modified)
                        ├── OwnerProfile -- clubs M2M --> Club
                        ├── StaffProfile -- club FK --> Club
                        │       └── StaffCourtAccess -- court FK --> Court
@@ -21,8 +21,9 @@ Reverse child names are `owner_profile`, `staff_profile`, `admin_profile`, and
 declared through each child's `Meta.default_related_name`. There is no independent
 child identity or manually declared composition field.
 
-- `Profile.role` stores only `OWNER`, `STAFF`, `ADMIN`, or `PLAYER`. `User.role` reads it for linked users.
-- `Profile.user` is required for `OWNER`, `STAFF`, and `ADMIN`; it is optional for `PLAYER`.
+- `Profile.role` stores only `OWNER`, `STAFF`, `ADMIN`, or `PLAYER`. `User` has no role property or role field.
+- `Profile.created_by` is a nullable self-reference for profile creation provenance. Use it for admin-created owners/admins and owner/admin-created staff; do not put creator provenance on `User`.
+- `Profile.user` is nullable because `PlayerProfile` inherits it and may exist before account linking. `Profile.clean()` requires a user for `OWNER`, `STAFF`, and `ADMIN`; only `PLAYER` may be unlinked.
 - Shared `clean()` and `save()` live directly on `Profile`. Saving any child runs
   parent validation. Child type/role consistency is a schema check, never an
   authorization decision. Authorization reads the enabled parent's stored role.

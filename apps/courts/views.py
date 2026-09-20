@@ -92,7 +92,7 @@ class CourtViewSet(
     def perform_create(self, serializer):
         serializer.save(
             club=self.get_access_context().club,
-            created_by=self.request.user,
+            created_by=self.get_access_context().profile,
             default_price="0.00",
         )
 

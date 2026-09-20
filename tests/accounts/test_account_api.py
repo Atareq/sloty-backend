@@ -40,16 +40,23 @@ class AccountAPITestCase(APITestCase):
         return user
 
     def create_owner(self, username="owner-user", clubs=None, **extra_fields) -> User:
+        created_by = extra_fields.pop("created_by", None)
         user = self.create_user(username=username, **extra_fields)
-        owner_profile = OwnerProfile.objects.create(user=user, role=Profile.Role.OWNER)
+        owner_profile = OwnerProfile.objects.create(
+            user=user, role=Profile.Role.OWNER, created_by=created_by
+        )
         if clubs:
             owner_profile.clubs.set(clubs)
         return user
 
     def create_staff(self, court: Court, username="staff-user", **extra_fields) -> User:
+        created_by = extra_fields.pop("created_by", None)
         user = self.create_user(username=username, **extra_fields)
         staff_profile = StaffProfile.objects.create(
-            user=user, role=Profile.Role.STAFF, club=court.club
+            user=user,
+            role=Profile.Role.STAFF,
+            club=court.club,
+            created_by=created_by,
         )
         StaffCourtAccess.objects.create(staff_profile=staff_profile, court=court)
         return user
@@ -81,10 +88,14 @@ class MeAPITests(AccountAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_authenticated_user_gets_me_profile(self):
-        creator = self.create_user(
+        creator_user = self.create_user(
             username="profile-creator",
             first_name="Creator",
             last_name="User",
+        )
+        creator = AdminProfile.objects.create(
+            user=creator_user,
+            role=Profile.Role.ADMIN,
         )
         staff_club = self.create_club("Champions", "champions")
         staff_court = self.create_court(staff_club, "Court 1")
@@ -136,8 +147,18 @@ class MeAPITests(AccountAPITestCase):
         self.assertIsNone(response.data["account_created_by"])
 
     def test_me_response_prefetches_creator_and_profile(self):
-        creator = self.create_user(username="query-creator")
-        user = self.create_user(username="query-profile-user", created_by=creator)
+        creator_user = self.create_user(username="query-creator")
+        creator = AdminProfile.objects.create(
+            user=creator_user,
+            role=Profile.Role.ADMIN,
+        )
+        staff_club = self.create_club("Query Club", "query-club")
+        staff_court = self.create_court(staff_club, "Query Court")
+        user = self.create_staff(
+            court=staff_court,
+            username="query-profile-user",
+            created_by=creator,
+        )
         self.client.force_authenticate(user=user)
 
         with CaptureQueriesContext(connection) as queries:
@@ -740,49 +761,36 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         self.assertEqual(response.data["username"], self.non_platform_user.username)
         self.assertNotIn("password", response.data)
 
-    def test_platform_admin_can_create_platform_admin_user(self):
+    def test_post_users_endpoint_is_disabled_and_cannot_create_profiles(self):
         self.authenticate_platform_admin()
 
         response = self.client.post(
             reverse("user-list"),
             {
-                "username": "created-admin",
+                "username": "bypassing-user",
                 "password": "new-user-pass-123",
             },
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        user = User.objects.get(username="created-admin")
-        self.assertTrue(user.is_platform_super_admin())
-        self.assertFalse(user.is_staff)
-        self.assertFalse(user.is_superuser)
-        self.assertEqual(user.created_by, self.platform_admin)
-        self.assertEqual(set(response.data), self.user_list_response_fields)
-        self.assertNotIn("password", response.data)
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertFalse(User.objects.filter(username="bypassing-user").exists())
 
-    def test_user_create_rejects_role_club_and_court_fields(self):
+    def test_generic_user_endpoint_cannot_bypass_onboarding_hierarchy(self):
         self.authenticate_platform_admin()
 
         response = self.client.post(
             reverse("user-list"),
             {
-                "username": "bad-scope-user",
+                "username": "bad-onboard-user",
                 "password": "new-user-pass-123",
-                "role": "STAFF",
-                "club": 1,
-                "court": 1,
+                "role": "OWNER",
             },
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data["success"], False)
-        self.assertEqual(response.data["code"], "VALIDATION_ERROR")
-        self.assertIn("role", response.data["field_errors"])
-        self.assertIn("club", response.data["field_errors"])
-        self.assertIn("court", response.data["field_errors"])
-        self.assertFalse(User.objects.filter(username="bad-scope-user").exists())
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertFalse(User.objects.filter(username="bad-onboard-user").exists())
 
     def test_create_payload_cannot_set_staff_or_superuser_flags(self):
         self.authenticate_platform_admin()
@@ -798,14 +806,8 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        user = User.objects.get(username="flagged-user")
-        self.assertTrue(user.is_platform_super_admin())
-        self.assertFalse(user.is_staff)
-        self.assertFalse(user.is_superuser)
-        self.assertNotIn("is_staff", response.data)
-        self.assertNotIn("is_superuser", response.data)
-        self.assertNotIn("password", response.data)
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertFalse(User.objects.filter(username="flagged-user").exists())
 
     def test_platform_admin_can_patch_user_identity(self):
         self.authenticate_platform_admin()

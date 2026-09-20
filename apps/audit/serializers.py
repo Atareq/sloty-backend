@@ -99,8 +99,11 @@ class AuditLogPresentationMixin:
         if related_obj is None:
             return None, UNAVAILABLE
         if relation_name == "actor":
-            full_name = related_obj.get_full_name().strip()
-            return full_name or related_obj.username, CURRENT_RELATION_FALLBACK
+            user = getattr(related_obj, "user", None)
+            if user:
+                full_name = user.get_full_name().strip()
+                return full_name or user.username, CURRENT_RELATION_FALLBACK
+            return str(related_obj), CURRENT_RELATION_FALLBACK
         return related_obj.name, CURRENT_RELATION_FALLBACK
 
 

@@ -161,13 +161,10 @@ class StaffCreateSerializer(serializers.ModelSerializer):
         access = self.context["access_context"]
         court_ids = validated_data.pop("court_ids", [])
         password = validated_data.pop("password")
-        request = self.context.get("request")
-        creator = getattr(request, "user", None)
 
         with transaction.atomic():
             user = User.objects.create_user(
                 password=password,
-                created_by=creator,
                 is_staff=False,
                 is_superuser=False,
                 **validated_data,
@@ -176,6 +173,7 @@ class StaffCreateSerializer(serializers.ModelSerializer):
                 user=user,
                 role=Profile.Role.STAFF,
                 club=access.club,
+                created_by=access.profile,
             )
             if court_ids:
                 courts = Court.objects.filter(club=access.club, id__in=court_ids)

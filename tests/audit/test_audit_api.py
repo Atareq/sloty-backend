@@ -152,7 +152,8 @@ class AuditAPITestCase(ProfileIdentityMixin, APITestCase):
 class AuditModelServiceTests(AuditAPITestCase):
 
     def setUp(self):
-        self.actor = self.create_user("audit-model-actor")
+        self.actor_user = self.create_platform_admin("audit-model-actor")
+        self.actor = self.actor_user.profile
         self.club = self.create_club("Audit Model Club", slug="audit-model")
         self.court = self.create_court(self.club, "Audit Model Court")
 
@@ -194,7 +195,7 @@ class AuditModelServiceTests(AuditAPITestCase):
         self.assertEqual(audit_log.metadata["source"], "test")
         self.assertEqual(
             audit_log.metadata["display_snapshot"],
-            {"actor_name": self.actor.username, "court_name": self.court.name},
+            {"actor_name": self.actor_user.username, "court_name": self.court.name},
         )
 
     def test_record_audit_log_accepts_actor_none(self):
@@ -219,15 +220,18 @@ class AuditAccessAPITests(AuditAPITestCase):
         self.other_club = self.create_club("Other Audit Club", slug="other-audit")
         self.court = self.create_court(self.club, "Audit Court")
         self.other_court = self.create_court(self.other_club, "Other Audit Court")
-        self.audit_log = self.create_audit_log(
-            self.club, court=self.court, actor=self.owner, entity_id=10
-        )
-        self.other_log = self.create_audit_log(
-            self.other_club, court=self.other_court, entity_id=20
-        )
         grant_owner_club(self.owner, self.club)
         grant_staff_court(self.staff, self.court)
         grant_owner_club(self.other_user, self.other_club)
+        self.audit_log = self.create_audit_log(
+            self.club, court=self.court, actor=self.owner.profile, entity_id=10
+        )
+        self.other_log = self.create_audit_log(
+            self.other_club,
+            court=self.other_court,
+            actor=self.other_user.profile,
+            entity_id=20,
+        )
 
     def test_anonymous_rejected(self):
         response = self.client.get(self.audit_list_url(self.club))
@@ -254,7 +258,7 @@ class AuditAccessAPITests(AuditAPITestCase):
         transaction_log = self.create_audit_log(
             self.club,
             court=self.court,
-            actor=self.owner,
+            actor=self.owner.profile,
             action=AuditLog.Action.TRANSACTION_CANCELLED,
             entity_type="Transaction",
             entity_id=101,
@@ -306,7 +310,7 @@ class AuditAccessAPITests(AuditAPITestCase):
             record_audit_log(
                 club=self.club,
                 court=self.court,
-                actor=self.owner,
+                actor=self.owner.profile,
                 action=AuditLog.Action.BOOKING_CREATED,
                 entity_type="Booking",
                 entity_id=booking.id,
@@ -315,7 +319,7 @@ class AuditAccessAPITests(AuditAPITestCase):
             record_audit_log(
                 club=self.club,
                 court=self.court,
-                actor=self.owner,
+                actor=self.owner.profile,
                 action=AuditLog.Action.TRANSACTION_CREATED,
                 entity_type="Transaction",
                 entity_id=transaction_obj.id,
@@ -324,7 +328,7 @@ class AuditAccessAPITests(AuditAPITestCase):
             record_audit_log(
                 club=self.club,
                 court=self.court,
-                actor=self.platform_admin,
+                actor=self.platform_admin.profile,
                 action=AuditLog.Action.SETTLEMENT_CREATED,
                 entity_type="Settlement",
                 entity_id=settlement.id,
@@ -338,6 +342,7 @@ class AuditAccessAPITests(AuditAPITestCase):
         self.court.name = "Renamed Court"
         self.court.save(update_fields=["name"])
         self.client.force_authenticate(user=self.platform_admin)
+
         list_response = self.client.get(self.audit_list_url(self.club))
         detail_response = self.client.get(self.audit_detail_url(self.club, logs[0]))
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
@@ -364,7 +369,7 @@ class AuditAccessAPITests(AuditAPITestCase):
         old_log = self.create_audit_log(
             self.club,
             court=self.court,
-            actor=self.owner,
+            actor=self.owner.profile,
             entity_type="Booking",
             entity_id=998,
         )
@@ -412,8 +417,10 @@ class AuditFilterRegressionTests(AuditAPITestCase):
 
     def setUp(self):
         self.platform_admin = self.create_platform_admin("audit-filter-admin")
-        self.actor = self.create_user("audit-filter-actor")
-        self.other_actor = self.create_user("audit-filter-other-actor")
+        self.actor = self.create_platform_admin("audit-filter-actor").profile
+        self.other_actor = self.create_platform_admin(
+            "audit-filter-other-actor"
+        ).profile
         self.club = self.create_club("Audit Filter Club", slug="audit-filter")
         self.other_club = self.create_club("Other Filter Club", slug="other-filter")
         self.court = self.create_court(self.club, "Audit Filter Court")
@@ -554,7 +561,7 @@ class AuditQueryScalingTests(AuditAPITestCase):
 
     def setUp(self):
         self.platform_admin = self.create_platform_admin("audit-query-admin")
-        self.actor = self.create_user("audit-query-actor")
+        self.actor = self.create_platform_admin("audit-query-actor").profile
         self.club = self.create_club("Audit Query Club", slug="audit-query")
         self.court = self.create_court(self.club, "Audit Query Court")
         self.client.force_authenticate(user=self.platform_admin)
@@ -872,7 +879,7 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
         self.booking_1_created_log = self.create_audit_log(
             self.club,
             court=self.court,
-            actor=self.platform_admin,
+            actor=self.platform_admin.profile,
             action=AuditLog.Action.BOOKING_CREATED,
             entity_type="Booking",
             entity_id=self.booking_1.id,
@@ -880,7 +887,7 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
         self.booking_1_completed_log = self.create_audit_log(
             self.club,
             court=self.court,
-            actor=self.platform_admin,
+            actor=self.platform_admin.profile,
             action=AuditLog.Action.BOOKING_COMPLETED,
             entity_type="Booking",
             entity_id=self.booking_1.id,
@@ -895,7 +902,7 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
         self.booking_2_created_log = self.create_audit_log(
             self.club,
             court=self.court,
-            actor=self.platform_admin,
+            actor=self.platform_admin.profile,
             action=AuditLog.Action.BOOKING_CREATED,
             entity_type="Booking",
             entity_id=self.booking_2.id,
@@ -903,7 +910,7 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
         self.non_booking_log = self.create_audit_log(
             self.club,
             court=self.court,
-            actor=self.platform_admin,
+            actor=self.platform_admin.profile,
             action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
             entity_type="Settlement",
             entity_id=999,
@@ -918,7 +925,7 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
         self.other_club_log = self.create_audit_log(
             self.other_club,
             court=self.other_court,
-            actor=self.platform_admin,
+            actor=self.platform_admin.profile,
             action=AuditLog.Action.BOOKING_CREATED,
             entity_type="Booking",
             entity_id=self.other_club_booking.id,
@@ -1014,7 +1021,7 @@ class AuditBookingPhoneSearchTests(AuditAPITestCase):
             self.create_audit_log(
                 self.club,
                 court=self.court,
-                actor=self.platform_admin,
+                actor=self.platform_admin.profile,
                 action=AuditLog.Action.BOOKING_COMPLETED,
                 entity_type="Booking",
                 entity_id=self.booking_1.id,

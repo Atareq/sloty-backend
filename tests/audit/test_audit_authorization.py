@@ -55,21 +55,24 @@ class AuditAuthorizationConfigTests(AuditAPITestCase):
         grant_owner_club(self.owner, self.club)
         grant_staff_court(self.staff, self.court_a)
         self.court_a_log = self.create_audit_log(
-            self.club, court=self.court_a, actor=self.owner, entity_id=1
+            self.club, court=self.court_a, actor=self.owner.profile, entity_id=1
         )
         self.court_b_log = self.create_audit_log(
-            self.club, court=self.court_b, actor=self.staff, entity_id=2
+            self.club, court=self.court_b, actor=self.staff.profile, entity_id=2
         )
         self.closing_log = self.create_audit_log(
             self.club,
             court=None,
-            actor=self.owner,
+            actor=self.owner.profile,
             action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
             entity_type="Settlement",
             entity_id=99,
         )
         self.other_log = self.create_audit_log(
-            self.other_club, court=self.other_court, actor=self.owner, entity_id=3
+            self.other_club,
+            court=self.other_court,
+            actor=self.owner.profile,
+            entity_id=3,
         )
 
     def context_for(self, user):
@@ -157,7 +160,7 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         self.court_a_log = self.create_audit_log(
             self.club,
             court=self.court_a,
-            actor=self.staff,
+            actor=self.staff.profile,
             action=AuditLog.Action.BOOKING_CREATED,
             entity_type="Booking",
             entity_id=11,
@@ -166,7 +169,7 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         self.court_b_log = self.create_audit_log(
             self.club,
             court=self.court_b,
-            actor=self.owner,
+            actor=self.owner.profile,
             action=AuditLog.Action.TRANSACTION_CREATED,
             entity_type="Transaction",
             entity_id=12,
@@ -174,7 +177,7 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         self.settlement_log = self.create_audit_log(
             self.club,
             court=None,
-            actor=self.platform_admin,
+            actor=self.platform_admin.profile,
             action=AuditLog.Action.SETTLEMENT_CREATED,
             entity_type="Settlement",
             entity_id=13,
@@ -182,7 +185,7 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         self.closing_log = self.create_audit_log(
             self.club,
             court=None,
-            actor=self.owner,
+            actor=self.owner.profile,
             action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
             entity_type="Settlement",
             entity_id=14,
@@ -190,7 +193,7 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         self.other_log = self.create_audit_log(
             self.other_club,
             court=self.other_court,
-            actor=self.other_club_owner,
+            actor=self.other_club_owner.profile,
             action=AuditLog.Action.BOOKING_CREATED,
             entity_type="Booking",
             entity_id=15,
@@ -209,7 +212,7 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         self.club_booking_log = self.create_audit_log(
             self.club,
             court=self.court_a,
-            actor=self.owner,
+            actor=self.owner.profile,
             action=AuditLog.Action.BOOKING_UPDATED,
             entity_type="Booking",
             entity_id=self.club_booking.id,
@@ -217,7 +220,7 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         self.other_booking_log = self.create_audit_log(
             self.other_club,
             court=self.other_court,
-            actor=self.other_club_owner,
+            actor=self.other_club_owner.profile,
             action=AuditLog.Action.BOOKING_UPDATED,
             entity_type="Booking",
             entity_id=self.other_booking.id,
@@ -309,14 +312,17 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
             self.create_audit_log(
                 self.other_club,
                 court=self.other_court,
-                actor=self.other_club_owner,
+                actor=self.other_club_owner.profile,
                 entity_id=200 + index,
             )
             for index in range(25)
         ]
         extra_own = [
             self.create_audit_log(
-                self.club, court=self.court_b, actor=self.owner, entity_id=300 + index
+                self.club,
+                court=self.court_b,
+                actor=self.owner.profile,
+                entity_id=300 + index,
             )
             for index in range(16)
         ]

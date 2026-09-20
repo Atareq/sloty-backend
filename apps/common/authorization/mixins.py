@@ -45,6 +45,17 @@ class ClubScopedViewMixin:
     def access_context(self):
         return getattr(self.request, "access_context", None)
 
+    def get_access_context(self):
+        context = self.access_context
+        if context is None:
+            self.resolve_access_context(self.request)
+            context = self.access_context
+        if context is None:
+            raise ImproperlyConfigured(
+                "ClubScopedViewMixin requires a resolved access context."
+            )
+        return context
+
 
 class SlotyScopedResourceMixin(ClubScopedViewMixin):
     """

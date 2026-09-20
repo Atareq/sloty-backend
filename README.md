@@ -120,10 +120,144 @@ sudo /srv/sloty/backend/scripts/deploy-sloty-backend <SHA> <TAG>
 There is no `/usr/local/sbin` copy. The script discovers the repository root
 from git, snapshots its own `scripts/` bundle to `/tmp` before checkout, uses
 `<repo>/.venv` (`Python 3.12.14` from `/opt/sloty-runtime/python/`), loads
-`/etc/sloty/backend.env`, restarts only `sloty-backend.service`, and must not
-manage PostgreSQL, Nginx, or system Python. CI calculates the release tag once,
-deploys that exact SHA and tag, then creates or reuses the GitHub Release with
-the same values.
+`/etc/sloty/env/prod.env`, restarts only `sloty-backend.service`, and must not
+manage PostgreSQL, Nginx, or system Python. The canonical unit is
+`deploy/systemd/sloty-backend.service`; it loads only `prod.env`, never the
+backup credentials. CI calculates the release tag once, deploys that exact SHA
+and tag, then creates or reuses the GitHub Release with the same values.
+
+### Production Environment Files
+
+The repository tracks placeholder-only templates in `env/`. Django production
+configuration is defined by `config/settings/base.py`: `SECRET_KEY`, `DEBUG`,
+`ALLOWED_HOSTS`, PostgreSQL `DB_*` settings, optional `DB_SSLMODE`, and the
+optional JWT and SQL-query-stat settings. No email-specific environment
+variables are currently consumed by this backend. Backup-only R2 settings are
+listed separately in `env/backup.env.example` and are not loaded by Gunicorn.
+A future root-run backup service may load both files; no backup service is
+implemented by this change.
+
+On each trusted operator machine, secure local copies may use the same paths as
+the VPS. These files are private and are never part of Git:
+
+```text
+/etc/sloty/env/prod.env
+/etc/sloty/env/backup.env
+```
+
+To migrate the VPS without restarting against a missing env file, run the
+following in order. The `--no-clobber` copy preserves an already prepared new
+production file when retrying. Keep the old file until health verification
+passes.
+
+```bash
+sudo install -d -o root -g sloty -m 0750 /etc/sloty/env
+sudo cp -a /etc/sloty/backend.env /root/sloty-backend.env.before-env-migration
+sudo cp --no-clobber /etc/sloty/backend.env /etc/sloty/env/prod.env
+sudo chown root:sloty /etc/sloty/env/prod.env
+sudo chmod 0640 /etc/sloty/env/prod.env
+sudo touch /etc/sloty/env/backup.env
+sudo chown root:root /etc/sloty/env/backup.env
+sudo chmod 0600 /etc/sloty/env/backup.env
+sudoedit /etc/sloty/env/backup.env
+sudo cp -a "$(systemctl show -p FragmentPath --value sloty-backend.service)" /root/sloty-backend.service.before-env-migration
+sudo install -o root -g root -m 0644 /srv/sloty/backend/deploy/systemd/sloty-backend.service /etc/systemd/system/sloty-backend.service
+sudo systemctl daemon-reload
+sudo systemctl restart sloty-backend.service
+sudo systemctl is-active --quiet sloty-backend.service
+curl --fail --silent --show-error --header 'Host: api.sloty.baronlearning.com' http://127.0.0.1:8020/health/
+sudo rm /etc/sloty/backend.env
+```
+
+If verification fails, restore the old path and the saved unit, then reload
+and restart:
+
+```bash
+sudo cp -a /root/sloty-backend.env.before-env-migration /etc/sloty/backend.env
+sudo cp -a /root/sloty-backend.service.before-env-migration /etc/systemd/system/sloty-backend.service
+sudo systemctl daemon-reload
+sudo systemctl restart sloty-backend.service
+sudo systemctl is-active --quiet sloty-backend.service
+```
+
+### PostgreSQL Backups and Restore
+
+The backup and restore commands are `scripts/backup-sloty-db` and
+`scripts/restore-sloty-db`. The host installer is
+`scripts/install-host-dependencies`; it installs only `rclone` when needed and
+validates PostgreSQL 17 `pg_dump`, `pg_restore`, and `psql`. These are host
+tools, not Python requirements. Debian `needrestart` is set to list-only mode
+during package installation; schedule any reported service restarts or reboot
+separately during a maintenance window.
+
+Prepare the root-only Sloty backup parent and install the repo-owned systemd
+units as symlinks. Keep `/etc/sloty/env/backup.env` root-only (`root:root`, mode
+`0600`); systemd reads both environment files before starting the backup as
+`root`. The script creates `/var/backups/sloty/postgres` as `root:root` mode
+`0700`; archive files are mode `0600`. The backend service itself does not load
+`backup.env`.
+
+```bash
+sudo /srv/sloty/backend/scripts/install-host-dependencies
+sudo install -d -o root -g root -m 0700 /var/backups/sloty
+sudo ln -sfn /srv/sloty/backend/scripts/systemd/sloty-db-backup.service /etc/systemd/system/sloty-db-backup.service
+sudo ln -sfn /srv/sloty/backend/scripts/systemd/sloty-db-backup.timer /etc/systemd/system/sloty-db-backup.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now sloty-db-backup.timer
+```
+
+The timer runs once daily at 09:00 `Africa/Cairo`, independent of the host
+timezone, and catches up once after downtime. The service writes a PostgreSQL
+custom archive compressed with Zstandard level 9, validates it with
+`pg_restore --list`, uploads only to `sloty-prod-backups/db/`, and compares the
+listed remote filename and size with the local archive before deleting it.
+Rclone uses environment-backed Cloudflare S3 settings and `/dev/null` as its
+config path; it does not create a persistent `rclone.conf`. Its S3 `no_head`
+setting skips the post-PUT HEAD request that R2 rejected; the script performs
+its own list-based size/name check afterward. See the
+[PostgreSQL 17 `pg_dump` options](https://www.postgresql.org/docs/17/app-pgdump.html)
+and [rclone S3 options](https://rclone.org/s3/). No ACL header is forced.
+
+Successful uploads remove their local temporary archive. Failed uploads or
+remote verification leave a valid local dump for recovery; dumps older than
+seven days are pruned at the next run. R2 lifecycle retention remains configured
+on the bucket, not by this script.
+
+To run the first backup and inspect its result without showing environment
+contents:
+
+```bash
+sudo systemctl start sloty-db-backup.service
+sudo systemctl --no-pager --full status sloty-db-backup.service
+sudo journalctl -u sloty-db-backup.service --since today --no-pager
+```
+
+For a restore test, first create an empty `sloty_restore_test` database owned
+by or accessible to the configured DB role. Replace the sample object name with
+one listed under the R2 `db/` prefix. `systemd-run` supplies the same env files
+without shell-parsing them; the restore command validates the archive before
+restoring and will not drop or clean the target.
+
+```bash
+sudo systemd-run --wait --pipe --collect --unit=sloty-db-restore-test \
+  --property=EnvironmentFile=/etc/sloty/env/prod.env \
+  --property=EnvironmentFile=/etc/sloty/env/backup.env \
+  /srv/sloty/backend/scripts/restore-sloty-db \
+  --database sloty_restore_test \
+  --remote 'sloty_prod-YYYY-MM-DDTHHMMSS+0300.dump'
+```
+
+Restoring to `sloty_prod` additionally requires
+`--confirm-production sloty_prod`. Do not use that confirmation for a test
+restore. To disable and remove only the scheduled backup units while preserving
+local and R2 archives:
+
+```bash
+sudo systemctl disable --now sloty-db-backup.timer
+sudo systemctl stop sloty-db-backup.service
+sudo rm /etc/systemd/system/sloty-db-backup.timer /etc/systemd/system/sloty-db-backup.service
+sudo systemctl daemon-reload
+```
 
 Unauthenticated `GET /health/` is the dedicated deploy/systemd probe and returns
 `{"status": "ok"}` without touching PostgreSQL.
@@ -168,8 +302,8 @@ Business APIs verify club access from the current Profile through the
 Authorization Spine; clients must not treat JWT club/court claims as authority.
 
 `/api/v1/me/` always includes `account_created_by`. The value is a nested
-`{"id": ..., "name": ...}` object from `User.created_by`, or `null` for
-historical/system-created accounts.
+`{"id": ..., "name": ...}` object from `Profile.created_by`, or `null` for
+historical/system-created profiles.
 
 ## Club User Onboarding
 

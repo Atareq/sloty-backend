@@ -141,7 +141,7 @@ class PlayerProfileUserLinkTests(TestCase):
         u = make_user("player-user")
         p = make_profile("+201012345678", user=u)
         self.assertEqual(p.user_id, u.pk)
-        self.assertEqual(u.role, Profile.Role.PLAYER)
+        self.assertEqual(u.profile.role, Profile.Role.PLAYER)
 
     def test_link_player_to_user_service(self):
         u = make_user("link-user")

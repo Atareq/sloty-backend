@@ -5,7 +5,7 @@ from rest_framework.test import APIRequestFactory, APITestCase, force_authentica
 
 from apps.accounts.models import User
 from apps.clubs.models import Club
-from apps.common.authorization.matrix import is_action_allowed
+from apps.common.authorization.matrix import ROLE_PERMISSIONS, is_action_allowed
 from apps.common.authorization.mixins import ClubScopedViewMixin
 from apps.common.authorization.permissions import SlotyBasePermission
 from apps.common.authorization.roles import Role
@@ -61,9 +61,18 @@ class BasePermissionAndMatrixTestCase(ProfileIdentityMixin, APITestCase):
         self.assertTrue(is_action_allowed(Role.OWNER, "SettlementViewSet", "create"))
         self.assertFalse(is_action_allowed(Role.STAFF, "SettlementViewSet", "create"))
         self.assertFalse(is_action_allowed(Role.STAFF, "AuditLogViewSet", "list"))
-        from apps.common.authorization.matrix import ROLE_PERMISSIONS
-
         self.assertEqual(set(ROLE_PERMISSIONS), set(Profile.Role.values))
+
+    def test_onboarding_hierarchy_matrix_rules(self):
+        # Admin creates Owner; Owner and Staff cannot
+        self.assertTrue(is_action_allowed(Role.ADMIN, "OwnerViewSet", "create"))
+        self.assertFalse(is_action_allowed(Role.OWNER, "OwnerViewSet", "create"))
+        self.assertFalse(is_action_allowed(Role.STAFF, "OwnerViewSet", "create"))
+
+        # Owner creates Staff; Admin and Staff cannot directly create
+        self.assertFalse(is_action_allowed(Role.ADMIN, "StaffViewSet", "create"))
+        self.assertTrue(is_action_allowed(Role.OWNER, "StaffViewSet", "create"))
+        self.assertFalse(is_action_allowed(Role.STAFF, "StaffViewSet", "create"))
 
     def test_drf_uses_profile_context_and_matrix(self):
         view = SampleResourceViewSet.as_view({"get": "list", "post": "cancel"})

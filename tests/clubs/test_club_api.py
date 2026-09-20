@@ -120,7 +120,7 @@ class ClubAPITests(ClubAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         club = Club.objects.get(name="El-Nasr Club")
-        self.assertEqual(club.created_by, self.platform_admin)
+        self.assertEqual(club.created_by_id, self.platform_admin.profile.pk)
         self.assertEqual(club.slug, "el-nasr-club")
         self.assertEqual(club.governorate, "ASSIUT")
         self.assertEqual(club.city, "ASSIUT_MARKAZ")

@@ -1,7 +1,6 @@
 from datetime import time
 from decimal import Decimal
 
-from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models, transaction
@@ -69,7 +68,7 @@ class Court(models.Model):
     )
     notes = models.TextField(blank=True)
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        "profiles.Profile",
         blank=True,
         null=True,
         on_delete=models.SET_NULL,

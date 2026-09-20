@@ -28,6 +28,7 @@ from apps.common.authorization.scopes import ResourceScope
 from apps.common.exceptions import SlotyAPIException
 from apps.common.serializers import TimezoneAwareDateTimeField
 from apps.courts.models import Court
+from apps.profiles.models import Profile
 from apps.transactions.models import Transaction
 from apps.transactions.services import get_booking_paid_amount
 
@@ -286,8 +287,6 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         }
 
     def validate(self, attrs):
-        request = self.context.get("request")
-        user = getattr(request, "user", None)
         access = _serializer_access(self)
         court = attrs["court"]
         source = attrs.get("source", Booking.Source.MANUAL)
@@ -307,8 +306,9 @@ class BookingCreateSerializer(serializers.ModelSerializer):
             )
         if not _court_is_in_authorized_scope(access, court):
             raise PermissionDenied("You cannot create bookings for this court.")
-        if source == Booking.Source.ADMIN_CORRECTION and not (
-            user and user.is_platform_super_admin()
+        if (
+            source == Booking.Source.ADMIN_CORRECTION
+            and access.profile.role != Profile.Role.ADMIN
         ):
             raise serializers.ValidationError(
                 {"source": "Only Platform Super Admin can use ADMIN_CORRECTION."}
@@ -682,6 +682,12 @@ class BookingUpdateSerializer(serializers.ModelSerializer):
             if changed:
                 request = self.context.get("request")
                 actor = getattr(request, "user", None)
+                access = getattr(request, "access_context", None)
+                actor = (
+                    access.profile
+                    if access and access.profile
+                    else getattr(getattr(request, "user", None), "profile", None)
+                )
                 record_audit_log(
                     club=updated_booking.club,
                     court=updated_booking.court,

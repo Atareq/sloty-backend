@@ -90,10 +90,25 @@ def test_children_have_real_parent_link_and_shared_identity(
     assert instance.pk == instance.profile_ptr_id == user.profile.pk
     assert Profile.objects.get(pk=instance.pk).user_id == user.pk
     assert "role" not in {field.name for field in child._meta.local_fields}
-    assert instance.role == user.role == role
+    assert instance.role == user.profile.role == role
     assert child.clean is Profile.clean
     assert child.save is Profile.save
     assert Profile.objects.filter(user=user).count() == 1
+
+
+def test_profile_created_by_tracks_profile_creator(user, club):
+    admin_user = User.objects.create_user(username="profile-creator")
+    admin = AdminProfile.objects.create(user=admin_user, role=Profile.Role.ADMIN)
+    owner = OwnerProfile.objects.create(
+        user=user,
+        role=Profile.Role.OWNER,
+        created_by=admin,
+    )
+
+    assert owner.created_by_id == admin.pk
+    assert list(admin.created_profiles.values_list("pk", flat=True)) == [owner.pk]
+    assert "created_by" in {field.name for field in Profile._meta.fields}
+    assert "created_by" not in {field.name for field in User._meta.fields}
 
 
 @pytest.mark.parametrize(
@@ -262,13 +277,11 @@ def test_staff_cannot_move_club_while_old_assignments_exist(
 
 def test_admin_authority_reads_role_and_enabled_state(user, club):
     profile = Profile.objects.create(user=user, role=Profile.Role.ADMIN)
-    assert user.is_platform_super_admin()
     assert resolve_global_scope(request_for(user)).role == Profile.Role.ADMIN
     assert resolve_club_scope(request_for(user), club.slug).role == Profile.Role.ADMIN
     profile.is_enabled = False
     profile.save()
     user.refresh_from_db()
-    assert not user.is_platform_super_admin()
     with pytest.raises(SlotyAPIException):
         resolve_club_scope(request_for(user), club.slug)
 
@@ -276,8 +289,8 @@ def test_admin_authority_reads_role_and_enabled_state(user, club):
 def test_django_admin_flags_do_not_grant_application_access(user, club):
     user.is_staff = user.is_superuser = True
     user.save()
-    assert user.role is None
-    assert not user.is_platform_super_admin()
+    assert not hasattr(user, "role")
+    assert not hasattr(user, "is_platform_super_admin")
     with pytest.raises(SlotyAPIException):
         resolve_club_scope(request_for(user), club.slug)
 

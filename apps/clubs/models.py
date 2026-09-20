@@ -1,4 +1,3 @@
-from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils.text import slugify
@@ -40,7 +39,7 @@ class Club(models.Model):
     notes = models.TextField(blank=True)
     is_active = models.BooleanField(default=True, db_index=True)
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        "profiles.Profile",
         blank=True,
         null=True,
         on_delete=models.SET_NULL,

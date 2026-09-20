@@ -58,7 +58,7 @@
 > [`docs/architecture/security-architecture-v1.md`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md)
 > Do not duplicate that document here. This section is the **implementation contract** for code under `apps/common/authorization/`. Mismatches with the target doc are transitional — code/tests win for active behavior.
 
-- **RequestAccessContext**: Fact container (`user`, `profile`, `role`, `club`, `owner_profile`, `staff_profile`, explicitly targeted `court`, assigned `court_ids`). It contains no permission decisions and does not load a Court for club-wide requests.
+- **RequestAccessContext**: Fact container centered on the validated `profile`, plus `club`, `owner_profile`, `staff_profile`, explicitly targeted `court`, and assigned `court_ids`. Its `user` and `role` properties are derived from `profile`; it contains no permission decisions and does not load a Court for club-wide requests.
 - **Scope Resolver**: `resolve_club_scope(request, club_slug, court_id=None)` enforces URL club authority, derives scope from the enabled concrete Profile and its inherited children, caches on `request.access_context`, and raises `CLUB_ACCESS_REVOKED` (403) for missing or invalid scope.
 - **Role Matrix & Permission**: `SlotyBasePermission` evaluates centralized `ROLE_PERMISSIONS[role][viewset][action]` with strict default deny. Exposes clean `has_object_permission()` extension hook.
 - **ClubScopedViewMixin**: ViewSet mixin attaching context during `perform_authentication` before permission checks.
@@ -141,7 +141,7 @@ Rules:
 - **Not a presence/activity tracker**: The Spine has no request-level side effects beyond authorization/scoping. There is no heartbeat endpoint.
 
 ### 7. Runtime Release Metadata ([`apps/common/release_metadata.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/release_metadata.py))
-- **Endpoint**: authenticated `GET /api/system/version/` (`IsAuthenticated`, same default as business APIs).
+- **Endpoint**: unauthenticated `GET /api/system/version/` (`authentication_classes = ()`, `AllowAny`). Public diagnostic metadata endpoint safe for the frontend release footer.
 - **Source of truth**: `/etc/sloty/backend-release.json` written on the host after a successful production deploy and health check. Not GitHub, not `master`, not `.git`, and not the database.
 - **Response**: `service` is always `sloty-backend`. `release` is the human-readable tag (`v<number>.<number>.<number>`). `commit` is the exact 40-character deployed Git SHA and the authoritative technical identity. Optional `deployed_at` is included only when the file has a valid UTC timestamp.
 - **Missing/invalid metadata**: HTTP 200 with `"release": null` and `"commit": null`. Never 500, never a Git fallback, never invented versions, and never filesystem paths or parser errors in the body.

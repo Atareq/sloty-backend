@@ -14,23 +14,22 @@ User                          ← this app (authentication identity)
  └── PlayerProfile → ClubPlayer ← apps/players Phase 1 (customer identity)
 ```
 
-- `User` is credentials + platform authority only.
+- `User` is credentials and account/contact data only.
 - Do **not** add club roles, court assignments, player/booking, or financial fields to `User`.
 - `Profile`, `OwnerProfile`, `StaffProfile`, and `AdminProfile` belong to `apps/profiles/`; accounts must read them rather than duplicate role fields.
 - Customer identity (`PlayerProfile` / `ClubPlayer`) belongs in `apps/players/` (Phase 1), not in accounts.
 
 ## Domain Invariants
 
-- **Identity Only**: The `User` model represents authentication identity only. It must never store club, court, or application-role data; `Profile.role` is authoritative.
+- **Identity Only**: The `User` model represents authentication identity only. It must never store club, court, creator-provenance, or application-role data; `Profile.role` is authoritative.
 - **Profile Boundary**: Inherited Profile children define application scope: OwnerProfile → clubs, StaffProfile → club + court-access rows, AdminProfile → platform-wide role marker.
-- **Creator Tracking**: `User.created_by` stores the user account creator, not club membership creators.
+- **Creator Tracking**: `Profile.created_by` stores application-profile provenance (admin → owner, owner/admin → staff/admin). `User` has no creator FK.
 
 ## Important Models & Fields
 
 - [`User`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/models.py):
-  - Platform admin authority is `Profile.role == ADMIN` via `is_platform_super_admin()`.
   - `phone_number`: Standardized phone number field via `phonenumber_field` (optional on `User`; **not** the player identity key — that is `PlayerProfile.phone_number` UNIQUE).
-  - `created_by`: Self-referential nullable foreign key tracking which admin created this user account.
+  - No `role`, `created_by`, or platform-admin helper lives on `User`; read the linked enabled Profile for authorization facts.
   - Standard Django `is_staff` / `is_superuser` are not exposed in read responses or accepted in user creation payloads.
 
 ## Service Layer
@@ -77,7 +76,7 @@ Frontend must never treat “JWT contains `club_id`” as proof of access.
 > [!NOTE]
 > This represents current-state/legacy authorization implementation for the users API. Do not treat it as an unchangeable target architecture. Cross-club operational authorization uses the Authorization Spine under `apps/common/authorization/` (see root AGENTS.md §5).
 
-- [`IsPlatformSuperAdmin`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/permissions.py): Grants access if `user.is_platform_super_admin()`.
+- [`IsPlatformSuperAdmin`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/permissions.py): Grants access only for authenticated users whose enabled Profile has `role == ADMIN`.
 - [`CanAccessUsers`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/permissions.py): Platform super admin has full access; Club Owners have safe-method access scoped to enabled staff profiles in their owned clubs.
 
 ## Cross-App Dependencies
@@ -98,7 +97,8 @@ Frontend must never treat “JWT contains `club_id`” as proof of access.
 
 ## Concrete Profile identity
 
-`User.profile` is a one-to-one reverse relation. `User.role` reads its stored role
-(or None without a profile); access checks additionally require `is_enabled`.
-Create a concrete Profile child directly. User and profile creation is atomic.
+`User.profile` is a one-to-one reverse relation. `Profile.role` is the only
+application-role value; access checks additionally require `is_enabled`.
+Create a concrete Profile child directly. User and profile creation is atomic,
+with creator provenance stored on `Profile.created_by` when applicable.
 Use `select_related("profile")`, not a plural profile prefetch.

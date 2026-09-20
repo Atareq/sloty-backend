@@ -14,13 +14,11 @@ from apps.clubs.serializers import (
     ClubListSerializer,
     ClubUpdateSerializer,
 )
+from apps.common.authorization.resolver import resolve_global_scope
 from apps.profiles.models import Profile
 
 
-def scoped_clubs_for_user(user):
-    if not user or not user.is_authenticated:
-        return Club.objects.none()
-    profile = getattr(user, "profile", None)
+def scoped_clubs_for_profile(profile):
     if profile is None or not profile.is_enabled:
         return Club.objects.none()
     if profile.role == Profile.Role.ADMIN:
@@ -48,9 +46,24 @@ class ClubViewSet(
     permission_classes = (CanManageClubs,)
     http_method_names = ("get", "post", "patch", "head", "options")
 
+    def get_access_context(self):
+        context = getattr(self.request, "access_context", None)
+        if context is None:
+            context = resolve_global_scope(self.request)
+        return context
+
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return Club.objects.none()
+        user = getattr(self.request, "user", None)
+        if not user or not user.is_authenticated:
+            return Club.objects.none()
+        context = getattr(self.request, "access_context", None)
+        profile = (
+            context.profile if context is not None else getattr(user, "profile", None)
+        )
         return (
-            scoped_clubs_for_user(self.request.user)
+            scoped_clubs_for_profile(profile)
             .select_related("created_by")
             .order_by("id")
         )
@@ -64,4 +77,5 @@ class ClubViewSet(
         }.get(self.action, ClubDetailSerializer)
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        access = self.get_access_context()
+        serializer.save(created_by=access.profile)

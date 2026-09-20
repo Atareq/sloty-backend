@@ -6,7 +6,7 @@ from rest_framework.test import APITestCase
 from apps.accounts.models import User
 from apps.clubs.models import Club
 from apps.courts.models import Court
-from apps.profiles.models import Profile, StaffProfile
+from apps.profiles.models import Profile, StaffCourtAccess, StaffProfile
 from tests.profile_factories import (
     create_admin_user,
     create_owner_user,
@@ -84,6 +84,7 @@ class ClubStaffAPITests(APITestCase):
         profile = created_user.profile
         self.assertIsNotNone(profile)
         self.assertEqual(profile.role, Profile.Role.STAFF)
+        self.assertEqual(profile.created_by_id, self.owner.profile.pk)
         self.assertEqual(profile.staff_profile.club, self.club)
         self.assertEqual(profile.staff_profile.court_accesses.count(), 2)
 
@@ -100,6 +101,42 @@ class ClubStaffAPITests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(User.objects.filter(username="cross-club-staff").exists())
+        self.assertFalse(
+            StaffProfile.objects.filter(user__username="cross-club-staff").exists()
+        )
+        self.assertFalse(
+            StaffCourtAccess.objects.filter(
+                staff_profile__user__username="cross-club-staff"
+            ).exists()
+        )
+
+    def test_admin_cannot_directly_create_staff(self):
+        self.client.force_authenticate(user=self.admin)
+        url = f"/api/v1/clubs/{self.club.slug}/staff/"
+        payload = {
+            "username": "admin-created-staff",
+            "password": "SecurePassword123!",
+            "phone_number": "+201099998888",
+            "court_ids": [self.court_1.id],
+        }
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(User.objects.filter(username="admin-created-staff").exists())
+
+    def test_owner_cannot_create_staff_in_unowned_club(self):
+        self.client.force_authenticate(user=self.other_owner)
+        url = f"/api/v1/clubs/{self.club.slug}/staff/"
+        payload = {
+            "username": "foreign-staff",
+            "password": "SecurePassword123!",
+            "phone_number": "+201099997777",
+            "court_ids": [self.court_1.id],
+        }
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(User.objects.filter(username="foreign-staff").exists())
 
     def test_owner_can_retrieve_staff_detail(self):
         self.client.force_authenticate(user=self.owner)
@@ -137,9 +174,6 @@ class ClubStaffAPITests(APITestCase):
 
         # Assign both court 1 and court 2
         response = self.client.put(
-            url, {"court_ids": [self.court_1.id, self.court_2.id]}, format="json"
-        )
-        response = self.client.put(
             url,
             {"court_ids": [self.court_1.id, self.court_2.id]},
             format="json",
@@ -153,16 +187,12 @@ class ClubStaffAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["courts"]), 0)
         self.assertEqual(profile.staff_profile.court_accesses.count(), 0)
-        self.assertEqual(profile.staff_profile.court_accesses.count(), 0)
 
     def test_replace_courts_rejects_foreign_club_court(self):
         self.client.force_authenticate(user=self.owner)
         profile = self.staff_user.profile
         url = f"/api/v1/clubs/{self.club.slug}/staff/{profile.id}/courts/"
 
-        response = self.client.put(
-            url, {"court_ids": [self.other_court.id]}, format="json"
-        )
         response = self.client.put(
             url,
             {"court_ids": [self.other_court.id]},

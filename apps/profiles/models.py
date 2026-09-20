@@ -22,6 +22,13 @@ class Profile(models.Model):
         on_delete=models.CASCADE,
         related_name="profile",
     )
+    created_by = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_profiles",
+    )
     role = models.CharField(max_length=16, choices=Role.choices, db_index=True)
     is_enabled = models.BooleanField(default=True, db_index=True)
     created = models.DateTimeField(auto_now_add=True)

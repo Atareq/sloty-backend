@@ -183,19 +183,23 @@ class UserMeSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(AccountCreatorSerializer(allow_null=True))
     def get_account_created_by(self, obj):
-        creator = obj.created_by
+        profile = getattr(obj, "profile", None)
+        creator = getattr(profile, "created_by", None)
         if creator is None:
             return None
+        creator_user = creator.user
         return AccountCreatorSerializer(
             {
                 "id": creator.id,
-                "name": get_token_name(creator),
+                "name": get_token_name(creator_user) if creator_user else str(creator),
             }
         ).data
 
 
 class UserListSerializer(serializers.ModelSerializer):
-    created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    created_by = serializers.PrimaryKeyRelatedField(
+        source="profile.created_by", read_only=True
+    )
     profile_role = serializers.CharField(
         source="profile.role", read_only=True, allow_null=True
     )
@@ -256,17 +260,14 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        from apps.profiles.models import AdminProfile
-
         password = validated_data.pop("password")
-        user = User.objects.create_user(
+        validated_data.pop("created_by_profile", None)
+        return User.objects.create_user(
             password=password,
             is_staff=False,
             is_superuser=False,
             **validated_data,
         )
-        AdminProfile.objects.create(user=user, role=Profile.Role.ADMIN)
-        return user
 
     def to_representation(self, instance):
         return UserListSerializer(instance, context=self.context).data

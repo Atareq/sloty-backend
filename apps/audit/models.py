@@ -1,4 +1,3 @@
-from django.conf import settings
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
@@ -36,7 +35,7 @@ class AuditLog(models.Model):
         related_name="audit_logs",
     )
     actor = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        "profiles.Profile",
         blank=True,
         null=True,
         on_delete=models.SET_NULL,

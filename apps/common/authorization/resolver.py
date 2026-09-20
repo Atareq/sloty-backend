@@ -121,10 +121,8 @@ def resolve_club_scope(
         )
 
     context = RequestAccessContext(
-        user=user,
-        role=role,
-        club=club,
         profile=profile,
+        club=club,
         owner_profile=owner_profile,
         staff_profile=staff_profile,
         court=resolved_court,
@@ -157,10 +155,8 @@ def resolve_global_scope(request) -> RequestAccessContext:
         )
 
     context = RequestAccessContext(
-        user=user,
-        role=profile.role,
-        club=None,
         profile=profile,
+        club=None,
         owner_profile=getattr(profile, "owner_profile", None),
         staff_profile=getattr(profile, "staff_profile", None),
         court=None,

@@ -22,6 +22,9 @@ class AuditLogAdmin(admin.ModelAdmin):
         "actor__username",
         "actor__first_name",
         "actor__last_name",
+        "actor__user__username",
+        "actor__user__first_name",
+        "actor__user__last_name",
         "entity_type",
         "entity_id",
     )

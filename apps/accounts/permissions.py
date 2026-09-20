@@ -6,7 +6,13 @@ from apps.profiles.models import Profile
 class IsPlatformSuperAdmin(BasePermission):
     def has_permission(self, request, view) -> bool:
         user = request.user
-        return bool(user.is_authenticated and user.is_platform_super_admin())
+        profile = getattr(user, "profile", None)
+        return bool(
+            user.is_authenticated
+            and profile
+            and profile.is_enabled
+            and profile.role == Profile.Role.ADMIN
+        )
 
 
 class CanAccessUsers(BasePermission):
@@ -22,7 +28,8 @@ class CanAccessUsers(BasePermission):
         user = request.user
         if not (user and user.is_authenticated):
             return False
-        if user.is_platform_super_admin():
+        profile = getattr(user, "profile", None)
+        if profile and profile.is_enabled and profile.role == Profile.Role.ADMIN:
             return True
         if request.method in SAFE_METHODS:
             return Profile.objects.filter(
@@ -36,7 +43,8 @@ class CanAccessUsers(BasePermission):
         user = request.user
         if not (user and user.is_authenticated):
             return False
-        if user.is_platform_super_admin():
+        profile = getattr(user, "profile", None)
+        if profile and profile.is_enabled and profile.role == Profile.Role.ADMIN:
             return True
         if request.method in SAFE_METHODS:
             return Profile.objects.filter(

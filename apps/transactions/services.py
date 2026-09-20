@@ -16,6 +16,7 @@ from apps.audit.services import (
 )
 from apps.bookings.models import Booking
 from apps.common.exceptions import SlotyAPIException
+from apps.profiles.models import Profile
 from apps.transactions.models import Transaction, TransactionAttempt
 
 DUPLICATE_PAYMENT_REFERENCE_MESSAGE = (
@@ -768,10 +769,19 @@ def create_booking_transaction(
                     client_request_id=client_request_id,
                     occurred_at=occurred_at,
                 )
+                audit_actor = (
+                    access.profile
+                    if access is not None and getattr(access, "profile", None)
+                    else (
+                        created_by.profile
+                        if created_by is not None and hasattr(created_by, "profile")
+                        else (created_by if isinstance(created_by, Profile) else None)
+                    )
+                )
                 record_audit_log(
                     club=created_transaction.club,
                     court=created_transaction.court,
-                    actor=created_by,
+                    actor=audit_actor,
                     action=AuditLog.Action.TRANSACTION_CREATED,
                     entity_type="Transaction",
                     entity_id=created_transaction.id,
@@ -940,10 +950,20 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
             actor=actor,
         )
 
+        audit_actor = (
+            access.profile
+            if access is not None and getattr(access, "profile", None)
+            else (
+                actor.profile
+                if actor is not None and hasattr(actor, "profile")
+                else (actor if isinstance(actor, Profile) else None)
+            )
+        )
+
         record_audit_log(
             club=locked_transaction.club,
             court=locked_transaction.court,
-            actor=actor,
+            actor=audit_actor,
             action=AuditLog.Action.TRANSACTION_CANCELLED,
             entity_type="Transaction",
             entity_id=locked_transaction.id,
@@ -965,7 +985,7 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
             record_audit_log(
                 club=locked_booking.club,
                 court=locked_booking.court,
-                actor=actor,
+                actor=audit_actor,
                 action=AuditLog.Action.BOOKING_UPDATED,
                 entity_type="Booking",
                 entity_id=locked_booking.id,
