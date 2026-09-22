@@ -723,15 +723,10 @@ class BookingSlotSerializer(serializers.Serializer):
     recurring_blocked_reason = serializers.CharField(allow_null=True)
     first_recurring_conflict_start = serializers.DateTimeField(allow_null=True)
     label = serializers.CharField()
+    slot_type = serializers.ChoiceField(choices=("GENERATED", "BOOKING_ONLY"))
 
 
 class BookingSlotsResponseSerializer(serializers.Serializer):
-    court = serializers.IntegerField()
-    court_name = serializers.CharField()
-    date_from = serializers.DateField()
-    date_to = serializers.DateField()
-    slot_duration_minutes = serializers.IntegerField()
-    message = serializers.CharField(required=False)
     slots = BookingSlotSerializer(many=True)
 
 

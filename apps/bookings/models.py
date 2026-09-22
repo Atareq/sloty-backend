@@ -41,6 +41,12 @@ class Booking(SlotyTimeStampedModel):
         Status.CONFIRMED,
         Status.COMPLETED,
     )
+    TIMELINE_STATUSES = (
+        Status.HOLD,
+        Status.CONFIRMED,
+        Status.COMPLETED,
+        Status.NO_SHOW,
+    )
     LOCKED_STATUSES = (
         Status.COMPLETED,
         Status.CANCELLED,

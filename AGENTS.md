@@ -107,6 +107,11 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 - **Business Actor IDs**: Actor and custody IDs accepted or returned by business APIs are `Profile.id` values. Display names may come from `Profile.user`; authentication account IDs are not accepted as alternate actor IDs.
 - **Demo Seed Identity**: `seed_demo_data` keeps `User` rows for authentication and creates explicit `AdminProfile`, `OwnerProfile`, and `StaffProfile` actors. Business rows store those Profile objects directly; rerunning the seed remains idempotent.
 - **Scheduling contract**: `apps/bookings` owns generated slot availability and stored HOLD deadlines. Read [`docs/scheduling-contract.md`](docs/scheduling-contract.md) and the live OpenAPI schema at `/api/v1/schema/` before changing booking or frontend-facing scheduling behavior.
+  The slots endpoint returns one unified `slots` timeline: generated slots are
+  merged with visible booking records, and bookings outside configured working
+  hours are returned as `slot_type=BOOKING_ONLY` items. The top-level response
+  contains only `slots`. Unoccupied, priced slots in the previous 48 hours are
+  available for historical booking; POST still revalidates server-side rules.
 
 ---
 

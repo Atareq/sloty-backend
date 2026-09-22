@@ -844,6 +844,25 @@ class BookingHistoricalCreationTests(BookingAPITestCase):
         self.assertEqual(attempt.requested_start, self.past_start)
         self.assertEqual(attempt.requested_end, self.past_end)
 
+    def test_booking_in_previous_48_hours_is_accepted(self):
+        recent_start = self.sync_now - timedelta(days=1, minutes=30)
+        recent_end = recent_start + timedelta(hours=1)
+        self.client.force_authenticate(user=self.platform_admin)
+        with patch("django.utils.timezone.now", return_value=self.sync_now):
+            response = self.post_historical(
+                self.historical_payload(
+                    start_time=recent_start.isoformat(),
+                    end_time=recent_end.isoformat(),
+                    requested_at=self.sync_now.isoformat(),
+                    client_request_id="c1e2f3a4-b5c6-47d8-9e0f-123456789abc",
+                )
+            )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(
+            Booking.objects.get(id=response.data["id"]).start_time,
+            recent_start,
+        )
+
     def test_past_booking_conflict_returns_slot_unavailable_and_rejected_attempt(self):
         self.ensure_priced_slot(self.past_start, self.past_end)
         self.create_booking(
@@ -1372,16 +1391,48 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
     def test_slots_endpoint_returns_free_slots_when_no_booking_exists(self):
         response = self.get_slots()
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["court"], self.court.id)
-        self.assertEqual(response.data["slot_duration_minutes"], 60)
+        self.assertEqual(set(response.data), {"slots"})
         self.assertEqual(len(response.data["slots"]), 3)
         first_slot = response.data["slots"][0]
+        self.assertEqual(first_slot["slot_type"], "GENERATED")
         self.assertEqual(first_slot["slot_status"], "FREE")
         self.assertEqual(first_slot["slot_price"], "300.00")
         self.assertEqual(first_slot["is_available"], True)
         self.assertEqual(first_slot["available"], True)
         self.assertIsNone(first_slot["booking"])
         self.assertEqual(first_slot["label"], "Available")
+
+    def test_free_slot_can_be_booked(self):
+        self.create_working_hours(
+            self.court,
+            weekday=CourtWorkingHour.Weekday.WEDNESDAY,
+            opens_at=time(14, 0),
+            closes_at=time(16, 0),
+        )
+        slots_response = self.get_slots(date="2026-09-23")
+        self.assertEqual(slots_response.status_code, status.HTTP_200_OK)
+        free_slot = next(
+            slot
+            for slot in slots_response.data["slots"]
+            if slot["slot_status"] == "FREE" and slot["available"]
+        )
+        self.assertEqual(
+            timezone.localtime(free_slot["start_time"]).isoformat(),
+            "2026-09-23T14:00:00+03:00",
+        )
+        start_time = free_slot["start_time"].isoformat()
+        end_time = free_slot["end_time"].isoformat()
+
+        booking_response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        self.assertEqual(booking_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(booking_response.data["status"], Booking.Status.HOLD)
+        self.assertEqual(booking_response.data["court"], self.court.id)
 
     def test_slots_return_current_morning_and_evening_prices(self):
         working_hour = CourtWorkingHour.objects.get(
@@ -1619,22 +1670,22 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         response = self.get_slots()
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["slots"], [])
-        self.assertEqual(response.data["message"], "The court is closed on this day.")
+        self.assertEqual(set(response.data), {"slots"})
 
     def test_terminated_bookings_do_not_block_slots(self):
-        self.create_booking(
+        cancelled = self.create_booking(
             self.court,
             start_time=self.time_at(9),
             end_time=self.time_at(10),
             status=Booking.Status.CANCELLED,
         )
-        self.create_booking(
+        expired = self.create_booking(
             self.court,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
             status=Booking.Status.EXPIRED,
         )
-        self.create_booking(
+        no_show = self.create_booking(
             self.court,
             start_time=self.time_at(11),
             end_time=self.time_at(12),
@@ -1645,6 +1696,91 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertEqual(self.slot_by_hour(response, 9)["slot_status"], "FREE")
         self.assertEqual(self.slot_by_hour(response, 10)["slot_status"], "FREE")
         self.assertEqual(self.slot_by_hour(response, 11)["slot_status"], "FREE")
+        self.assertIsNone(self.slot_by_hour(response, 9)["booking"])
+        self.assertIsNone(self.slot_by_hour(response, 10)["booking"])
+        no_show_slot = self.slot_by_hour(response, 11)
+        self.assertTrue(no_show_slot["available"])
+        self.assertEqual(no_show_slot["booking"]["id"], no_show.id)
+        self.assertEqual(no_show_slot["booking"]["status"], Booking.Status.NO_SHOW)
+        self.assertNotEqual(no_show.id, cancelled.id)
+        self.assertNotEqual(no_show.id, expired.id)
+
+    def test_booking_outside_working_hours_is_returned_as_booking_only(self):
+        booking = self.create_booking(
+            self.court,
+            start_time=self.time_at(12),
+            end_time=self.time_at(13),
+            status=Booking.Status.COMPLETED,
+        )
+        response = self.get_slots()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slot = next(
+            slot for slot in response.data["slots"] if slot["booking"] is not None
+        )
+        self.assertEqual(slot["slot_type"], "BOOKING_ONLY")
+        self.assertEqual(timezone.localtime(slot["start_time"]), self.time_at(12))
+        self.assertEqual(timezone.localtime(slot["end_time"]), self.time_at(13))
+        self.assertFalse(slot["available"])
+        self.assertEqual(slot["booking"]["id"], booking.id)
+        self.assertEqual(slot["booking"]["status"], Booking.Status.COMPLETED)
+
+    def test_court_without_working_hours_returns_booking_only_slots(self):
+        CourtWorkingHour.objects.filter(court=self.court).delete()
+        booking = self.create_booking(
+            self.court,
+            start_time=self.time_at(12),
+            end_time=self.time_at(13),
+            status=Booking.Status.COMPLETED,
+        )
+        response = self.get_slots()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["slots"]), 1)
+        slot = response.data["slots"][0]
+        self.assertEqual(slot["slot_type"], "BOOKING_ONLY")
+        self.assertEqual(slot["booking"]["id"], booking.id)
+
+    def test_deleting_working_hours_does_not_hide_existing_booking(self):
+        booking = self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            status=Booking.Status.CONFIRMED,
+        )
+        CourtWorkingHour.objects.filter(court=self.court).delete()
+        response = self.get_slots()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["slots"][0]["slot_type"], "BOOKING_ONLY")
+        self.assertEqual(response.data["slots"][0]["booking"]["id"], booking.id)
+
+    def test_expired_hold_is_excluded_from_unified_timeline(self):
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            status=Booking.Status.HOLD,
+            hold_expires_at=timezone.now() - timedelta(minutes=1),
+        )
+        response = self.get_slots()
+        slot = self.slot_by_hour(response, 9)
+        self.assertEqual(slot["slot_type"], "GENERATED")
+        self.assertEqual(slot["slot_status"], "FREE")
+        self.assertTrue(slot["available"])
+        self.assertIsNone(slot["booking"])
+
+    def test_every_unified_timeline_slot_has_the_same_structure(self):
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(12),
+            end_time=self.time_at(13),
+            status=Booking.Status.COMPLETED,
+        )
+        response = self.get_slots()
+        slots = response.data["slots"]
+        self.assertGreater(len(slots), 1)
+        self.assertEqual({frozenset(slot) for slot in slots}, {frozenset(slots[0])})
+        self.assertEqual(
+            {slot["slot_type"] for slot in slots}, {"GENERATED", "BOOKING_ONLY"}
+        )
 
     def test_free_is_not_a_booking_status_choice(self):
         status_values = {choice[0] for choice in Booking.Status.choices}
@@ -1659,7 +1795,7 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         response = self.get_slots()
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["slots"], [])
-        self.assertEqual(response.data["message"], "الملعب مغلق في هذا اليوم.")
+        self.assertEqual(set(response.data), {"slots"})
 
     def test_slot_labels_are_localized_to_arabic(self):
         self.create_booking(
@@ -1685,10 +1821,9 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             },
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["date_from"], "2026-05-20")
-        self.assertEqual(response.data["date_to"], "2026-05-22")
+        self.assertEqual(set(response.data), {"slots"})
 
-    def test_elapsed_slots_on_current_local_day_are_not_available(self):
+    def test_slots_in_the_last_48_hours_remain_available_for_historical_booking(self):
         with patch("django.utils.timezone.now", return_value=self.time_at(10, 30)):
             response = self.get_slots()
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -1696,11 +1831,11 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         started = self.slot_by_hour(response, 10)
         later = self.slot_by_hour(response, 11)
         self.assertEqual(morning["slot_status"], "FREE")
-        self.assertFalse(morning["available"])
-        self.assertFalse(morning["is_available"])
-        self.assertFalse(morning["can_start_recurring"])
+        self.assertTrue(morning["available"])
+        self.assertTrue(morning["is_available"])
+        self.assertTrue(morning["can_start_recurring"])
         self.assertEqual(started["slot_status"], "FREE")
-        self.assertFalse(started["available"])
+        self.assertTrue(started["available"])
         self.assertEqual(later["slot_status"], "FREE")
         self.assertTrue(later["available"])
         self.assertTrue(later["is_available"])
@@ -1717,8 +1852,7 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             },
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["date_from"], "2026-09-17")
-        self.assertEqual(response.data["date_to"], "2026-10-17")
+        self.assertEqual(set(response.data), {"slots"})
 
     def test_thirty_two_day_inclusive_range_is_accepted(self):
         # 2026-09-17 → 2026-10-18 = 32 inclusive calendar days.
@@ -1731,8 +1865,7 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             },
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["date_from"], "2026-09-17")
-        self.assertEqual(response.data["date_to"], "2026-10-18")
+        self.assertEqual(set(response.data), {"slots"})
 
     def test_exact_forty_five_day_inclusive_range_is_accepted(self):
         # 2026-09-17 → 2026-10-31 = 45 inclusive calendar days.
@@ -1745,8 +1878,7 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             },
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["date_from"], "2026-09-17")
-        self.assertEqual(response.data["date_to"], "2026-10-31")
+        self.assertEqual(set(response.data), {"slots"})
 
     def test_forty_six_day_inclusive_range_returns_slot_period_error(self):
         # 2026-05-01 → 2026-06-15 = 46 inclusive calendar days.

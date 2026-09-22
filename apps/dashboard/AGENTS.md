@@ -31,9 +31,9 @@
 
 - [`apps/dashboard/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/dashboard/services.py):
   - `build_court_availability_payload()`: Computes schedule slots and blocking bookings.
-    On the current local day, slots whose start is already in the past are
-    `available=false` even when unoccupied. Past calendar days remain available
-    for historical create.
+    Slots in the previous 48 hours remain available when unoccupied and priced,
+    so staff can create historical bookings. Booking creation remains subject
+    to the booking service's schedule, pricing, and overlap validation.
   - `build_calendar_payload()` / `get_calendar_items()`: Aggregates day/week booking blocks for operational display. Customer `title` / `customer_name` / `customer_phone` are read from `Booking.club_player` (exact version) via `apps.bookings.identity`.
   - `build_dashboard_summary_payload()`: Enforces operational vs. financial access splitting.
   - `build_dashboard_overview_payload()`, `build_dashboard_revenue_payload()`, `build_court_utilization_payload()`.

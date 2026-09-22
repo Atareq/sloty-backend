@@ -79,12 +79,16 @@
     `YYYY-MM-DD` value is a local Cairo calendar day (`date_to` inclusive).
     ISO datetimes stay exact instants. The backend does not clamp the range
     to now or a fixed future window.
-  - Slot generation remains in the application service. It retrieves working
-    hours and bookings overlapping the requested aware datetime range, then
-    decides slot blocking and pricing in Python.
-  - On the current local day, a slot whose `start_time` is already in the
-    past has `available=false` / `is_available=false`. Past calendar days
-    stay bookable so historical create can still use FREE slots.
+- Slot generation and booking retrieval are separate responsibilities:
+  `generate_open_booking_slots()` uses only court working hours and pricing
+  rules; `retrieve_booking_timeline()` retrieves visible bookings by court and
+  range without consulting working hours; `merge_booking_timeline()` combines
+  them into the API timeline. A booking that does not overlap a generated slot
+  is returned as `slot_type=BOOKING_ONLY`.
+  - Slots in the previous 48 hours remain `available=true` /
+    `is_available=true` when unoccupied and priced, so staff can create
+    historical bookings. Booking creation still revalidates schedule, pricing,
+    and overlap rules.
   - Keep `Booking(court, start_time)` for court range retrieval. Do not add
     hold-expiry or scheduling indexes without measured query evidence.
 
@@ -216,7 +220,18 @@ Request → Authentication → resolve_club_scope → Spine scoped QuerySet (clu
   - `POST .../bookings/{id}/end-recurrence/`
   - `POST .../bookings/{id}/cancellation-preview/`
   - `GET .../bookings/{id}/recurrence-next/`
-- `/api/v1/clubs/{club_slug}/bookings/slots/`: Schedule slot availability generator. Accepts `court` plus either `date` or inclusive `date_from`/`date_to`. The inclusive calendar-day span must be `<= MAX_SLOT_PERIOD_DAYS` (45) or the API returns `SLOT_PERIOD_TOO_LARGE` (400). Elapsed slots on the current local day are returned with `available=false`; historical days remain FREE for historical create.
+- `/api/v1/clubs/{club_slug}/bookings/slots/`: Schedule slot availability
+  timeline. Accepts `court` plus either `date` or inclusive
+  `date_from`/`date_to`. The response contains only `slots`; generated items
+  use `slot_type=GENERATED`, and existing visible bookings with no generated
+  overlap use `slot_type=BOOKING_ONLY`. The inclusive calendar-day span must be
+  `<= MAX_SLOT_PERIOD_DAYS` (45) or the API returns `SLOT_PERIOD_TOO_LARGE`
+  (400). Slots in the previous 48 hours remain available when unoccupied and
+  priced, so historical create can use them. POST revalidates the same
+  schedule, pricing, duration, recurrence, and blocking rules under the court
+  lock, so a concurrent booking or schedule change may legitimately make a
+  previously returned slot fail. A generated `FREE`/`available=true` slot is
+  valid input for booking creation at the read snapshot.
 - `/api/v1/clubs/{club_slug}/booking-attempts/`: Traceability list/detail and dismissal for rejected attempts. Attempt `date_from`/`date_to` use the same inclusive calendar-day / exact-datetime contract as booking list.
 
 The frontend scheduling contract, including aware datetime handling, HOLD

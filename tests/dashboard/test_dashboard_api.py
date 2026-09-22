@@ -403,7 +403,7 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["slots"]), 2)
 
-    def test_elapsed_slots_on_current_local_day_are_not_available(self):
+    def test_slots_in_the_last_48_hours_remain_available_for_historical_booking(self):
         free_court = self.create_court(self.club, "Elapsed Slot Court")
         self.create_working_hours(free_court)
         self.client.force_authenticate(user=self.platform_admin)
@@ -414,9 +414,9 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         slots = response.data["slots"]
         self.assertEqual(len(slots), 4)
-        self.assertFalse(slots[0]["available"])
-        self.assertFalse(slots[0]["is_available"])
-        self.assertFalse(slots[1]["available"])
+        self.assertTrue(slots[0]["available"])
+        self.assertTrue(slots[0]["is_available"])
+        self.assertTrue(slots[1]["available"])
         self.assertTrue(slots[2]["available"])
         self.assertTrue(slots[3]["available"])
 

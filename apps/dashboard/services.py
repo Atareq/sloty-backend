@@ -100,8 +100,6 @@ def build_court_availability_payload(*, club, court, date):
         )
     )
 
-    now = timezone.now()
-    today = timezone.localtime(now).date()
     current = opens_at
     while current + slot_delta <= closes_at:
         slot_end = current + slot_delta
@@ -114,8 +112,6 @@ def build_court_availability_payload(*, club, court, date):
             None,
         )
         is_available = blocking_booking is None
-        if date == today and current < now:
-            is_available = False
         base_response["slots"].append(
             {
                 "start_time": current,
