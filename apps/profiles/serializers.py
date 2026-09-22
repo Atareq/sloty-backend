@@ -1,4 +1,3 @@
-from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.db import transaction
 from drf_spectacular.utils import extend_schema_field
 from phonenumber_field.serializerfields import PhoneNumberField
@@ -19,11 +18,10 @@ class OwnerClubSummarySerializer(serializers.ModelSerializer):
 class OwnerDetailSerializer(serializers.ModelSerializer):
     profile_id = serializers.IntegerField(source="pk", read_only=True)
     user_id = serializers.IntegerField(source="user.id", read_only=True)
-    username = serializers.CharField(source="user.username", read_only=True)
+    phone_number = PhoneNumberField(source="user.phone_number", read_only=True)
     email = serializers.EmailField(source="user.email", read_only=True)
     first_name = serializers.CharField(source="user.first_name", read_only=True)
     last_name = serializers.CharField(source="user.last_name", read_only=True)
-    phone_number = serializers.CharField(source="user.phone_number", read_only=True)
     is_active = serializers.BooleanField(source="user.is_active", read_only=True)
     is_enabled = serializers.BooleanField(read_only=True)
     role = serializers.CharField(read_only=True)
@@ -38,11 +36,10 @@ class OwnerDetailSerializer(serializers.ModelSerializer):
             "id",
             "profile_id",
             "user_id",
-            "username",
+            "phone_number",
             "email",
             "first_name",
             "last_name",
-            "phone_number",
             "is_active",
             "is_enabled",
             "role",
@@ -63,20 +60,15 @@ class OwnerListSerializer(OwnerDetailSerializer):
 
 
 class OwnerCreateSerializer(serializers.ModelSerializer):
-    username = serializers.CharField(
-        max_length=150,
-        required=True,
-        validators=[UnicodeUsernameValidator()],
-    )
+    phone_number = PhoneNumberField(required=True)
     password = serializers.CharField(write_only=True, required=True)
-    email = serializers.EmailField(required=False, allow_blank=True, default="")
+    email = serializers.EmailField(required=True)
     first_name = serializers.CharField(
         max_length=150, required=False, allow_blank=True, default=""
     )
     last_name = serializers.CharField(
         max_length=150, required=False, allow_blank=True, default=""
     )
-    phone_number = PhoneNumberField(required=False, allow_null=True)
     club_ids = serializers.ListField(
         child=serializers.IntegerField(),
         required=True,
@@ -87,19 +79,18 @@ class OwnerCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = OwnerProfile
         fields = (
-            "username",
+            "phone_number",
             "password",
             "email",
             "first_name",
             "last_name",
-            "phone_number",
             "club_ids",
         )
 
-    def validate_username(self, value):
-        if User.objects.filter(username__iexact=value).exists():
+    def validate_phone_number(self, value):
+        if User.objects.filter(phone_number=value).exists():
             raise serializers.ValidationError(
-                "A user with that username already exists."
+                "A user with this phone number already exists."
             )
         return value
 

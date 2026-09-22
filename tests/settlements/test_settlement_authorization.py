@@ -49,8 +49,8 @@ SETTLEMENT_STAFF_ACTIONS = ("list", "retrieve", "preview")
 class SettlementAuthorizationConfigTests(SettlementAPITestCase):
 
     def setUp(self):
-        self.owner = self.create_user("st-config-owner")
-        self.staff = self.create_user("st-config-staff")
+        self.owner = self.create_user()
+        self.staff = self.create_user()
         self.club = self.create_club("St Config Club", slug="st-config-club")
         self.other_club = self.create_club(
             "St Config Other Club", slug="st-config-other"
@@ -61,13 +61,13 @@ class SettlementAuthorizationConfigTests(SettlementAPITestCase):
         grant_owner_club(self.owner, self.club)
         grant_staff_court(self.staff, self.court_a)
         self.own_settlement = self.create_settlement(
-            self.club, court=self.court_b, settled_by=self.staff
+            self.club, court=self.court_b, settled_by=self.staff.profile
         )
         self.owner_settlement = self.create_settlement(
-            self.club, court=self.court_a, settled_by=self.owner
+            self.club, court=self.court_a, settled_by=self.owner.profile
         )
         self.other_settlement = self.create_settlement(
-            self.other_club, court=self.other_court, settled_by=self.owner
+            self.other_club, court=self.other_court, settled_by=self.owner.profile
         )
 
     def context_for(self, user):
@@ -161,11 +161,11 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
         self.court_a = self.create_court(self.club, "Court A")
         self.court_b = self.create_court(self.club, "Court B")
         self.other_court = self.create_court(self.other_club, "Other Club Court")
-        self.platform_admin = self.create_platform_admin("spine-st-admin")
-        self.owner = self.create_user("spine-st-owner")
-        self.staff = self.create_user("spine-st-staff")
-        self.other_staff = self.create_user("spine-st-other-staff")
-        self.other_club_user = self.create_user("spine-st-other-club")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.other_staff = self.create_user()
+        self.other_club_user = self.create_user()
         grant_owner_club(self.owner, self.club)
         grant_staff_court(self.staff, self.court_a)
         grant_staff_court(self.other_staff, self.court_b)
@@ -176,22 +176,24 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
         )
         other_booking = self.create_booking(self.other_court)
         self.tx_staff_court_a = self.create_transaction(
-            booking_a, created_by=self.staff, amount=Decimal("50.00")
+            booking_a, created_by=self.staff.profile, amount=Decimal("50.00")
         )
         tx_staff_court_b_settled = self.create_transaction(
-            booking_b, created_by=self.staff, amount=Decimal("70.00")
+            booking_b, created_by=self.staff.profile, amount=Decimal("70.00")
         )
         self.tx_staff_court_b = self.create_transaction(
-            booking_b, created_by=self.staff, amount=Decimal("70.00")
+            booking_b, created_by=self.staff.profile, amount=Decimal("70.00")
         )
         self.tx_other_staff = self.create_transaction(
-            booking_b, created_by=self.other_staff, amount=Decimal("90.00")
+            booking_b, created_by=self.other_staff.profile, amount=Decimal("90.00")
         )
         self.create_transaction(
-            other_booking, created_by=self.other_club_user, amount=Decimal("40.00")
+            other_booking,
+            created_by=self.other_club_user.profile,
+            amount=Decimal("40.00"),
         )
         self.staff_settlement_unassigned_court = self.create_settlement(
-            self.club, court=self.court_b, settled_by=self.staff
+            self.club, court=self.court_b, settled_by=self.staff.profile
         )
         SettlementTransaction.objects.create(
             settlement=self.staff_settlement_unassigned_court,
@@ -199,7 +201,7 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
             amount=tx_staff_court_b_settled.amount,
         )
         self.other_staff_settlement = self.create_settlement(
-            self.club, court=self.court_a, settled_by=self.other_staff
+            self.club, court=self.court_a, settled_by=self.other_staff.profile
         )
         SettlementTransaction.objects.create(
             settlement=self.other_staff_settlement,
@@ -207,7 +209,9 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
             amount=self.tx_other_staff.amount,
         )
         self.other_club_settlement = self.create_settlement(
-            self.other_club, court=self.other_court, settled_by=self.other_club_user
+            self.other_club,
+            court=self.other_court,
+            settled_by=self.other_club_user.profile,
         )
 
     def test_club_isolation_enforced(self):
@@ -247,7 +251,8 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
     def test_filters_cannot_expose_unauthorized_settlements(self):
         self.client.force_authenticate(user=self.staff)
         by_user = self.client.get(
-            self.settlement_list_url(self.club), {"user": self.other_staff.id}
+            self.settlement_list_url(self.club),
+            {"collected_by": self.other_staff.profile.id},
         )
         by_court = self.client.get(
             self.settlement_list_url(self.club), {"court": self.court_a.id}
@@ -269,7 +274,7 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
         self.client.force_authenticate(user=self.staff)
         response = self.client.get(
             self.settlement_preview_url(self.club),
-            {"user": self.other_staff.id},
+            {"collected_by": self.other_staff.profile.id},
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -288,7 +293,9 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
         tx_ids = {row["id"] for row in tx_list.data["results"]}
         self.assertIn(self.tx_staff_court_a.id, tx_ids)
         self.assertNotIn(self.tx_staff_court_b.id, tx_ids)
-        preview_res = preview_settlement(club=self.club, user=self.staff)
+        preview_res = preview_settlement(
+            club=self.club, collected_by=self.staff.profile
+        )
         custody_ids = {tx["id"] for tx in preview_res["transactions"]}
         self.assertIn(self.tx_staff_court_a.id, custody_ids)
         self.assertIn(self.tx_staff_court_b.id, custody_ids)

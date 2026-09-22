@@ -37,7 +37,15 @@ from apps.profiles.models import StaffCourtAccess, StaffProfile
         request=StaffUpdateSerializer,
         responses=StaffDetailSerializer,
     ),
-    destroy=extend_schema(tags=["Staff"], responses={204: None}),
+    destroy=extend_schema(
+        tags=["Staff"],
+        responses={204: None},
+        description=(
+            "Deactivate a staff member by setting is_enabled=False and "
+            "clearing operational court assignments. Preserves the user "
+            "account and all historical business, financial, and audit records."
+        ),
+    ),
 )
 class StaffViewSet(
     SlotyScopedResourceMixin,
@@ -90,7 +98,10 @@ class StaffViewSet(
 
     def perform_destroy(self, instance):
         with transaction.atomic():
-            instance.delete()
+            staff_profile = StaffProfile.objects.select_for_update().get(pk=instance.pk)
+            staff_profile.is_enabled = False
+            staff_profile.save(update_fields=["is_enabled"])
+            staff_profile.court_accesses.all().delete()
 
     @extend_schema(
         tags=["Staff"],

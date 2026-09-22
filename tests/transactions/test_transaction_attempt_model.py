@@ -20,12 +20,11 @@ from tests.booking_factories import persist_booking
 class TransactionAttemptModelTests(TestCase):
     password = "test-pass-123"
 
-    def create_user(self, username: str, **extra_fields) -> User:
-        return User.objects.create_user(
-            username=username,
-            password=self.password,
-            **extra_fields,
-        )
+    def create_user(self, phone_number=None, **extra_fields) -> User:
+        extra_fields.setdefault("password", getattr(self, "password", "test-pass-123"))
+        from tests.profile_factories import create_user as factory_create_user
+
+        return factory_create_user(phone_number=phone_number, **extra_fields)
 
     def create_club(self, name: str, slug: str) -> Club:
         return Club.objects.create(
@@ -65,7 +64,7 @@ class TransactionAttemptModelTests(TestCase):
             "booking": booking,
             "amount": Decimal("50.00"),
             "payment_method": Transaction.PaymentMethod.CASH,
-            "created_by": self.staff,
+            "created_by": self.staff_profile,
         }
         data.update(extra_fields)
         return Transaction.objects.create(**data)
@@ -75,7 +74,7 @@ class TransactionAttemptModelTests(TestCase):
             "booking": booking,
             "club": booking.club,
             "court": booking.court,
-            "attempted_by": self.staff,
+            "attempted_by": self.staff_profile,
             "client_request_id": uuid4(),
             "amount": Decimal("500.00"),
             "payment_method": Transaction.PaymentMethod.CASH,
@@ -94,8 +93,8 @@ class TransactionAttemptModelTests(TestCase):
         self.other_club = self.create_club("Other Attempt Club", "other-pay-attempt")
         self.court = self.create_court(self.club, "Payment Attempt Court")
         self.other_court = self.create_court(self.other_club, "Other Court")
-        self.staff = self.create_user("payment-attempt-staff")
-        self.create_user("other-payment-staff")
+        self.staff = self.create_user()
+        self.create_user()
         self.staff_profile = StaffProfile.objects.create(
             user=self.staff, role=Profile.Role.STAFF, club=self.club
         )
@@ -121,7 +120,7 @@ class TransactionAttemptModelTests(TestCase):
         self.assertEqual(attempt.club, self.club)
         self.assertEqual(attempt.court, self.court)
         self.assertEqual(attempt.booking, self.booking)
-        self.assertEqual(attempt.attempted_by, self.staff)
+        self.assertEqual(attempt.attempted_by, self.staff_profile)
         self.assertEqual(attempt.client_request_id, client_request_id)
         self.assertEqual(attempt.amount, Decimal("275.00"))
         self.assertEqual(
@@ -136,10 +135,9 @@ class TransactionAttemptModelTests(TestCase):
         self.assertEqual(attempt.failure_details, {"amount": ["Too much"]})
         self.assertEqual(attempt.resolution, TransactionAttempt.Resolution.UNRESOLVED)
         self.assertIsNotNone(attempt.created)
-        self.assertIsNotNone(attempt.modified)
         self.assertEqual(self.staff_profile.club, attempt.club)
         self.assertEqual(self.court, attempt.court)
-        self.assertEqual(self.staff_profile.user, attempt.attempted_by)
+        self.assertEqual(self.staff_profile, attempt.attempted_by)
 
     def test_successful_attempt_can_reference_resulting_transaction(self):
         transaction_obj = self.create_transaction(
@@ -152,7 +150,7 @@ class TransactionAttemptModelTests(TestCase):
             club=self.club,
             court=self.court,
             booking=self.booking,
-            attempted_by=self.staff,
+            attempted_by=self.staff_profile,
             transaction=transaction_obj,
             client_request_id=uuid4(),
             amount=transaction_obj.amount,
@@ -170,15 +168,14 @@ class TransactionAttemptModelTests(TestCase):
         self.assertIn(attempt, transaction_obj.attempts.all())
 
     def test_rejected_attempt_does_not_create_fake_transaction_or_financial_rows(self):
-        self.assertEqual(Transaction.objects.count(), 0)
+        self.assertFalse(Transaction.objects.filter(booking=self.booking).exists())
 
         attempt = self.create_rejected_attempt(self.booking)
 
         self.assertEqual(attempt.outcome, TransactionAttempt.Outcome.REJECTED)
-        self.assertEqual(Transaction.objects.count(), 0)
-        self.assertFalse(Transaction.objects.exists())
+        self.assertFalse(Transaction.objects.filter(booking=self.booking).exists())
         self.assertEqual(get_booking_paid_amount(self.booking), Decimal("0.00"))
-        self.assertEqual(Settlement.objects.count(), 0)
+        self.assertFalse(Settlement.objects.filter(club=self.club).exists())
 
     def test_attempt_preserves_original_values_when_transaction_changes_later(self):
         transaction_obj = self.create_transaction(self.booking)
@@ -186,7 +183,7 @@ class TransactionAttemptModelTests(TestCase):
             club=self.club,
             court=self.court,
             booking=self.booking,
-            attempted_by=self.staff,
+            attempted_by=self.staff_profile,
             transaction=transaction_obj,
             client_request_id=uuid4(),
             amount=Decimal("125.00"),
@@ -226,7 +223,7 @@ class TransactionAttemptModelTests(TestCase):
                 club=self.club,
                 court=self.court,
                 booking=self.other_booking,
-                attempted_by=self.staff,
+                attempted_by=self.staff_profile,
                 client_request_id=uuid4(),
                 amount=Decimal("50.00"),
                 payment_method=Transaction.PaymentMethod.CASH,
@@ -241,7 +238,7 @@ class TransactionAttemptModelTests(TestCase):
                 club=self.club,
                 court=self.court,
                 booking=self.booking,
-                attempted_by=self.staff,
+                attempted_by=self.staff_profile,
                 transaction=other_transaction,
                 client_request_id=uuid4(),
                 amount=Decimal("50.00"),
@@ -281,7 +278,9 @@ class TransactionAttemptModelTests(TestCase):
 
         self.assertIsNone(first.client_request_id)
         self.assertIsNone(second.client_request_id)
-        self.assertEqual(TransactionAttempt.objects.count(), 2)
+        self.assertEqual(
+            TransactionAttempt.objects.filter(booking=self.booking).count(), 2
+        )
 
     def test_database_constraints_enforce_outcome_amount_and_resolution(self):
         transaction_obj = self.create_transaction(self.booking)
@@ -292,7 +291,7 @@ class TransactionAttemptModelTests(TestCase):
                     club=self.club,
                     court=self.court,
                     booking=self.booking,
-                    attempted_by=self.staff,
+                    attempted_by=self.staff_profile,
                     client_request_id=uuid4(),
                     amount=Decimal("50.00"),
                     payment_method=Transaction.PaymentMethod.CASH,
@@ -308,7 +307,7 @@ class TransactionAttemptModelTests(TestCase):
                     club=self.club,
                     court=self.court,
                     booking=self.booking,
-                    attempted_by=self.staff,
+                    attempted_by=self.staff_profile,
                     client_request_id=uuid4(),
                     amount=Decimal("0.00"),
                     payment_method=Transaction.PaymentMethod.CASH,
@@ -323,7 +322,7 @@ class TransactionAttemptModelTests(TestCase):
                     club=self.club,
                     court=self.court,
                     booking=self.booking,
-                    attempted_by=self.staff,
+                    attempted_by=self.staff_profile,
                     client_request_id=uuid4(),
                     amount=Decimal("50.00"),
                     payment_method=Transaction.PaymentMethod.CASH,

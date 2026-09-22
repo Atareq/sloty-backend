@@ -69,9 +69,9 @@ class DashboardAuthorizationSpineTests(DashboardAPITestCase):
         self.court_a = self.create_court(self.club_a, "Court A")
         self.court_b = self.create_court(self.club_a, "Court B")
         self.court_other = self.create_court(self.club_b, "Other Club Court")
-        self.owner_a = self.create_user("dash-owner-a")
-        self.staff_a = self.create_user("dash-staff-a")
-        self.owner_b = self.create_user("dash-owner-b")
+        self.owner_a = self.create_user()
+        self.staff_a = self.create_user()
+        self.owner_b = self.create_user()
         grant_owner_club(self.owner_a, self.club_a)
         grant_staff_court(self.staff_a, self.court_a)
         grant_owner_club(self.owner_b, self.club_b)
@@ -89,13 +89,13 @@ class DashboardAuthorizationSpineTests(DashboardAPITestCase):
             self.court_other, total_price=Decimal("900.00"), status="CONFIRMED"
         )
         self.tx_staff_assigned = self.create_transaction(
-            booking_a, amount=Decimal("40.00"), created_by=self.staff_a
+            booking_a, amount=Decimal("40.00"), created_by=self.staff_a.profile
         )
         self.tx_staff_unassigned_court = self.create_transaction(
-            booking_b, amount=Decimal("60.00"), created_by=self.staff_a
+            booking_b, amount=Decimal("60.00"), created_by=self.staff_a.profile
         )
         self.create_transaction(
-            booking_other, amount=Decimal("900.00"), created_by=self.owner_b
+            booking_other, amount=Decimal("900.00"), created_by=self.owner_b.profile
         )
 
     def test_club_isolation_rejects_other_club_member(self):
@@ -161,7 +161,9 @@ class DashboardAuthorizationSpineTests(DashboardAPITestCase):
         tx_ids = {row["id"] for row in tx_list.data["results"]}
         self.assertIn(self.tx_staff_assigned.id, tx_ids)
         self.assertNotIn(self.tx_staff_unassigned_court.id, tx_ids)
-        preview_res = preview_settlement(club=self.club_a, user=self.staff_a)
+        preview_res = preview_settlement(
+            club=self.club_a, collected_by=self.staff_a.profile
+        )
         custody_ids = {tx["id"] for tx in preview_res["transactions"]}
         self.assertIn(self.tx_staff_assigned.id, custody_ids)
         self.assertIn(self.tx_staff_unassigned_court.id, custody_ids)

@@ -44,8 +44,8 @@ class SettlementViewSet(
     """
     Authorization: club via Settlement.authorization_config (never court).
     Collector narrowing: actors without can_manage_settlements see only
-    collected_by=request.user. Preview/create/summary keep domain authority
-    checks in serializers. mark_settled additionally requires management.
+    collected_by=context.profile. Preview/create/summary keep domain authority
+    checks in serializers.
     """
 
     authorization_model = Settlement
@@ -76,7 +76,7 @@ class SettlementViewSet(
             annotated_period_start=Min("lines__transaction__created"),
             annotated_period_end=Max("lines__transaction__created"),
         )
-        return queryset.order_by("-created_at", "-id")
+        return queryset.order_by("-created", "-id")
 
     def check_object_permission(self, request, obj) -> bool:
         return can_access_settlement(self.access_context, obj)
@@ -112,7 +112,8 @@ class SettlementViewSet(
             "Preview the exact current-custody candidates for one collector. "
             "Candidates are all currently unsettled, non-cancelled signed "
             "transactions in the authorized club, across all payment methods "
-            "and all accessible courts unless court is explicitly supplied. "
+            "and courts. An optional in-club court is returned as settlement "
+            "metadata and does not narrow the candidate transaction set. "
             "Transaction dates do not limit current custody."
         ),
     )
@@ -132,10 +133,12 @@ class SettlementViewSet(
         responses=SettlementUnsettledSummaryResponseSerializer,
         description=(
             "Read-only current unsettled transaction custody grouped by "
-            "collector. Candidate rows match settlement preview: selected "
-            "club, is_cancelled=false, no settlement line, collector="
-            "Transaction.created_by. period_start is the earliest unsettled "
-            "transaction for that collector; period_end is request time. "
+            "collector. Without a court filter, candidates match settlement "
+            "preview: selected club, is_cancelled=false, no settlement line, "
+            "and collector=Transaction.created_by. period_start is the "
+            "earliest unsettled transaction for that collector; period_end "
+            "is request time. "
+            "An explicit in-club court narrows this summary. "
             "Transaction dates and payment methods do not limit current "
             "custody. Signed zero and negative totals remain visible. This is "
             "not persisted Settlement history."

@@ -41,8 +41,8 @@ class CourtAuthorizationConfigTests(CourtAPITestCase):
     """Model authorization_config contract, exercised without any HTTP layer."""
 
     def setUp(self):
-        self.owner = self.create_user("config-owner")
-        self.staff = self.create_user("config-staff")
+        self.owner = self.create_user()
+        self.staff = self.create_user()
         self.club = self.create_club("Config Club", slug="config-club")
         self.other_club = self.create_club(
             "Config Other Club", slug="config-other-club"
@@ -153,9 +153,9 @@ class CourtViewSetSpineCompositionTests(CourtAPITestCase):
 
 class CourtAuthorizationAPITests(CourtAPITestCase):
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("auth-admin")
-        self.owner = self.create_user("auth-owner")
-        self.staff = self.create_user("auth-staff")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
         self.club = self.create_club("Auth Club", slug="auth-club")
         self.other_club = self.create_club("Auth Other Club", slug="auth-other-club")
         self.court = self.create_court(self.club, "Auth Court")
@@ -167,7 +167,7 @@ class CourtAuthorizationAPITests(CourtAPITestCase):
         self.assertEqual(response.data["code"], code)
 
     def test_court_list_for_user_without_club_membership_is_club_access_revoked(self):
-        outsider = self.create_user("auth-outsider")
+        outsider = self.create_user()
         self.client.force_authenticate(user=outsider)
 
         response = self.client.get(self.court_list_url(self.club))
@@ -176,7 +176,7 @@ class CourtAuthorizationAPITests(CourtAPITestCase):
         self.assert_api_error(response, "CLUB_ACCESS_REVOKED")
 
     def test_nested_working_hours_without_membership_is_club_access_revoked(self):
-        outsider = self.create_user("auth-nested-outsider")
+        outsider = self.create_user()
         self.client.force_authenticate(user=outsider)
 
         response = self.client.get(self.nested_working_hour_url(self.club, self.court))
@@ -210,9 +210,9 @@ class CanManageWorkingHoursHelperTests(CourtAPITestCase):
     """
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("helper-admin")
-        self.owner = self.create_user("helper-owner")
-        self.staff = self.create_user("helper-staff")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
         self.club = self.create_club("Helper Club", slug="helper-club")
         self.court = self.create_court(self.club, "Helper Court")
         grant_owner_club(self.owner, self.club)

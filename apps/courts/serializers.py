@@ -42,6 +42,14 @@ class CourtWorkingHourSerializer(serializers.ModelSerializer):
             "pricing_periods",
         )
         read_only_fields = ("id", "pricing_periods")
+        extra_kwargs = {
+            "weekday": {
+                "help_text": (
+                    "Canonical weekday index (0=Saturday, 1=Sunday, 2=Monday, "
+                    "3=Tuesday, 4=Wednesday, 5=Thursday, 6=Friday)."
+                )
+            }
+        }
 
     def validate(self, attrs):
         access = self.context["access_context"]
@@ -73,10 +81,17 @@ class CourtWorkingHourSerializer(serializers.ModelSerializer):
 
 class CourtWorkingHourNestedRowSerializer(serializers.Serializer):
     id = serializers.IntegerField(read_only=True, allow_null=True)
-    weekday = serializers.ChoiceField(choices=CourtWorkingHour.Weekday.choices)
+    weekday = serializers.ChoiceField(
+        choices=CourtWorkingHour.Weekday.choices,
+        help_text=(
+            "Canonical weekday index (0=Saturday, 1=Sunday, 2=Monday, "
+            "3=Tuesday, 4=Wednesday, 5=Thursday, 6=Friday)."
+        ),
+    )
     pricing_periods = CourtWorkingHourPricePeriodSerializer(many=True, required=False)
 
     def to_internal_value(self, data):
+
         forbidden_fields = {"opens_at", "closes_at", "is_closed"}
         submitted_fields = set(data or {})
         if forbidden_fields & submitted_fields:

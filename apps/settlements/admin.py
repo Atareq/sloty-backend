@@ -18,21 +18,21 @@ class SettlementAdmin(admin.ModelAdmin):
         "court",
         "total_amount",
         "settled_by",
-        "created_at",
+        "created",
     )
-    list_filter = ("club", "court", "settled_by", "created_at")
+    list_filter = ("club", "court", "settled_by", "created")
     search_fields = (
         "club__slug",
         "club__name",
         "court__name",
-        "settled_by__username",
+        "settled_by__user__phone_number",
     )
     readonly_fields = (
         "club",
         "court",
         "total_amount",
         "settled_by",
-        "created_at",
+        "created",
     )
     inlines = (SettlementTransactionInline,)
 

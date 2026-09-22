@@ -3,7 +3,7 @@
 from decimal import Decimal
 
 from apps.bookings.models import Booking
-from apps.bookings.services import resolve_booking_club_player
+from apps.bookings.services import hold_expiry_deadline, resolve_booking_club_player
 
 
 def persist_booking(court, **extra_fields) -> Booking:
@@ -35,4 +35,8 @@ def persist_booking(court, **extra_fields) -> Booking:
         "source": Booking.Source.MANUAL,
     }
     data.update(extra_fields)
-    return Booking.objects.create(**data)
+    booking = Booking.objects.create(**data)
+    if booking.status == Booking.Status.HOLD and booking.hold_expires_at is None:
+        booking.hold_expires_at = hold_expiry_deadline(court, from_time=booking.created)
+        booking.save(update_fields=["hold_expires_at"])
+    return booking

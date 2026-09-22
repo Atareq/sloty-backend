@@ -219,7 +219,7 @@ def resolve_idempotent_transaction_request(
     payment_method,
     payment_reference,
     notes,
-    created_by,
+    created_by: Profile,
     occurred_at=None,
     occurred_at_provided=False,
     lock=False,
@@ -260,7 +260,7 @@ def transaction_attempt_payload(
     payment_method,
     payment_reference,
     notes,
-    created_by,
+    created_by: Profile,
     client_request_id,
     occurred_at,
 ):
@@ -286,7 +286,7 @@ def transaction_attempt_matches_client_request(
     payment_method,
     payment_reference,
     notes,
-    created_by,
+    created_by: Profile,
     occurred_at=None,
     occurred_at_provided=False,
 ):
@@ -347,7 +347,7 @@ def resolve_idempotent_transaction_attempt(
     payment_method,
     payment_reference,
     notes,
-    created_by,
+    created_by: Profile,
     client_request_id,
     occurred_at=None,
     occurred_at_provided=False,
@@ -395,7 +395,7 @@ def create_success_transaction_attempt(
     payment_method,
     payment_reference,
     notes,
-    created_by,
+    created_by: Profile,
     client_request_id,
     occurred_at,
 ):
@@ -502,7 +502,7 @@ def record_rejected_transaction_attempt(
     payment_method,
     payment_reference,
     notes,
-    created_by,
+    created_by: Profile,
     client_request_id,
     occurred_at,
     occurred_at_provided,
@@ -564,7 +564,7 @@ def record_rejected_transaction_attempt(
         ).first()
 
 
-def dismiss_transaction_attempt(*, access, attempt, actor):
+def dismiss_transaction_attempt(*, access, attempt, actor: Profile):
     with transaction.atomic():
         locked_attempt = (
             TransactionAttempt.objects.select_for_update(of=("self",))
@@ -595,7 +595,7 @@ def dismiss_transaction_attempt(*, access, attempt, actor):
             )
 
         locked_attempt.resolution = TransactionAttempt.Resolution.DISMISSED
-        locked_attempt.save(update_fields=["resolution", "modified"])
+        locked_attempt.save(update_fields=["resolution"])
         return locked_attempt
 
 
@@ -677,7 +677,7 @@ def create_booking_transaction(
     client_request_id=None,
     occurred_at=None,
     occurred_at_provided=False,
-    created_by,
+    created_by: Profile,
 ):
     occurred_at = occurred_at or timezone.now()
     try:
@@ -772,11 +772,7 @@ def create_booking_transaction(
                 audit_actor = (
                     access.profile
                     if access is not None and getattr(access, "profile", None)
-                    else (
-                        created_by.profile
-                        if created_by is not None and hasattr(created_by, "profile")
-                        else (created_by if isinstance(created_by, Profile) else None)
-                    )
+                    else created_by
                 )
                 record_audit_log(
                     club=created_transaction.club,
@@ -790,12 +786,14 @@ def create_booking_transaction(
 
                 if locked_booking.status == Booking.Status.HOLD:
                     locked_booking.status = Booking.Status.CONFIRMED
-                    status_actor = getattr(created_by, "profile", created_by)
+                    status_actor = (
+                        access.profile
+                        if access is not None and getattr(access, "profile", None)
+                        else created_by
+                    )
                     locked_booking.last_status_changed_by = status_actor
                     locked_booking.last_status_changed_by_type = (
-                        Booking.LastStatusActorType.INTERNAL_USER
-                        if status_actor
-                        else None
+                        Booking.LastStatusActorType.PROFILE if status_actor else None
                     )
                     locked_booking.save(
                         update_fields=[
@@ -850,20 +848,26 @@ def create_booking_transaction(
         raise
 
 
-def recalculate_booking_status_after_transaction_cancel(booking, *, actor=None):
+def recalculate_booking_status_after_transaction_cancel(
+    booking, *, actor: Profile | None = None
+):
     old_status = booking.status
     if booking.status == Booking.Status.CONFIRMED and get_booking_paid_amount(
         booking
     ) == Decimal("0.00"):
+        from apps.bookings.services import hold_expiry_deadline
+
         booking.status = Booking.Status.HOLD
-        status_actor = getattr(actor, "profile", actor)
+        booking.hold_expires_at = hold_expiry_deadline(booking.court)
+        status_actor = actor
         booking.last_status_changed_by = status_actor
         booking.last_status_changed_by_type = (
-            Booking.LastStatusActorType.INTERNAL_USER if status_actor else None
+            Booking.LastStatusActorType.PROFILE if status_actor else None
         )
         booking.save(
             update_fields=[
                 "status",
+                "hold_expires_at",
                 "last_status_changed_by",
                 "last_status_changed_by_type",
                 "modified",
@@ -872,7 +876,7 @@ def recalculate_booking_status_after_transaction_cancel(booking, *, actor=None):
     return old_status, booking.status
 
 
-def cancel_transaction(*, access, transaction_obj, reason, actor):
+def cancel_transaction(*, access, transaction_obj, reason, actor: Profile):
     reason = (reason or "").strip()
     if not reason:
         raise serializers.ValidationError({"reason": "A cancel reason is required."})
@@ -934,7 +938,7 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
         booking_before_data = booking_audit_snapshot(locked_booking)
         old_booking_status = locked_booking.status
         locked_transaction.is_cancelled = True
-        locked_transaction.cancelled_by = getattr(actor, "user", actor)
+        locked_transaction.cancelled_by = actor
         locked_transaction.cancelled_at = timezone.now()
         locked_transaction.cancellation_reason = reason
         locked_transaction.save(
@@ -943,7 +947,6 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
                 "cancelled_by",
                 "cancelled_at",
                 "cancellation_reason",
-                "modified",
             ]
         )
         _, new_booking_status = recalculate_booking_status_after_transaction_cancel(
@@ -954,11 +957,7 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
         audit_actor = (
             access.profile
             if access is not None and getattr(access, "profile", None)
-            else (
-                actor.profile
-                if actor is not None and hasattr(actor, "profile")
-                else (actor if isinstance(actor, Profile) else None)
-            )
+            else actor
         )
 
         record_audit_log(
@@ -973,7 +972,7 @@ def cancel_transaction(*, access, transaction_obj, reason, actor):
             after_data=transaction_audit_snapshot(locked_transaction)
             | {
                 "is_cancelled": True,
-                "cancelled_by": actor.id,
+                "cancelled_by": actor.id if actor else None,
                 "cancelled_at": locked_transaction.cancelled_at.isoformat(),
                 "booking_status": new_booking_status,
             },

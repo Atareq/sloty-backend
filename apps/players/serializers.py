@@ -8,6 +8,7 @@ player_profile FKs are always injected by the view layer, never accepted from
 request bodies.
 """
 
+from phonenumber_field.serializerfields import PhoneNumberField
 from rest_framework import serializers
 
 from apps.players.models import ClubPlayer, PlayerProfile
@@ -22,6 +23,7 @@ class PlayerProfileSerializer(serializers.ModelSerializer):
     full_name is the player's own preferred personal name — not a club label.
     """
 
+    phone_number = PhoneNumberField(read_only=True)
     has_account = serializers.SerializerMethodField(
         help_text="True if this player profile is linked to a user account."
     )
@@ -34,24 +36,24 @@ class PlayerProfileSerializer(serializers.ModelSerializer):
             "full_name",
             "verified",
             "has_account",
-            "created_at",
-            "updated_at",
+            "created",
+            "modified",
         )
         read_only_fields = fields
 
-    def get_has_account(self, obj) -> bool:
+    def get_has_account(self, obj: PlayerProfile) -> bool:
         return obj.user_id is not None
 
 
 class PlayerProfileCreateSerializer(serializers.Serializer):
     """
-    Write serializer for finding-or-creating a PlayerProfile.
+    Write serializer for find-or-create on PlayerProfile.
 
     Used by PlayerProfileViewSet.create. The view delegates to the service
     layer to perform the actual find-or-create logic.
     """
 
-    phone_number = serializers.CharField(
+    phone_number = PhoneNumberField(
         help_text="E.164 phone number (e.g. +201012345678)."
     )
     full_name = serializers.CharField(
@@ -111,11 +113,11 @@ class ClubPlayerCreateSerializer(serializers.Serializer):
     PlayerProfile. club and player_profile FKs are never accepted from the
     request body — they are injected by perform_create.
 
-    POSTing a new display_name/player_number for an existing current version
-    records a new version rather than mutating the old one.
+    POSTing a new exact display_name for the same phone creates a new
+    ClubPlayer; the same exact name reuses the existing row.
     """
 
-    phone_number = serializers.CharField(
+    phone_number = PhoneNumberField(
         help_text=(
             "Phone number of the player. Used to find-or-create the global "
             "PlayerProfile."

@@ -20,8 +20,7 @@
 ## Important Models & Fields
 
 - [`AuditLog`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/audit/models.py):
-  - `club`, `court` (nullable), `actor` (nullable for system events like hold expiry).
-  - `club`, `court` (nullable), `actor` (nullable ForeignKey to `Profile` representing the operational actor, null for system events like hold expiry).
+  - `club`, `court` (nullable), `actor` (nullable ForeignKey to `Profile` representing the operational actor; null for system events like hold expiry).
   - `action`: Fixed `Action` choices enum.
   - `entity_type`, `entity_id`: Logical reference to the audited entity.
   - `before_data`, `after_data`, `metadata`: JSON snapshot payloads.
@@ -35,7 +34,7 @@
 
 ## API Boundaries & Key Invariants
 
-- `/api/v1/clubs/{club_slug}/audit-logs/`: Read-only list with filter parameters (`action`, `entity_type`, `actor`, `court`, `date_from`, `date_to`).
+- `/api/v1/clubs/{club_slug}/audit-logs/`: Read-only list with filter parameters (`action`, `entity_type`, `actor` Profile ID, `court`, `date_from`, `date_to`).
 - `/api/v1/clubs/{club_slug}/audit-logs/{id}/`: Read-only detail view.
 
 ## Authorization & Scoping (Authorization Spine v2)

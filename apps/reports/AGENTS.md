@@ -11,6 +11,9 @@
 - **Usage Status Inclusion**:
     - Default usage statuses: `CONFIRMED`, `COMPLETED`, `NO_SHOW`.
     - `HOLD` is included only when explicitly requested.
+    - Logically expired HOLDs (`hold_expires_at <= now`) are omitted from
+      occupancy even when `status=HOLD` is requested. Reads do not persist
+      `EXPIRED`.
     - `CANCELLED` and `EXPIRED` bookings are strictly excluded from usage analysis.
 - **Occupancy Clipping**:
     - Bookings overlapping report period boundaries have their occupied minutes clipped to the selected window (e.g. daytime vs evening).
@@ -60,14 +63,15 @@ Aggregation / JSON response
 | Court Usage | Courts, Bookings, paid amounts annotated from those bookings' transactions | Club + Court (Admin/Owner see all club courts). Not creator-scoped. Not collector-scoped. No Settlement/custody rows. | Platform Admin / Owner. Staff **403**. | None (JSON only, same querysets) |
 
 - Optional `court=` may only **narrow** the authorized court queryset. Another club's court → HTTP 403.
-- Optional `staff=` is a `Booking.created_by` report filter. The named user must have active access in this club (`REPORT_STAFF_NOT_IN_CLUB`); it is **not** Settlement collector isolation.
+- Optional `staff=` is a `Booking.created_by` report filter and takes a StaffProfile/Profile ID. The profile must be enabled, have `role=STAFF`, and belong to this club (`REPORT_STAFF_NOT_IN_CLUB`); it is **not** Settlement collector isolation.
+- `context.staff` and each `staff_booking_activity[].staff` value are Profile IDs. Display names come from the linked `Profile.user` account.
 - Do not apply Transaction Staff `created_by` narrowing or Settlement collector narrowing to report totals. Report viewers are financial roles.
 - [`apps/reports/authorization.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/reports/authorization.py) exists only for: Spine source querysets, court-filter 403, and the staff-in-club filter rule.
 - Report views use Spine source querysets. They do not write presence state.
 
 ## Cross-App Dependencies
 
-- Queries `apps.bookings`, `apps.courts`, `apps.transactions`, and `apps.accounts`.
+- Queries `apps.bookings`, `apps.courts`, `apps.transactions`, and `apps.profiles`.
 
 ## Testing
 

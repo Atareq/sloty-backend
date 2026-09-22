@@ -109,7 +109,9 @@ class CourtUsageReportAuthorizationTests(CourtUsageReportAPITestCase):
 
     def test_staff_filter_cannot_name_another_club_member(self):
         self.client.force_authenticate(user=self.owner)
-        response = self.client.get(self.url(), self.params(staff=self.other_staff.id))
+        response = self.client.get(
+            self.url(), self.params(staff=self.other_staff.profile.id)
+        )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(
             self.field_error_code(response, "staff"), "REPORT_STAFF_NOT_IN_CLUB"

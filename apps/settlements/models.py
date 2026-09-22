@@ -1,14 +1,14 @@
-from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
 
 from apps.clubs.models import Club
+from apps.common.models import SlotyCreatedModel
 from apps.courts.models import Court
 from apps.transactions.models import Transaction
 
 
-class Settlement(models.Model):
+class Settlement(SlotyCreatedModel):
     club = models.ForeignKey(
         Club,
         on_delete=models.CASCADE,
@@ -27,13 +27,12 @@ class Settlement(models.Model):
     )
     notes = models.TextField(blank=True)
     settled_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        "profiles.Profile",
         blank=True,
         null=True,
         on_delete=models.SET_NULL,
         related_name="settled_settlements",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
 
     authorization_config = {
         "scopes": {
@@ -44,13 +43,14 @@ class Settlement(models.Model):
             "club",
             "court",
             "settled_by",
+            "settled_by__user",
         ),
         "prefetch_related": (),
     }
 
     class Meta:
         indexes = [
-            models.Index(fields=["club", "created_at"]),
+            models.Index(fields=["club", "created"]),
             models.Index(fields=["settled_by"]),
         ]
 
@@ -91,7 +91,7 @@ class Settlement(models.Model):
             )
 
 
-class SettlementTransaction(models.Model):
+class SettlementTransaction(SlotyCreatedModel):
     settlement = models.ForeignKey(
         Settlement,
         on_delete=models.CASCADE,
@@ -106,7 +106,6 @@ class SettlementTransaction(models.Model):
         max_digits=10,
         decimal_places=2,
     )
-    created = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [

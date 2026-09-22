@@ -19,15 +19,14 @@ from tests.profile_factories import grant_owner_club, grant_staff_court
 class ClubAPITestCase(APITestCase):
     password = "test-pass-123"
 
-    def create_user(self, username: str, **extra_fields) -> User:
-        return User.objects.create_user(
-            username=username,
-            password=self.password,
-            **extra_fields,
-        )
+    def create_user(self, phone_number=None, **extra_fields) -> User:
+        extra_fields.setdefault("password", getattr(self, "password", "test-pass-123"))
+        from tests.profile_factories import create_user as factory_create_user
 
-    def create_platform_admin(self, username="platform-admin") -> User:
-        user = self.create_user(username=username)
+        return factory_create_user(phone_number=phone_number, **extra_fields)
+
+    def create_platform_admin(self, **extra_fields) -> User:
+        user = self.create_user(**extra_fields)
         AdminProfile.objects.create(user=user, role=Profile.Role.ADMIN)
         return user
 
@@ -97,9 +96,9 @@ class ClubAPITestCase(APITestCase):
 class ClubAPITests(ClubAPITestCase):
     def setUp(self):
         self.platform_admin = self.create_platform_admin()
-        self.owner = self.create_user("owner")
-        self.other_owner = self.create_user("other-owner")
-        self.staff = self.create_user("staff")
+        self.owner = self.create_user()
+        self.other_owner = self.create_user()
+        self.staff = self.create_user()
 
     def authenticate_platform_admin(self):
         self.client.force_authenticate(user=self.platform_admin)

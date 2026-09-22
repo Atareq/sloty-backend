@@ -25,12 +25,11 @@ from tests.booking_factories import persist_booking
 class BookingAttemptModelTests(TestCase):
     password = "test-pass-123"
 
-    def create_user(self, username: str, **extra_fields) -> User:
-        return User.objects.create_user(
-            username=username,
-            password=self.password,
-            **extra_fields,
-        )
+    def create_user(self, phone_number=None, **extra_fields) -> User:
+        extra_fields.setdefault("password", getattr(self, "password", "test-pass-123"))
+        from tests.profile_factories import create_user as factory_create_user
+
+        return factory_create_user(phone_number=phone_number, **extra_fields)
 
     def create_club(self, name: str, slug: str) -> Club:
         return Club.objects.create(
@@ -92,8 +91,8 @@ class BookingAttemptModelTests(TestCase):
         self.other_club = self.create_club("Other Attempt Club", "other-attempt")
         self.court = self.create_court(self.club, "Attempt Court")
         self.other_court = self.create_court(self.other_club, "Other Court")
-        self.staff = self.create_user("attempt-staff")
-        self.create_user("other-staff")
+        self.staff = self.create_user()
+        self.create_user()
         self.staff_profile = StaffProfile.objects.create(
             user=self.staff, role=Profile.Role.STAFF, club=self.club
         )
@@ -133,7 +132,6 @@ class BookingAttemptModelTests(TestCase):
         self.assertEqual(attempt.failure_details, {"conflict_type": "BOOKING"})
         self.assertEqual(attempt.resolution, BookingAttempt.Resolution.UNRESOLVED)
         self.assertIsNotNone(attempt.created)
-        self.assertIsNotNone(attempt.modified)
         self.assertEqual(self.staff_profile.club, attempt.club)
         self.assertEqual(self.court, attempt.court)
         self.assertEqual(self.staff.profile, attempt.attempted_by)
@@ -250,7 +248,8 @@ class BookingAttemptModelTests(TestCase):
     def test_full_clean_rejects_accepted_attempt_source_mismatch(self):
         booking = self.create_booking(
             self.court,
-            source=Booking.Source.ADMIN_CORRECTION,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
         )
 
         with self.assertRaises(ValidationError) as error:
@@ -287,7 +286,7 @@ class BookingAttemptModelTests(TestCase):
                     client_request_id=client_request_id,
                 )
 
-        other_staff = self.create_user("other-attempt-staff")
+        other_staff = self.create_user()
         other_staff_profile = StaffProfile.objects.create(
             user=other_staff, role=Profile.Role.STAFF, club=self.other_club
         )

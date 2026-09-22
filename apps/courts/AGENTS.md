@@ -36,7 +36,8 @@
   - `cancellation_refund_notice_days`: Notice window required for full cancellation refund (null = unconfigured; 0 = until start).
   - `created_by`: Nullable ForeignKey to `Profile` recording the creator's application profile (admin or owner).
 - [`CourtWorkingHour`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/models.py):
-  - One record per court per weekday (`0` = Monday to `6` = Sunday).
+  - One record per court per weekday (`0` = Saturday to `6` = Friday). Convert Python `date.weekday()` (Monday=0) with `apps.common.weekdays`.
+  - Its unique `(court, weekday)` constraint supplies the lookup index; do not add a duplicate non-unique index for the same fields.
 - [`CourtWorkingHourPricePeriod`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/models.py):
   - Child periods defining `starts_at`, `ends_at`, and `price`. Ordered by `starts_at`.
 

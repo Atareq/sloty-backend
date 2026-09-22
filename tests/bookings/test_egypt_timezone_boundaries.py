@@ -24,7 +24,7 @@ class EgyptTimezoneBoundaryTests(BookingAPITestCase):
         )
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("cairo-admin")
+        self.platform_admin = self.create_platform_admin()
         self.club = self.create_club("Cairo Club", slug="cairo-club")
         self.court = self.create_court(self.club, "Cairo Court")
         self.client.force_authenticate(user=self.platform_admin)

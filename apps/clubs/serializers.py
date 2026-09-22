@@ -1,3 +1,4 @@
+from phonenumber_field.serializerfields import PhoneNumberField
 from rest_framework import serializers
 
 from apps.clubs.models import Club, generate_unique_club_slug
@@ -30,6 +31,8 @@ class ClubLocationValidationMixin:
 
 
 class ClubListSerializer(serializers.ModelSerializer):
+    phone_number = PhoneNumberField(allow_blank=True, allow_null=True, read_only=True)
+
     class Meta:
         model = Club
         fields = (
@@ -47,6 +50,7 @@ class ClubListSerializer(serializers.ModelSerializer):
 
 class ClubDetailSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    phone_number = PhoneNumberField(allow_blank=True, allow_null=True)
 
     class Meta:
         model = Club
@@ -68,6 +72,8 @@ class ClubDetailSerializer(serializers.ModelSerializer):
 
 
 class ClubCreateSerializer(ClubLocationValidationMixin, serializers.ModelSerializer):
+    phone_number = PhoneNumberField(required=False, allow_blank=True, allow_null=True)
+
     class Meta:
         model = Club
         fields = (
@@ -91,6 +97,8 @@ class ClubCreateSerializer(ClubLocationValidationMixin, serializers.ModelSeriali
 
 
 class ClubUpdateSerializer(ClubLocationValidationMixin, serializers.ModelSerializer):
+    phone_number = PhoneNumberField(required=False, allow_blank=True, allow_null=True)
+
     class Meta:
         model = Club
         fields = (

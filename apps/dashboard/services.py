@@ -8,14 +8,16 @@ from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
 from apps.bookings.filters import (
-    annotate_booking_hold_expires_at,
     booking_needs_action_q,
+    exclude_logically_expired_holds,
 )
 from apps.bookings.identity import (
     booking_customer_display_name,
     booking_customer_display_phone,
 )
 from apps.bookings.models import Booking
+from apps.bookings.services import blocking_booking_queryset
+from apps.common.weekdays import to_sloty_weekday
 from apps.courts.models import CourtWorkingHour
 from apps.courts.pricing import datetime_for_local_date, working_hour_bounds
 from apps.dashboard.authorization import (
@@ -28,6 +30,7 @@ from apps.dashboard.authorization import (
     scoped_dashboard_settlements,
     scoped_dashboard_transactions,
 )
+from apps.profiles.models import Profile
 from apps.transactions.models import Transaction
 from apps.transactions.services import annotate_booking_paid_amount
 
@@ -54,7 +57,7 @@ def build_court_availability_payload(*, club, court, date):
     working_hour = (
         CourtWorkingHour.objects.filter(
             court=court,
-            weekday=date.weekday(),
+            weekday=to_sloty_weekday(date.weekday()),
         )
         .prefetch_related("pricing_periods")
         .first()
@@ -92,14 +95,13 @@ def build_court_availability_payload(*, club, court, date):
     slot_delta = timedelta(minutes=court.slot_duration_minutes)
 
     blocking_bookings = list(
-        Booking.objects.filter(
-            court=court,
-            status__in=Booking.BLOCKING_STATUSES,
-            start_time__lt=closes_at,
-            end_time__gt=opens_at,
-        ).order_by("start_time", "id")
+        blocking_booking_queryset(court, opens_at, closes_at).order_by(
+            "start_time", "id"
+        )
     )
 
+    now = timezone.now()
+    today = timezone.localtime(now).date()
     current = opens_at
     while current + slot_delta <= closes_at:
         slot_end = current + slot_delta
@@ -111,16 +113,26 @@ def build_court_availability_payload(*, club, court, date):
             ),
             None,
         )
+        is_available = blocking_booking is None
+        if date == today and current < now:
+            is_available = False
         base_response["slots"].append(
             {
                 "start_time": current,
                 "end_time": slot_end,
-                "is_available": blocking_booking is None,
+                "is_available": is_available,
+                "available": is_available,
                 "blocking_booking": (
                     blocking_booking.id if blocking_booking is not None else None
                 ),
                 "blocking_status": (
                     blocking_booking.status if blocking_booking is not None else None
+                ),
+                "hold_expires_at": (
+                    blocking_booking.hold_expires_at
+                    if blocking_booking is not None
+                    and blocking_booking.status == Booking.Status.HOLD
+                    else None
                 ),
             }
         )
@@ -166,9 +178,11 @@ def get_public_court_availability(*, club, court, date):
 
 def get_calendar_items(*, access, date_from, date_to, court=None, status=None):
     queryset = annotate_booking_paid_amount(
-        scoped_dashboard_bookings(access)
-        .select_related("court", "club_player__player_profile")
-        .filter(start_time__lt=date_to, end_time__gt=date_from)
+        exclude_logically_expired_holds(
+            scoped_dashboard_bookings(access)
+            .select_related("court", "club_player__player_profile")
+            .filter(start_time__lt=date_to, end_time__gt=date_from)
+        )
     ).order_by("start_time", "id")
     if court is not None:
         if not can_access_court(access, court):
@@ -281,25 +295,23 @@ def null_financial_fields(data, fields):
     return data
 
 
-def get_user_display_name(user):
+def profile_display_name(profile: Profile | None) -> str:
+    if profile is None:
+        return ""
+    user = profile.user
     if user is None:
         return ""
-    full_name = user.get_full_name().strip()
-    return full_name or user.username
+    return user.get_display_name()
 
 
 def local_date(value):
     return timezone.localtime(value).date()
 
 
-def with_hold_expiry(queryset):
-    return annotate_booking_hold_expires_at(queryset)
-
-
 def apply_transaction_filters(
     queryset,
     *,
-    collected_by=None,
+    collected_by: Profile | None = None,
     payment_method=None,
     settlement_status=None,
 ):
@@ -391,16 +403,14 @@ def get_staff_unsettled_money(unsettled_transactions, *, court=None):
 def get_needs_action_breakdown(bookings):
     now = timezone.now()
     warning_end = now + timedelta(minutes=30)
-    annotated = with_hold_expiry(
-        bookings.annotate(
-            paid_amount=money_sum(
-                "transactions__amount",
-                filter=Q(
-                    transactions__is_cancelled=False,
-                    transactions__transaction_type=Transaction.Type.PAYMENT,
-                ),
+    annotated = bookings.annotate(
+        paid_amount=money_sum(
+            "transactions__amount",
+            filter=Q(
+                transactions__is_cancelled=False,
+                transactions__transaction_type=Transaction.Type.PAYMENT,
             ),
-        )
+        ),
     )
     needs_action_query = booking_needs_action_q(now=now, include_expired=True)
     return {
@@ -431,7 +441,7 @@ def get_current_unsettled_transactions(
     *,
     access=None,
     club=None,
-    collected_by=None,
+    collected_by: Profile | None = None,
     court=None,
 ):
     target_club = club or (access.club if access else None)
@@ -479,9 +489,9 @@ def build_current_custody_collector_rows(queryset):
     grouped_rows = list(
         queryset.values(
             "created_by",
-            "created_by__first_name",
-            "created_by__last_name",
-            "created_by__username",
+            "created_by__user__first_name",
+            "created_by__user__last_name",
+            "created_by__user__phone_number",
         )
         .annotate(
             transaction_count=Count("id"),
@@ -516,9 +526,10 @@ def build_current_custody_collector_rows(queryset):
     results = []
     for row in grouped_rows:
         collector_id = row["created_by"]
-        collector_name = (
-            f"{row['created_by__first_name']} {row['created_by__last_name']}"
-        ).strip() or row["created_by__username"]
+        first_name = row.get("created_by__user__first_name") or ""
+        last_name = row.get("created_by__user__last_name") or ""
+        phone_number = row.get("created_by__user__phone_number") or ""
+        collector_name = f"{first_name} {last_name}".strip() or str(phone_number)
         results.append(
             {
                 "collected_by": collector_id,
@@ -551,8 +562,8 @@ def settled_settlements_queryset(
         settlements = settlements.filter(Q(court__in=courts) | Q(court__isnull=True))
 
     return settlements.filter(
-        created_at__gte=date_from,
-        created_at__lt=date_to,
+        created__gte=date_from,
+        created__lt=date_to,
     )
 
 
@@ -755,7 +766,7 @@ def get_dashboard_summary(
             ),
             "collected_by": collected_by.id if collected_by else None,
             "collected_by_name": (
-                get_user_display_name(collected_by) if collected_by else None
+                profile_display_name(collected_by) if collected_by else None
             ),
             "payment_method": payment_method,
             "settlement_status": settlement_status,
@@ -940,7 +951,9 @@ def iter_dates(date_from, date_to):
 def available_minutes_for_court(court, working_hours_by_weekday, date_from, date_to):
     total = 0
     for date_value in iter_dates(date_from, date_to):
-        working_hour = working_hours_by_weekday.get(date_value.weekday())
+        working_hour = working_hours_by_weekday.get(
+            to_sloty_weekday(date_value.weekday())
+        )
         bounds = working_hour_bounds(working_hour) if working_hour is not None else None
         if bounds is None:
             continue
@@ -969,15 +982,13 @@ def get_court_utilization(*, access, date_from, date_to):
         .order_by("id")
     )
     bookings_by_court = {court.id: [] for court in courts}
-    for booking in Booking.objects.filter(
-        court__in=courts,
-        status__in=(
-            Booking.Status.HOLD,
-            Booking.Status.CONFIRMED,
-            Booking.Status.COMPLETED,
-        ),
-        start_time__lt=date_to,
-        end_time__gt=date_from,
+    for booking in exclude_logically_expired_holds(
+        Booking.objects.filter(
+            court__in=courts,
+            status__in=Booking.BLOCKING_STATUSES,
+            start_time__lt=date_to,
+            end_time__gt=date_from,
+        )
     ).order_by("court_id", "start_time", "id"):
         bookings_by_court.setdefault(booking.court_id, []).append(booking)
 

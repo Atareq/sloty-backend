@@ -1,21 +1,20 @@
 from decimal import Decimal
+from typing import Optional
 
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import extend_schema_field
+from phonenumber_field.serializerfields import PhoneNumberField
 from rest_framework import serializers
 
-from apps.accounts.models import User
-from apps.bookings.identity import (
-    booking_customer_display_name,
-    booking_customer_display_phone,
-)
+from apps.bookings.identity import booking_customer_display_name
 from apps.courts.models import Court
+from apps.profiles.models import Profile
 from apps.settlements.authorization import (
-    can_approve_user,
+    can_approve_collector,
     can_manage_settlements,
-    can_view_user_in_summary,
-    get_active_user_roles_by_id,
+    can_view_collector_in_summary,
+    get_active_profile_roles_by_id,
     validate_preview_authority,
     validate_settlement_authority,
     validate_unsettled_summary_authority,
@@ -28,15 +27,17 @@ from apps.transactions.models import Transaction
 ZERO = Decimal("0.00")
 
 
-def user_display_name(user) -> str:
-    if user is None:
+def profile_display_name(profile: Optional[Profile]) -> str:
+    if profile is None:
         return ""
-    full_name = user.get_full_name().strip()
-    return full_name or user.username
+    return profile.get_display_name()
 
 
 class SettlementListSerializer(serializers.ModelSerializer):
-    settled_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    settled_by = serializers.PrimaryKeyRelatedField(
+        read_only=True,
+        help_text="Profile ID of the actor who performed settlement.",
+    )
     settled_by_name = serializers.SerializerMethodField()
     court_name = serializers.SerializerMethodField()
     transaction_count = serializers.IntegerField(read_only=True)
@@ -56,13 +57,13 @@ class SettlementListSerializer(serializers.ModelSerializer):
             "period_end",
             "settled_by",
             "settled_by_name",
-            "created_at",
+            "created",
         )
         read_only_fields = fields
 
     @extend_schema_field(serializers.CharField())
     def get_settled_by_name(self, obj):
-        return user_display_name(obj.settled_by)
+        return profile_display_name(obj.settled_by)
 
     @extend_schema_field(serializers.CharField(allow_null=True))
     def get_court_name(self, obj):
@@ -75,7 +76,10 @@ class SettlementLineSerializer(serializers.ModelSerializer):
     transaction = serializers.PrimaryKeyRelatedField(read_only=True)
     booking = serializers.IntegerField(source="transaction.booking_id", read_only=True)
     booking_customer_name = serializers.SerializerMethodField()
-    booking_customer_phone = serializers.SerializerMethodField()
+    booking_customer_phone = PhoneNumberField(
+        source="transaction.booking.club_player.player_profile.phone_number",
+        read_only=True,
+    )
     booking_start_time = serializers.DateTimeField(
         source="transaction.booking.start_time",
         read_only=True,
@@ -138,13 +142,12 @@ class SettlementLineSerializer(serializers.ModelSerializer):
     def get_booking_customer_name(self, obj) -> str:
         return booking_customer_display_name(obj.transaction.booking)
 
-    @extend_schema_field(serializers.CharField())
-    def get_booking_customer_phone(self, obj) -> str:
-        return booking_customer_display_phone(obj.transaction.booking)
-
 
 class SettlementDetailSerializer(serializers.ModelSerializer):
-    settled_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    settled_by = serializers.PrimaryKeyRelatedField(
+        read_only=True,
+        help_text="Profile ID of the actor who performed settlement.",
+    )
     settled_by_name = serializers.SerializerMethodField()
     court_name = serializers.SerializerMethodField()
     transaction_count = serializers.IntegerField(read_only=True)
@@ -167,7 +170,7 @@ class SettlementDetailSerializer(serializers.ModelSerializer):
             "notes",
             "settled_by",
             "settled_by_name",
-            "created_at",
+            "created",
             "lines",
             "transactions",
         )
@@ -175,7 +178,7 @@ class SettlementDetailSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.CharField())
     def get_settled_by_name(self, obj):
-        return user_display_name(obj.settled_by)
+        return profile_display_name(obj.settled_by)
 
     @extend_schema_field(serializers.CharField(allow_null=True))
     def get_court_name(self, obj):
@@ -185,10 +188,11 @@ class SettlementDetailSerializer(serializers.ModelSerializer):
 
 
 class SettlementCreateSerializer(serializers.ModelSerializer):
-    user = serializers.PrimaryKeyRelatedField(
-        queryset=User.objects.all(),
+    collected_by = serializers.PrimaryKeyRelatedField(
+        queryset=Profile.objects.all(),
         required=False,
         allow_null=True,
+        help_text="Collector Profile ID stored in Transaction.created_by.",
     )
     court = serializers.PrimaryKeyRelatedField(
         queryset=Court.objects.all(),
@@ -200,7 +204,7 @@ class SettlementCreateSerializer(serializers.ModelSerializer):
         model = Settlement
         fields = (
             "id",
-            "user",
+            "collected_by",
             "court",
             "notes",
         )
@@ -222,20 +226,19 @@ class SettlementCreateSerializer(serializers.ModelSerializer):
                     ],
                 }
             )
-        target_user = attrs.get("user")
+        target_collector = attrs.get("collected_by")
         validate_settlement_authority(
             context=context,
-            user=target_user,
+            collector=target_collector,
         )
         return attrs
 
     def create(self, validated_data):
         context = self.context.get("access_context") or self.context.get("club_access")
-        request = self.context["request"]
         return create_settlement(
             club=context.club,
-            user=validated_data.get("user"),
-            settled_by=request.user,
+            collected_by=validated_data.get("collected_by"),
+            settled_by=context.profile,
             notes=validated_data.get("notes", ""),
             court=validated_data.get("court"),
         )
@@ -245,10 +248,11 @@ class SettlementCreateSerializer(serializers.ModelSerializer):
 
 
 class SettlementPreviewRequestSerializer(serializers.Serializer):
-    user = serializers.PrimaryKeyRelatedField(
-        queryset=User.objects.all(),
+    collected_by = serializers.PrimaryKeyRelatedField(
+        queryset=Profile.objects.all(),
         required=False,
         allow_null=True,
+        help_text="Collector Profile ID stored in Transaction.created_by.",
     )
     court = serializers.PrimaryKeyRelatedField(
         queryset=Court.objects.all(),
@@ -277,33 +281,34 @@ class SettlementPreviewRequestSerializer(serializers.Serializer):
                     ],
                 }
             )
-        target_user = attrs.get("user")
-        if target_user is None and "user" not in self.initial_data:
-            target_user = self.context["request"].user
-            attrs["user"] = target_user
+        target_collector = attrs.get("collected_by")
+        if target_collector is None and "collected_by" not in self.initial_data:
+            target_collector = context.profile
+            attrs["collected_by"] = target_collector
         validate_preview_authority(
             context=context,
-            user=target_user,
+            collector=target_collector,
         )
         return attrs
 
     def preview(self):
         context = self.context.get("access_context") or self.context.get("club_access")
-        request = self.context["request"]
-        target_user = self.validated_data.get("user")
+        target_collector = self.validated_data.get("collected_by")
         court = self.validated_data.get("court")
         data = preview_settlement(
             club=context.club,
-            user=target_user,
+            collected_by=target_collector,
             court=court,
         )
         can_approve = (
-            can_approve_user(context, target_user.id)
-            if target_user
+            can_approve_collector(context, target_collector.id)
+            if target_collector
             else can_manage_settlements(context)
         )
         data["is_self_preview"] = bool(
-            request.user and target_user and target_user.id == request.user.id
+            context.profile
+            and target_collector
+            and target_collector.id == context.profile.id
         )
         data["can_approve"] = can_approve
         data["approval_required"] = not can_approve
@@ -315,7 +320,7 @@ class SettlementPreviewTransactionSerializer(serializers.Serializer):
     kind = serializers.CharField()
     booking = serializers.IntegerField(allow_null=True)
     booking_customer_name = serializers.CharField()
-    booking_customer_phone = serializers.CharField()
+    booking_customer_phone = PhoneNumberField(allow_blank=True)
     booking_start_time = serializers.DateTimeField()
     booking_end_time = serializers.DateTimeField()
     court = serializers.IntegerField()
@@ -328,8 +333,11 @@ class SettlementPreviewTransactionSerializer(serializers.Serializer):
 
 class SettlementPreviewResponseSerializer(serializers.Serializer):
     club = serializers.IntegerField()
-    user = serializers.IntegerField(allow_null=True)
-    user_name = serializers.CharField(allow_blank=True)
+    collected_by = serializers.IntegerField(
+        allow_null=True,
+        help_text="Collector Profile ID stored in Transaction.created_by.",
+    )
+    collected_by_name = serializers.CharField(allow_blank=True)
     court = serializers.IntegerField(allow_null=True)
     court_name = serializers.CharField(allow_blank=True)
     is_self_preview = serializers.BooleanField()
@@ -349,10 +357,11 @@ class SettlementPreviewResponseSerializer(serializers.Serializer):
 
 
 class SettlementUnsettledSummaryRequestSerializer(serializers.Serializer):
-    user = serializers.PrimaryKeyRelatedField(
-        queryset=User.objects.all(),
+    collected_by = serializers.PrimaryKeyRelatedField(
+        queryset=Profile.objects.all(),
         required=False,
         allow_null=True,
+        help_text="Collector Profile ID stored in Transaction.created_by.",
     )
     court = serializers.PrimaryKeyRelatedField(
         queryset=Court.objects.all(),
@@ -383,41 +392,46 @@ class SettlementUnsettledSummaryRequestSerializer(serializers.Serializer):
             )
         validate_unsettled_summary_authority(
             context=context,
-            user=attrs.get("user"),
+            collector=attrs.get("collected_by"),
         )
         return attrs
 
     def get_summary(self):
         context = self.context.get("access_context") or self.context.get("club_access")
-        target_user = self.validated_data.get("user")
+        target_collector = self.validated_data.get("collected_by")
         court = self.validated_data.get("court")
         queryset = Transaction.objects.filter(
             club=context.club,
             settlement_line__isnull=True,
             is_cancelled=False,
         )
-        if target_user is not None:
-            queryset = queryset.filter(created_by=target_user)
+        if target_collector is not None:
+            queryset = queryset.filter(created_by=target_collector)
         if court is not None:
             queryset = queryset.filter(court=court)
 
         grouped = {}
-        for t in queryset.select_related("created_by").order_by("created", "id"):
-            u_id = t.created_by_id
-            if u_id not in grouped:
-                grouped[u_id] = {
-                    "user": t.created_by,
+        for t in queryset.select_related("created_by", "created_by__user").order_by(
+            "created", "id"
+        ):
+            c = t.created_by
+            c_id = c.id if c else None
+            if c_id not in grouped:
+                grouped[c_id] = {
+                    "collector": c,
                     "transactions": [],
                 }
-            grouped[u_id]["transactions"].append(t)
+            grouped[c_id]["transactions"].append(t)
 
         now = timezone.now()
-        user_ids = list(grouped.keys())
-        roles_by_user_id = get_active_user_roles_by_id(context.club, user_ids)
+        collector_ids = list(grouped.keys())
+        roles_by_collector_id = get_active_profile_roles_by_id(
+            context.club, collector_ids
+        )
         results = []
-        for u_id, data in grouped.items():
-            roles = roles_by_user_id.get(u_id, set())
-            if not can_view_user_in_summary(context, u_id, roles):
+        for c_id, data in grouped.items():
+            roles = roles_by_collector_id.get(c_id, set())
+            if not can_view_collector_in_summary(context, c_id, roles):
                 continue
             txs = data["transactions"]
             payments = sum(
@@ -441,11 +455,11 @@ class SettlementUnsettledSummaryRequestSerializer(serializers.Serializer):
             for tx in txs:
                 method_totals[str(tx.payment_method)] += tx.amount
 
-            name = user_display_name(data["user"])
+            name = profile_display_name(data["collector"])
             results.append(
                 {
-                    "user": u_id,
-                    "user_name": name,
+                    "collected_by": c_id,
+                    "collected_by_name": name,
                     "period_start": txs[0].created,
                     "period_end": now,
                     "transaction_count": len(txs),
@@ -454,23 +468,25 @@ class SettlementUnsettledSummaryRequestSerializer(serializers.Serializer):
                     "booking_payments": payments,
                     "booking_refunds": refunds,
                     "totals_by_payment_method": method_totals,
-                    "is_self": bool(context.user and u_id == context.user.id),
-                    "can_approve": can_approve_user(context, u_id, roles),
+                    "is_self": bool(context.profile and c_id == context.profile.id),
+                    "can_approve": can_approve_collector(context, c_id, roles),
                 }
             )
 
         results.sort(
             key=lambda item: (
-                item["user_name"].casefold(),
-                item["user"],
+                item["collected_by_name"].casefold(),
+                item["collected_by"],
             )
         )
         return {"results": results}
 
 
 class SettlementUnsettledSummaryRowSerializer(serializers.Serializer):
-    user = serializers.IntegerField()
-    user_name = serializers.CharField()
+    collected_by = serializers.IntegerField(
+        help_text="Collector Profile ID stored in Transaction.created_by."
+    )
+    collected_by_name = serializers.CharField()
     period_start = serializers.DateTimeField()
     period_end = serializers.DateTimeField()
     transaction_count = serializers.IntegerField()

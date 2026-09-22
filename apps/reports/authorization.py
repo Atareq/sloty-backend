@@ -37,24 +37,19 @@ def can_access_report_court(context: RequestAccessContext, court) -> bool:
     )
 
 
-def can_filter_reports_by_staff(context: RequestAccessContext, user) -> bool:
+def can_filter_reports_by_staff(
+    context: RequestAccessContext, profile: Profile
+) -> bool:
     """
-    Optional created_by filter may only name a user with active access in
-    this club. This is a report filter rule, not a collector security scope.
+    Optional staff filter must name an active StaffProfile in this club.
+    This is a report filter rule, not a collector security scope.
     """
-    if user is None or getattr(context, "club", None) is None:
+    if profile is None or getattr(context, "club", None) is None:
         return False
-    profile = Profile.objects.filter(user=user, is_enabled=True).first()
-    if profile is None:
+    if not profile.is_enabled or profile.role != Profile.Role.STAFF:
         return False
-    if profile.role == Profile.Role.ADMIN:
-        return True
-    if profile.role == Profile.Role.OWNER:
-        return profile.owner_profile.clubs.filter(pk=context.club.pk).exists()
-    if profile.role == Profile.Role.STAFF:
-        staff_profile = getattr(profile, "staff_profile", None)
-        return bool(staff_profile and staff_profile.club_id == context.club.pk)
-    return False
+    staff_profile = getattr(profile, "staff_profile", None)
+    return bool(staff_profile and staff_profile.club_id == context.club.pk)
 
 
 def scoped_report_courts(context: RequestAccessContext):

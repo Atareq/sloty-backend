@@ -8,11 +8,12 @@ from django.utils.translation import gettext_lazy as _
 from phonenumber_field.modelfields import PhoneNumberField
 
 from apps.clubs.models import Club
+from apps.common.models import SlotyCreatedModel, SlotyTimeStampedModel
 from apps.courts.models import Court
 from apps.players.models import ClubPlayer
 
 
-class Booking(models.Model):
+class Booking(SlotyTimeStampedModel):
     class Status(models.TextChoices):
         HOLD = "HOLD", _("Hold")
         CONFIRMED = "CONFIRMED", _("Confirmed")
@@ -23,12 +24,11 @@ class Booking(models.Model):
 
     class Source(models.TextChoices):
         MANUAL = "MANUAL", _("Manual")
-        ADMIN_CORRECTION = "ADMIN_CORRECTION", _("Admin correction")
         RECURRING = "RECURRING", _("Recurring")
 
-    # For identifying the terminateed statuses by the system
+    # For identifying whether the last status change was driven by a profile or system
     class LastStatusActorType(models.TextChoices):
-        INTERNAL_USER = "INTERNAL_USER", _("Internal user")
+        PROFILE = "PROFILE", _("Profile")
         SYSTEM = "SYSTEM", _("System")
 
     class RecurrenceStatus(models.TextChoices):
@@ -40,7 +40,6 @@ class Booking(models.Model):
         Status.HOLD,
         Status.CONFIRMED,
         Status.COMPLETED,
-        Status.NO_SHOW,
     )
     LOCKED_STATUSES = (
         Status.COMPLETED,
@@ -53,11 +52,13 @@ class Booking(models.Model):
         Club,
         on_delete=models.CASCADE,
         related_name="bookings",
+        db_index=False,
     )
     court = models.ForeignKey(
         Court,
         on_delete=models.CASCADE,
         related_name="bookings",
+        db_index=False,
     )
     # Authoritative customer identity: the exact ClubPlayer version used
     # at booking time. ClubPlayer is an immutable historical version, so
@@ -79,20 +80,18 @@ class Booking(models.Model):
         max_length=32,
         choices=Status.choices,
         default=Status.HOLD,
-        db_index=True,
     )
+    hold_expires_at = models.DateTimeField(blank=True, null=True)
     source = models.CharField(
         max_length=32,
         choices=Source.choices,
         default=Source.MANUAL,
-        db_index=True,
     )
     recurrence_status = models.CharField(
         max_length=32,
         choices=RecurrenceStatus.choices,
         blank=True,
         null=True,
-        db_index=True,
     )
     previous_recurring_booking = models.OneToOneField(
         "self",
@@ -101,15 +100,13 @@ class Booking(models.Model):
         on_delete=models.SET_NULL,
         related_name="next_recurring_booking",
     )
-    client_request_id = models.UUIDField(blank=True, null=True, db_index=True)
+    client_request_id = models.UUIDField(blank=True, null=True)
     notes = models.TextField(blank=True)
-    cancellation_reason = models.TextField(blank=True)
-    no_show_reason = models.TextField(blank=True)
-    reschedule_reason = models.TextField(blank=True)
-    completed_at = models.DateTimeField(blank=True, null=True, db_index=True)
-    cancelled_at = models.DateTimeField(blank=True, null=True, db_index=True)
-    no_show_at = models.DateTimeField(blank=True, null=True, db_index=True)
-    expired_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    termination_reason = models.TextField(blank=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+    no_show_at = models.DateTimeField(blank=True, null=True)
+    expired_at = models.DateTimeField(blank=True, null=True)
     created_by = models.ForeignKey(
         "profiles.Profile",
         blank=True,
@@ -130,8 +127,6 @@ class Booking(models.Model):
         blank=True,
         null=True,
     )
-    created = models.DateTimeField(auto_now_add=True, db_index=True)
-    modified = models.DateTimeField(auto_now=True)
 
     # Authorization Spine v2 resource-query contract
     # (apps/common/authorization/contracts.py). Booking is an operational
@@ -148,6 +143,7 @@ class Booking(models.Model):
             "court",
             "created_by",
             "last_status_changed_by",
+            "last_status_changed_by__user",
             "previous_recurring_booking",
             "next_recurring_booking",
             "club_player__player_profile",
@@ -180,19 +176,11 @@ class Booking(models.Model):
         indexes = [
             models.Index(fields=["court", "start_time"]),
             models.Index(fields=["club", "start_time"]),
-            models.Index(fields=["status"]),
-            models.Index(fields=["source"]),
             models.Index(
                 fields=["court", "source", "recurrence_status"],
                 name="bookings_bo_court_i_d3b92f_idx",
             ),
-            models.Index(fields=["created_by"]),
             models.Index(fields=["created"]),
-            models.Index(fields=["completed_at"]),
-            models.Index(fields=["cancelled_at"]),
-            models.Index(fields=["no_show_at"]),
-            models.Index(fields=["expired_at"]),
-            models.Index(fields=["club_player"]),
         ]
 
     def __str__(self) -> str:
@@ -256,7 +244,7 @@ class Booking(models.Model):
             raise ValidationError(errors)
 
 
-class BookingAttempt(models.Model):
+class BookingAttempt(SlotyCreatedModel):
     class Outcome(models.TextChoices):
         SUCCESS = "SUCCESS", _("Success")
         REJECTED = "REJECTED", _("Rejected")
@@ -270,11 +258,13 @@ class BookingAttempt(models.Model):
         Club,
         on_delete=models.CASCADE,
         related_name="booking_attempts",
+        db_index=False,
     )
     court = models.ForeignKey(
         Court,
         on_delete=models.CASCADE,
         related_name="booking_attempts",
+        db_index=False,
     )
     attempted_by = models.ForeignKey(
         "profiles.Profile",
@@ -282,6 +272,7 @@ class BookingAttempt(models.Model):
         null=True,
         on_delete=models.SET_NULL,
         related_name="booking_attempts",
+        db_index=False,
     )
     booking = models.ForeignKey(
         Booking,
@@ -290,7 +281,7 @@ class BookingAttempt(models.Model):
         on_delete=models.SET_NULL,
         related_name="attempts",
     )
-    client_request_id = models.UUIDField(blank=True, null=True, db_index=True)
+    client_request_id = models.UUIDField(blank=True, null=True)
     customer_name = models.CharField(max_length=255)
     customer_phone = PhoneNumberField()
     notes = models.TextField(blank=True)
@@ -301,20 +292,16 @@ class BookingAttempt(models.Model):
         max_length=32,
         choices=Booking.Source.choices,
         default=Booking.Source.MANUAL,
-        db_index=True,
     )
     requested_recurring = models.BooleanField(default=False)
-    outcome = models.CharField(max_length=32, choices=Outcome.choices, db_index=True)
+    outcome = models.CharField(max_length=32, choices=Outcome.choices)
     failure_code = models.CharField(max_length=128, blank=True)
     failure_details = models.JSONField(blank=True, default=dict)
     resolution = models.CharField(
         max_length=32,
         choices=Resolution.choices,
         default=Resolution.UNRESOLVED,
-        db_index=True,
     )
-    created = models.DateTimeField(auto_now_add=True, db_index=True)
-    modified = models.DateTimeField(auto_now=True)
 
     # Authorization Spine v2 resource-query contract. Boundary is club+court.
     # Staff attempted_by restriction is applied in BookingAttemptViewSet

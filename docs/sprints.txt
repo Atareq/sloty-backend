@@ -96,7 +96,7 @@ Club Manager
 Court Staff
 Backend Tasks
 Create user model or extend Django user.
-Add phone-based login or username/phone login.
+Phone-first login (`phone_number` + password) is implemented. Username is not an authentication identifier.
 Add JWT login/refresh/logout.
 Add role model or role field.
 Add user status:

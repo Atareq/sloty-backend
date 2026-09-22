@@ -199,6 +199,7 @@ Request URL → Scope Resolver → Access Context → Authorization Spine
 
 ### Current State
 
+- Login credentials are `phone_number` + password. Email is required account information and is not a login identifier. There is no username.
 - JWT obtain + refresh endpoints exist. JWTs carry a signed password-hash digest that is checked against the current database password hash; password changes invalidate both access and refresh tokens.
 - Optional `club_slug` on token obtain may embed convenience claims.
 - `POST /api/v1/auth/password/change/` accepts `current_password`, `new_password`, and `new_password_confirmation` for the authenticated user and returns `204 No Content`. Claim-less tokens from before password-hash checking are intentionally rejected at rollout.
@@ -252,7 +253,7 @@ Business Logic (services)
 - state transitions
 - multi-model writes / audit recording
 
-Services should **not** normally contain `if user.role == ...` or re-check club/court access.
+Services should **not** normally contain `if profile.role == ...` or re-check club/court access.
 
 **Context = facts only.** Access context must not embed endpoint permission helpers or queryset builders.
 

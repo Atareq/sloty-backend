@@ -43,7 +43,7 @@ def apply_staff_collector_scope(
 ) -> QuerySet:
     """Narrow an already court-scoped queryset to the Staff member's own rows."""
     if _is_staff_collector(context):
-        return queryset.filter(**{actor_field: context.user})
+        return queryset.filter(**{actor_field: context.profile})
     return queryset
 
 
@@ -80,18 +80,21 @@ def can_cancel_transaction(
         return False
     if transaction.club_id != context.club.id:
         return False
-    return (context.role == Role.ADMIN) or transaction.created_by_id == context.user.id
+    return (context.role == Role.ADMIN) or (
+        context.profile is not None and transaction.created_by_id == context.profile.id
+    )
 
 
 def can_dismiss_transaction_attempt(
     context: RequestAccessContext, attempt: Optional[TransactionAttempt]
 ) -> bool:
-    """Only the user who attempted the payment may dismiss the attempt."""
+    """Only the profile who attempted the payment may dismiss the attempt."""
     return (
         attempt is not None
         and getattr(context, "club", None) is not None
         and attempt.club_id == context.club.id
-        and attempt.attempted_by_id == context.user.id
+        and context.profile is not None
+        and attempt.attempted_by_id == context.profile.id
     )
 
 

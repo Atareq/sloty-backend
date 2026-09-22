@@ -35,7 +35,7 @@ from apps.players.serializers import (
 )
 from apps.players.services import (
     find_or_create_player_profile,
-    get_current_club_player,
+    get_or_create_club_player,
     last_used_at_subquery,
     last_used_club_player_id_subquery,
 )
@@ -76,14 +76,12 @@ class ClubPlayerViewSet(
     filter_backends = (DjangoFilterBackend, ClubPlayerOrderingFilter)
     http_method_names = ("get", "post", "head", "options")
     filterset_class = ClubPlayerFilterSet
-    ordering_fields = ("last_used_at", "created_at")
-    ordering = ("id",)
+    ordering_fields = ("last_used_at", "created")
+    ordering = ("-last_used_at", "id")
 
     def filter_scoped_queryset(self, queryset):
         club = self.get_access_context().club
-        return queryset.annotate(last_used_at=last_used_at_subquery(club)).order_by(
-            "id"
-        )
+        return queryset.annotate(last_used_at=last_used_at_subquery(club))
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -100,20 +98,12 @@ class ClubPlayerViewSet(
             phone_number=data["phone_number"],
             full_name=data.get("full_name", ""),
         )
-        current = get_current_club_player(club, profile)
-        if (
-            current is not None
-            and current.display_name == display_name
-            and current.player_number == player_number
-        ):
-            club_player = current
-        else:
-            club_player = ClubPlayer.objects.create(
-                club=club,
-                player_profile=profile,
-                display_name=display_name,
-                player_number=player_number,
-            )
+        club_player, _created = get_or_create_club_player(
+            club,
+            profile,
+            display_name=display_name,
+            player_number=player_number,
+        )
         serializer.instance = club_player
 
     def create(self, request, *args, **kwargs):

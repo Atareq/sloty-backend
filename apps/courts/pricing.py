@@ -6,6 +6,7 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework import status
 
 from apps.common.exceptions import SlotyAPIException
+from apps.common.weekdays import to_sloty_weekday
 
 MONEY_QUANT = Decimal("0.01")
 MIDNIGHT_END_MINUTES = 24 * 60  # 1440
@@ -139,7 +140,7 @@ def working_hour_bounds(working_hour):
 
 
 def get_working_hour_for_local_date(*, court, local_date, working_hours=None):
-    weekday = local_date.weekday()
+    weekday = to_sloty_weekday(local_date.weekday())
     if working_hours is not None:
         for working_hour in working_hours:
             if working_hour.weekday == weekday:

@@ -16,10 +16,10 @@ from tests.transactions.test_transaction_api import TransactionAPITestCase
 class TransactionCancelAPITests(TransactionAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("cancel-admin")
-        self.owner = self.create_user("cancel-owner")
-        self.staff = self.create_user("cancel-staff")
-        self.other_user = self.create_user("cancel-other-user")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.other_user = self.create_user()
         self.club = self.create_club("Cancel Club", slug="cancel-club")
         self.other_club = self.create_club(
             "Other Cancel Club", slug="other-cancel-club"
@@ -91,13 +91,14 @@ class TransactionCancelAPITests(TransactionAPITestCase):
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.HOLD)
         self.assertEqual(booking.recurrence_status, Booking.RecurrenceStatus.ACTIVE)
+        self.assertGreater(booking.hold_expires_at, timezone.now())
 
     def test_non_platform_users_cannot_cancel_another_users_transaction(self):
         transaction_obj = self.create_transaction(
             self.booking, created_by=self.other_user
         )
         for actor in (self.owner,):
-            with self.subTest(actor=actor.username):
+            with self.subTest(actor=str(actor.phone_number)):
                 response = self.post_cancel(self.club, transaction_obj, actor)
                 self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         staff_response = self.post_cancel(self.club, transaction_obj, self.staff)
@@ -146,7 +147,7 @@ class TransactionCancelAPITests(TransactionAPITestCase):
             club=self.club,
             court=self.court,
             total_amount=transaction_obj.amount,
-            settled_by=self.owner,
+            settled_by=self.owner.profile,
         )
         SettlementTransaction.objects.create(
             settlement=settlement,
@@ -203,7 +204,7 @@ class TransactionCancelAPITests(TransactionAPITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["is_cancelled"])
-        self.assertEqual(response.data["cancelled_by"], self.owner.id)
+        self.assertEqual(response.data["cancelled_by"], self.owner.profile.id)
         self.assertIsNotNone(response.data["cancelled_at"])
         self.assertEqual(response.data["cancellation_reason"], "Wrong amount entered")
         transaction_obj.refresh_from_db()

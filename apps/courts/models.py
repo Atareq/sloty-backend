@@ -6,10 +6,11 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models, transaction
 
 from apps.clubs.models import Club
+from apps.common.models import SlotyTimeStampedModel
 from apps.courts.pricing import is_valid_period_bounds
 
 
-class Court(models.Model):
+class Court(SlotyTimeStampedModel):
     class SportType(models.TextChoices):
         FOOTBALL = "FOOTBALL", "Football"
         PADEL = "PADEL", "Padel"
@@ -32,7 +33,6 @@ class Court(models.Model):
         max_length=32,
         choices=SportType.choices,
         default=SportType.FOOTBALL,
-        db_index=True,
     )
     default_price = models.DecimalField(
         max_digits=10,
@@ -43,7 +43,7 @@ class Court(models.Model):
         default=60,
         validators=[MinValueValidator(1)],
     )
-    is_active = models.BooleanField(default=True, db_index=True)
+    is_active = models.BooleanField(default=True)
     requires_digital_payment_reference = models.BooleanField(default=False)
     minimum_deposit = models.DecimalField(
         max_digits=10,
@@ -74,15 +74,6 @@ class Court(models.Model):
         on_delete=models.SET_NULL,
         related_name="created_courts",
     )
-    created = models.DateTimeField(auto_now_add=True)
-    modified = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["club"]),
-            models.Index(fields=["is_active"]),
-            models.Index(fields=["sport_type"]),
-        ]
 
     # Authorization Spine v2 resource-query contract (apps/common/authorization/).
     # Court is the court-scope boundary entity itself, hence the reserved
@@ -139,18 +130,19 @@ class Court(models.Model):
 class CourtWorkingHour(models.Model):
     # Every court can have weekday-specific pricing periods.
     class Weekday(models.IntegerChoices):
-        MONDAY = 0, "Monday"
-        TUESDAY = 1, "Tuesday"
-        WEDNESDAY = 2, "Wednesday"
-        THURSDAY = 3, "Thursday"
-        FRIDAY = 4, "Friday"
-        SATURDAY = 5, "Saturday"
-        SUNDAY = 6, "Sunday"
+        SATURDAY = 0, "Saturday"
+        SUNDAY = 1, "Sunday"
+        MONDAY = 2, "Monday"
+        TUESDAY = 3, "Tuesday"
+        WEDNESDAY = 4, "Wednesday"
+        THURSDAY = 5, "Thursday"
+        FRIDAY = 6, "Friday"
 
     court = models.ForeignKey(
         Court,
         on_delete=models.CASCADE,
         related_name="working_hours",
+        db_index=False,
     )
     weekday = models.PositiveSmallIntegerField(choices=Weekday.choices)
 
@@ -160,9 +152,6 @@ class CourtWorkingHour(models.Model):
                 fields=["court", "weekday"],
                 name="unique_court_weekday_working_hour",
             ),
-        ]
-        indexes = [
-            models.Index(fields=["court", "weekday"]),
         ]
 
     # Authorization Spine v2 resource-query contract. Club boundary is
@@ -186,6 +175,7 @@ class CourtWorkingHourPricePeriod(models.Model):
         CourtWorkingHour,
         on_delete=models.CASCADE,
         related_name="pricing_periods",
+        db_index=False,
     )
     starts_at = models.TimeField()
     ends_at = models.TimeField()

@@ -41,8 +41,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 class AuditAuthorizationConfigTests(AuditAPITestCase):
 
     def setUp(self):
-        self.owner = self.create_user("audit-config-owner")
-        self.staff = self.create_user("audit-config-staff")
+        self.owner = self.create_user()
+        self.staff = self.create_user()
         self.club = self.create_club("Audit Config Club", slug="audit-config-club")
         self.other_club = self.create_club(
             "Audit Config Other Club", slug="audit-config-other"
@@ -150,10 +150,10 @@ class AuditAuthorizationSpineTests(AuditAPITestCase):
         self.court_a = self.create_court(self.club, "Court A")
         self.court_b = self.create_court(self.club, "Court B")
         self.other_court = self.create_court(self.other_club, "Other Club Court")
-        self.platform_admin = self.create_platform_admin("spine-audit-admin")
-        self.owner = self.create_user("spine-audit-owner")
-        self.staff = self.create_user("spine-audit-staff")
-        self.other_club_owner = self.create_user("spine-audit-other-owner")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.other_club_owner = self.create_user()
         grant_owner_club(self.owner, self.club)
         grant_staff_court(self.staff, self.court_a)
         grant_owner_club(self.other_club_owner, self.other_club)

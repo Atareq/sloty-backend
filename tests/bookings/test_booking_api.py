@@ -18,18 +18,14 @@ from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
 from apps.audit.models import AuditLog
-from apps.bookings.filters import (
-    BookingAttemptFilter,
-    BookingFilter,
-    annotate_booking_hold_expires_at,
-    compute_booking_hold_expires_at,
-)
+from apps.bookings.filters import BookingAttemptFilter, BookingFilter
 from apps.bookings.models import Booking, BookingAttempt
 from apps.bookings.views import BookingAttemptViewSet, BookingViewSet
 from apps.clubs.models import Club
 from apps.common.middleware import SQLQueryStats
+from apps.common.weekdays import to_sloty_weekday
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
-from apps.players.models import PlayerProfile
+from apps.players.models import ClubPlayer, PlayerProfile
 from apps.profiles.models import Profile
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
@@ -44,10 +40,11 @@ from tests.profile_factories import (
 class BookingAPITestCase(ProfileIdentityMixin, APITestCase):
     password = "test-pass-123"
 
-    def create_user(self, username: str, **extra_fields) -> User:
-        return User.objects.create_user(
-            username=username, password=self.password, **extra_fields
-        )
+    def create_user(self, phone_number=None, **extra_fields) -> User:
+        extra_fields.setdefault("password", getattr(self, "password", "test-pass-123"))
+        from tests.profile_factories import create_user as factory_create_user
+
+        return factory_create_user(phone_number=phone_number, **extra_fields)
 
     def create_club(self, name: str, slug: str | None = None, **extra_fields) -> Club:
         data = {"name": name, "governorate": "ASSIUT", "city": "ASSIUT_MARKAZ"}
@@ -71,7 +68,7 @@ class BookingAPITestCase(ProfileIdentityMixin, APITestCase):
         court = Court.objects.create(**data)
         self.create_working_hours(
             court,
-            weekday=2,
+            weekday=CourtWorkingHour.Weekday.WEDNESDAY,
             opens_at=time(9, 0),
             closes_at=time(23, 0),
             price=court.default_price,
@@ -113,6 +110,10 @@ class BookingAPITestCase(ProfileIdentityMixin, APITestCase):
         return timezone.datetime(
             2026, 5, 20, hour, minute, tzinfo=timezone.get_current_timezone()
         )
+
+    def during_fixture_schedule(self):
+        """Evaluate real-time HOLD expiry on the fixture calendar day."""
+        return patch("django.utils.timezone.now", return_value=self.time_at(8))
 
     def booking_payload(self, court: Court, **extra_fields):
         data = {
@@ -181,7 +182,7 @@ class BookingAPITestCase(ProfileIdentityMixin, APITestCase):
         self,
         court: Court,
         *,
-        weekday=2,
+        weekday=CourtWorkingHour.Weekday.WEDNESDAY,
         opens_at=time(9, 0),
         closes_at=time(12, 0),
         is_closed=False,
@@ -232,6 +233,10 @@ class BookingCreationTests(BookingAPITestCase):
         booking = Booking.objects.get(id=response.data["id"])
         self.assertIsNotNone(booking.club_player_id)
         self.assertEqual(booking.club_player.display_name, "Ahmed Hassan")
+        self.assertEqual(
+            booking.hold_expires_at,
+            booking.created + timedelta(hours=self.court.internal_hold_expiry_hours),
+        )
         self.assertEqual(
             str(booking.club_player.player_profile.phone_number), "+201000000002"
         )
@@ -293,6 +298,20 @@ class BookingCreationTests(BookingAPITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assert_field_error(response, "requested_at")
+        self.assertEqual(Booking.objects.count(), 0)
+        self.assertEqual(BookingAttempt.objects.count(), 0)
+
+    def test_booking_datetimes_require_timezone_information(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        response = self.post_booking(
+            self.club,
+            self.court,
+            start_time="2026-05-20T20:00:00",
+            end_time="2026-05-20T21:00:00",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "start_time")
+        self.assert_field_error(response, "end_time")
         self.assertEqual(Booking.objects.count(), 0)
         self.assertEqual(BookingAttempt.objects.count(), 0)
 
@@ -400,13 +419,14 @@ class BookingCreationTests(BookingAPITestCase):
         self.client.force_authenticate(user=self.platform_admin)
         blocker = self.create_booking(self.court)
         client_request_id = "d0de6156-7555-43d9-ae71-70b77a1f117b"
-        response = self.post_booking(
-            self.club,
-            self.court,
-            client_request_id=client_request_id,
-            requested_at=self.time_at(19).isoformat(),
-            notes="customer asked for busy slot",
-        )
+        with self.during_fixture_schedule():
+            response = self.post_booking(
+                self.club,
+                self.court,
+                client_request_id=client_request_id,
+                requested_at=self.time_at(19).isoformat(),
+                notes="customer asked for busy slot",
+            )
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assert_api_error(response, "BOOKING_SLOT_UNAVAILABLE")
         self.assertEqual(Booking.objects.count(), 1)
@@ -427,12 +447,13 @@ class BookingCreationTests(BookingAPITestCase):
             client_request_id=client_request_id,
             notes="retry same rejected request",
         )
-        first_response = self.client.post(
-            self.booking_list_url(self.club), payload, format="json"
-        )
-        retry_response = self.client.post(
-            self.booking_list_url(self.club), payload, format="json"
-        )
+        with self.during_fixture_schedule():
+            first_response = self.client.post(
+                self.booking_list_url(self.club), payload, format="json"
+            )
+            retry_response = self.client.post(
+                self.booking_list_url(self.club), payload, format="json"
+            )
         self.assertEqual(first_response.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(retry_response.status_code, status.HTTP_409_CONFLICT)
         self.assert_api_error(retry_response, "BOOKING_SLOT_UNAVAILABLE")
@@ -448,15 +469,16 @@ class BookingCreationTests(BookingAPITestCase):
         self.client.force_authenticate(user=self.platform_admin)
         self.create_booking(self.court)
         client_request_id = "d647bf4c-7b0b-43f7-91fe-0ff12fffe4bb"
-        first_response = self.post_booking(
-            self.club, self.court, client_request_id=client_request_id
-        )
-        mismatch_response = self.post_booking(
-            self.club,
-            self.court,
-            client_request_id=client_request_id,
-            customer_name="Different Customer",
-        )
+        with self.during_fixture_schedule():
+            first_response = self.post_booking(
+                self.club, self.court, client_request_id=client_request_id
+            )
+            mismatch_response = self.post_booking(
+                self.club,
+                self.court,
+                client_request_id=client_request_id,
+                customer_name="Different Customer",
+            )
         self.assertEqual(first_response.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(mismatch_response.status_code, status.HTTP_409_CONFLICT)
         self.assert_api_error(mismatch_response, "BOOKING_CLIENT_REQUEST_MISMATCH")
@@ -509,11 +531,12 @@ class BookingCreationTests(BookingAPITestCase):
     def test_rejected_attempt_does_not_affect_financial_rows(self):
         self.client.force_authenticate(user=self.platform_admin)
         self.create_booking(self.court)
-        response = self.post_booking(
-            self.club,
-            self.court,
-            client_request_id="a595367c-dfa9-4d05-bae3-9d4e26386925",
-        )
+        with self.during_fixture_schedule():
+            response = self.post_booking(
+                self.club,
+                self.court,
+                client_request_id="a595367c-dfa9-4d05-bae3-9d4e26386925",
+            )
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(BookingAttempt.objects.count(), 1)
         self.assertEqual(Transaction.objects.count(), 0)
@@ -542,7 +565,9 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(response.data["total_price"], "600.00")
 
     def test_booking_crossing_pricing_boundary_uses_each_period(self):
-        working_hour = CourtWorkingHour.objects.get(court=self.court, weekday=2)
+        working_hour = CourtWorkingHour.objects.get(
+            court=self.court, weekday=CourtWorkingHour.Weekday.WEDNESDAY
+        )
         self.set_price_periods(
             working_hour,
             (time(9, 0), time(18, 0), Decimal("200.00")),
@@ -560,7 +585,7 @@ class BookingCreationTests(BookingAPITestCase):
 
     def test_booking_on_closed_day_is_rejected(self):
         CourtWorkingHour.objects.get(
-            court=self.court, weekday=2
+            court=self.court, weekday=CourtWorkingHour.Weekday.WEDNESDAY
         ).pricing_periods.all().delete()
         self.client.force_authenticate(user=self.platform_admin)
         response = self.post_booking(self.club, self.court)
@@ -621,7 +646,10 @@ class BookingCreationTests(BookingAPITestCase):
 
     def test_booking_outside_working_hours_is_rejected(self):
         self.create_working_hours(
-            self.court, weekday=2, opens_at=time(10, 0), closes_at=time(18, 0)
+            self.court,
+            weekday=CourtWorkingHour.Weekday.WEDNESDAY,
+            opens_at=time(10, 0),
+            closes_at=time(18, 0),
         )
         self.client.force_authenticate(user=self.platform_admin)
         response = self.post_booking(
@@ -654,16 +682,16 @@ class BookingCreationTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assert_field_error(response, "source")
 
-    def test_admin_correction_cannot_be_recurring(self):
+    def test_admin_correction_source_is_rejected(self):
         self.client.force_authenticate(user=self.platform_admin)
         response = self.post_booking(
             self.club,
             self.court,
-            source=Booking.Source.ADMIN_CORRECTION,
+            source="ADMIN_CORRECTION",
             is_recurring=True,
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assert_field_error(response, "is_recurring")
+        self.assert_field_error(response, "source")
 
     def test_future_virtual_recurring_conflict_blocks_normal_booking(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -753,8 +781,8 @@ class BookingCreationTests(BookingAPITestCase):
 class BookingHistoricalCreationTests(BookingAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("historical-admin")
-        self.staff = self.create_user("historical-staff")
+        self.platform_admin = self.create_platform_admin()
+        self.staff = self.create_user()
         self.club = self.create_club("Historical Club", slug="historical-club")
         self.court = self.create_court(self.club, "Historical Court")
         self.same_club_other_court = self.create_court(
@@ -775,7 +803,7 @@ class BookingHistoricalCreationTests(BookingAPITestCase):
         local_end = timezone.localtime(end_time)
         self.create_working_hours(
             target_court,
-            weekday=local_start.weekday(),
+            weekday=to_sloty_weekday(local_start.weekday()),
             opens_at=local_start.time(),
             closes_at=local_end.time(),
             price=target_court.default_price,
@@ -966,6 +994,10 @@ class BookingHistoricalCreationTests(BookingAPITestCase):
         booking = Booking.objects.get(id=response.data["id"])
         self.assertEqual(booking.status, Booking.Status.HOLD)
         self.assertLess(booking.start_time, self.sync_now)
+        self.assertGreater(booking.hold_expires_at, self.sync_now)
+        due_ids = due_hold_booking_candidate_ids(now=self.sync_now)
+        self.assertNotIn(booking.id, due_ids)
+        Booking.objects.filter(pk=booking.pk).update(hold_expires_at=self.sync_now)
         due_ids = due_hold_booking_candidate_ids(now=self.sync_now)
         self.assertIn(booking.id, due_ids)
         expired = expire_due_hold_bookings(now=self.sync_now)
@@ -977,10 +1009,10 @@ class BookingHistoricalCreationTests(BookingAPITestCase):
 class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
 
     def setUp(self):
-        self.owner = self.create_user("attempt-api-owner")
-        self.staff = self.create_user("attempt-api-staff")
-        self.other_staff = self.create_user("attempt-api-other-staff")
-        self.external_user = self.create_user("attempt-api-external")
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.other_staff = self.create_user()
+        self.external_user = self.create_user()
         self.club = self.create_club("Attempt API Club", slug="attempt-api")
         self.other_club = self.create_club(
             "Other Attempt API", slug="other-attempt-api"
@@ -997,7 +1029,7 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         data = {
             "club": court.club,
             "court": court,
-            "attempted_by": getattr(attempted_by, "profile", attempted_by),
+            "attempted_by": attempted_by,
             "client_request_id": uuid4(),
             "customer_name": "Attempt Customer",
             "customer_phone": "+201000009901",
@@ -1024,16 +1056,16 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         self.assertIs(BookingAttemptViewSet.filterset_class, BookingAttemptFilter)
 
     def test_staff_lists_only_own_attempts_in_assigned_scope(self):
-        own_attempt = self.create_attempt(self.court, self.staff)
+        own_attempt = self.create_attempt(self.court, self.staff.profile)
         other_attempt = self.create_attempt(
             self.court,
-            self.other_staff,
+            self.other_staff.profile,
             requested_start=self.time_at(21),
             requested_end=self.time_at(22),
         )
         other_court_attempt = self.create_attempt(
             self.other_court,
-            self.staff,
+            self.staff.profile,
             requested_start=self.time_at(22),
             requested_end=self.time_at(23),
         )
@@ -1050,7 +1082,7 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         )
         accepted_attempt = self.create_attempt(
             self.court,
-            self.staff,
+            self.staff.profile,
             booking=accepted_booking,
             outcome=BookingAttempt.Outcome.SUCCESS,
             failure_code="",
@@ -1058,14 +1090,14 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         )
         dismissed_attempt = self.create_attempt(
             self.court,
-            self.staff,
+            self.staff.profile,
             requested_start=self.time_at(21),
             requested_end=self.time_at(22),
             resolution=BookingAttempt.Resolution.DISMISSED,
         )
         self.create_attempt(
             self.other_court,
-            self.other_staff,
+            self.other_staff.profile,
             requested_start=self.time_at(22),
             requested_end=self.time_at(23),
         )
@@ -1091,10 +1123,36 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
             {accepted_attempt.id, dismissed_attempt.id},
         )
 
+    def test_attempt_date_only_range_is_inclusive_of_last_calendar_day(self):
+        same_day = self.create_attempt(self.court, self.staff.profile)
+        next_day = self.create_attempt(
+            self.court,
+            self.staff.profile,
+            requested_start=self.time_at(20) + timedelta(days=1),
+            requested_end=self.time_at(21) + timedelta(days=1),
+        )
+        self.client.force_authenticate(user=self.owner)
+        same_day_response = self.client.get(
+            self.booking_attempt_list_url(self.club),
+            {"date_from": "2026-05-20", "date_to": "2026-05-20"},
+        )
+        self.assertEqual(same_day_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.attempt_ids(same_day_response), {same_day.id})
+        self.assertNotIn(next_day.id, self.attempt_ids(same_day_response))
+
+        inclusive_response = self.client.get(
+            self.booking_attempt_list_url(self.club),
+            {"date_from": "2026-05-20", "date_to": "2026-05-21"},
+        )
+        self.assertEqual(
+            self.attempt_ids(inclusive_response),
+            {same_day.id, next_day.id},
+        )
+
     def test_attempt_detail_exposes_original_request_and_backend_decision(self):
         attempt = self.create_attempt(
             self.court,
-            self.staff,
+            self.staff.profile,
             customer_name="Original Attempt Customer",
             customer_phone="+201012345678",
             requested_source=Booking.Source.RECURRING,
@@ -1119,7 +1177,7 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
     def test_attempt_original_request_cannot_be_patched_or_put(self):
         attempt = self.create_attempt(
             self.court,
-            self.staff,
+            self.staff.profile,
             customer_name="Immutable Attempt Customer",
             notes="original notes",
         )
@@ -1141,7 +1199,7 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         self.assertEqual(attempt.notes, "original notes")
 
     def test_staff_can_dismiss_own_rejected_attempt_without_fake_booking(self):
-        attempt = self.create_attempt(self.court, self.staff)
+        attempt = self.create_attempt(self.court, self.staff.profile)
         self.client.force_authenticate(user=self.staff)
         response = self.client.post(
             self.booking_attempt_dismiss_url(self.club, attempt), {}, format="json"
@@ -1176,7 +1234,7 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         booking = self.create_booking(self.court, created_by=self.staff.profile)
         attempt = self.create_attempt(
             self.court,
-            self.staff,
+            self.staff.profile,
             booking=booking,
             outcome=BookingAttempt.Outcome.SUCCESS,
             failure_code="",
@@ -1194,7 +1252,7 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         self.assertTrue(Booking.objects.filter(pk=booking.pk).exists())
 
     def test_staff_cannot_view_or_dismiss_another_staff_attempt(self):
-        attempt = self.create_attempt(self.court, self.other_staff)
+        attempt = self.create_attempt(self.court, self.other_staff.profile)
         self.client.force_authenticate(user=self.staff)
         detail_response = self.client.get(
             self.booking_attempt_detail_url(self.club, attempt)
@@ -1244,7 +1302,7 @@ class BookingAttemptTraceabilityAPITests(BookingAPITestCase):
         self.assertEqual(attempt.notes, "original offline note")
 
     def test_rejected_attempts_do_not_appear_in_booking_list_or_financial_state(self):
-        attempt = self.create_attempt(self.court, self.staff)
+        attempt = self.create_attempt(self.court, self.staff.profile)
         self.client.force_authenticate(user=self.owner)
         bookings_response = self.client.get(self.booking_list_url(self.club))
         self.assertEqual(bookings_response.status_code, status.HTTP_200_OK)
@@ -1321,11 +1379,14 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertEqual(first_slot["slot_status"], "FREE")
         self.assertEqual(first_slot["slot_price"], "300.00")
         self.assertEqual(first_slot["is_available"], True)
+        self.assertEqual(first_slot["available"], True)
         self.assertIsNone(first_slot["booking"])
         self.assertEqual(first_slot["label"], "Available")
 
     def test_slots_return_current_morning_and_evening_prices(self):
-        working_hour = CourtWorkingHour.objects.get(court=self.court, weekday=2)
+        working_hour = CourtWorkingHour.objects.get(
+            court=self.court, weekday=CourtWorkingHour.Weekday.WEDNESDAY
+        )
         self.set_price_periods(
             working_hour,
             (time(9, 0), time(10, 0), Decimal("200.00")),
@@ -1356,12 +1417,20 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             status=Booking.Status.COMPLETED,
         )
         self.create_transaction(completed, amount=completed.total_price)
-        response = self.get_slots()
+        with self.during_fixture_schedule():
+            response = self.get_slots()
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(self.slot_by_hour(response, 9)["slot_status"], "HOLD")
         self.assertEqual(self.slot_by_hour(response, 9)["booking"]["id"], hold.id)
+        self.assertFalse(self.slot_by_hour(response, 9)["available"])
+        self.assertFalse(self.slot_by_hour(response, 9)["is_available"])
+        self.assertEqual(
+            self.slot_by_hour(response, 9)["booking"]["hold_expires_at"],
+            hold.hold_expires_at,
+        )
         self.assertEqual(self.slot_by_hour(response, 10)["slot_status"], "CONFIRMED")
         self.assertEqual(self.slot_by_hour(response, 10)["booking"]["id"], confirmed.id)
+        self.assertIsNone(self.slot_by_hour(response, 10)["booking"]["hold_expires_at"])
         completed_slot = self.slot_by_hour(response, 11)
         self.assertEqual(completed_slot["slot_status"], "COMPLETED")
         self.assertEqual(completed_slot["slot_price"], "300.00")
@@ -1423,7 +1492,9 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             status=Booking.Status.CONFIRMED,
             total_price=Decimal("300.00"),
         )
-        working_hour = CourtWorkingHour.objects.get(court=self.court, weekday=2)
+        working_hour = CourtWorkingHour.objects.get(
+            court=self.court, weekday=CourtWorkingHour.Weekday.WEDNESDAY
+        )
         self.set_price_periods(
             working_hour, (time(9, 0), time(12, 0), Decimal("450.00"))
         )
@@ -1478,6 +1549,19 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertIsNone(slot["recurring_context"])
         self.assertIsNone(slot["can_start_recurring"])
 
+    def test_active_hold_slot_includes_its_stored_expiration(self):
+        booking = self.create_booking(
+            self.court,
+            start_time=self.time_at(9),
+            end_time=self.time_at(10),
+            status=Booking.Status.HOLD,
+        )
+        response = self.get_slots()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slot = self.slot_by_hour(response, 9)
+        self.assertFalse(slot["is_available"])
+        self.assertEqual(slot["booking"]["hold_expires_at"], booking.hold_expires_at)
+
     def test_free_slot_reports_can_start_recurring(self):
         response = self.get_slots()
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -1516,7 +1600,9 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             status=Booking.Status.CONFIRMED,
             total_price=Decimal("300.00"),
         )
-        working_hour = CourtWorkingHour.objects.get(court=self.court, weekday=2)
+        working_hour = CourtWorkingHour.objects.get(
+            court=self.court, weekday=CourtWorkingHour.Weekday.WEDNESDAY
+        )
         self.set_price_periods(
             working_hour, (time(9, 0), time(12, 0), Decimal("450.00"))
         )
@@ -1528,14 +1614,14 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
 
     def test_weekday_with_empty_pricing_returns_closed_day_message(self):
         CourtWorkingHour.objects.get(
-            court=self.court, weekday=2
+            court=self.court, weekday=CourtWorkingHour.Weekday.WEDNESDAY
         ).pricing_periods.all().delete()
         response = self.get_slots()
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["slots"], [])
         self.assertEqual(response.data["message"], "The court is closed on this day.")
 
-    def test_cancelled_and_expired_bookings_do_not_block_slots(self):
+    def test_terminated_bookings_do_not_block_slots(self):
         self.create_booking(
             self.court,
             start_time=self.time_at(9),
@@ -1548,10 +1634,17 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             end_time=self.time_at(11),
             status=Booking.Status.EXPIRED,
         )
+        self.create_booking(
+            self.court,
+            start_time=self.time_at(11),
+            end_time=self.time_at(12),
+            status=Booking.Status.NO_SHOW,
+        )
         response = self.get_slots()
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(self.slot_by_hour(response, 9)["slot_status"], "FREE")
         self.assertEqual(self.slot_by_hour(response, 10)["slot_status"], "FREE")
+        self.assertEqual(self.slot_by_hour(response, 11)["slot_status"], "FREE")
 
     def test_free_is_not_a_booking_status_choice(self):
         status_values = {choice[0] for choice in Booking.Status.choices}
@@ -1576,7 +1669,8 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
             status=Booking.Status.HOLD,
         )
         self.client.credentials(HTTP_ACCEPT_LANGUAGE="ar")
-        response = self.get_slots()
+        with self.during_fixture_schedule():
+            response = self.get_slots()
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(self.slot_by_hour(response, 9)["label"], "بانتظار العربون")
         self.assertEqual(self.slot_by_hour(response, 10)["label"], "متاح")
@@ -1593,6 +1687,23 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["date_from"], "2026-05-20")
         self.assertEqual(response.data["date_to"], "2026-05-22")
+
+    def test_elapsed_slots_on_current_local_day_are_not_available(self):
+        with patch("django.utils.timezone.now", return_value=self.time_at(10, 30)):
+            response = self.get_slots()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        morning = self.slot_by_hour(response, 9)
+        started = self.slot_by_hour(response, 10)
+        later = self.slot_by_hour(response, 11)
+        self.assertEqual(morning["slot_status"], "FREE")
+        self.assertFalse(morning["available"])
+        self.assertFalse(morning["is_available"])
+        self.assertFalse(morning["can_start_recurring"])
+        self.assertEqual(started["slot_status"], "FREE")
+        self.assertFalse(started["available"])
+        self.assertEqual(later["slot_status"], "FREE")
+        self.assertTrue(later["available"])
+        self.assertTrue(later["is_available"])
 
     def test_thirty_one_day_inclusive_range_is_accepted(self):
         # Former hard cap was 31 inclusive days; it must remain valid under 45.
@@ -1740,7 +1851,10 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
 
     def test_multiday_blocking_booking_still_occupies_later_day_slots(self):
         self.create_working_hours(
-            self.court, weekday=3, opens_at=time(9, 0), closes_at=time(12, 0)
+            self.court,
+            weekday=CourtWorkingHour.Weekday.THURSDAY,
+            opens_at=time(9, 0),
+            closes_at=time(12, 0),
         )
         self.create_booking(
             self.court,
@@ -1769,9 +1883,9 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
 class BookingScopeTests(BookingAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("scope-admin")
-        self.owner = self.create_user("scope-owner")
-        self.staff = self.create_user("scope-staff")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
         self.club = self.create_club("Scoped Club", slug="scoped-club")
         self.other_club = self.create_club("Other Scoped Club", slug="other-scoped")
         self.court = self.create_court(self.club, "Scoped Court")
@@ -1902,9 +2016,9 @@ class BookingScopeTests(BookingAPITestCase):
 class BookingCreationPermissionTests(BookingAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("create-admin")
-        self.owner = self.create_user("create-owner")
-        self.staff = self.create_user("create-staff")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
         self.club = self.create_club("Create Club", slug="create-club")
         self.other_club = self.create_club("Other Create Club", slug="other-create")
         self.court = self.create_court(self.club, "Create Court")
@@ -1961,27 +2075,21 @@ class BookingCreationPermissionTests(BookingAPITestCase):
 class BookingSourceAndActiveTests(BookingAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("source-admin")
-        self.owner = self.create_user("source-owner")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
         self.club = self.create_club("Source Club", slug="source-club")
         self.court = self.create_court(self.club, "Source Court")
         grant_owner_club(self.owner, self.club)
 
-    def test_non_platform_users_cannot_create_admin_correction_booking(self):
-        self.client.force_authenticate(user=self.owner)
-        response = self.post_booking(
-            self.club, self.court, source=Booking.Source.ADMIN_CORRECTION
-        )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assert_field_error(response, "source")
-
-    def test_platform_admin_can_create_admin_correction_booking(self):
-        self.client.force_authenticate(user=self.platform_admin)
-        response = self.post_booking(
-            self.club, self.court, source=Booking.Source.ADMIN_CORRECTION
-        )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data["source"], Booking.Source.ADMIN_CORRECTION)
+    def test_admin_correction_source_is_rejected_for_every_role(self):
+        for user in (self.owner, self.platform_admin):
+            with self.subTest(user=user):
+                self.client.force_authenticate(user=user)
+                response = self.post_booking(
+                    self.club, self.court, source="ADMIN_CORRECTION"
+                )
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assert_field_error(response, "source")
 
     def test_normal_booking_source_defaults_to_manual(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -2008,7 +2116,7 @@ class BookingSourceAndActiveTests(BookingAPITestCase):
 class BookingOverlapTests(BookingAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("overlap-admin")
+        self.platform_admin = self.create_platform_admin()
         self.club = self.create_club("Overlap Club", slug="overlap-club")
         self.court = self.create_court(self.club, "Overlap Court")
         self.other_court = self.create_court(self.club, "Other Overlap Court")
@@ -2045,7 +2153,8 @@ class BookingOverlapTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
     def test_cannot_create_overlapping_hold_booking_on_same_court(self):
-        self.assert_overlap_is_rejected_for_status(Booking.Status.HOLD)
+        with self.during_fixture_schedule():
+            self.assert_overlap_is_rejected_for_status(Booking.Status.HOLD)
 
     def test_cannot_create_overlapping_confirmed_booking_on_same_court(self):
         self.assert_overlap_is_rejected_for_status(Booking.Status.CONFIRMED)
@@ -2089,24 +2198,22 @@ class BookingOverlapTests(BookingAPITestCase):
     def test_cannot_create_overlapping_completed_booking_on_same_court(self):
         self.assert_overlap_is_rejected_for_status(Booking.Status.COMPLETED)
 
-    def test_cannot_create_overlapping_no_show_booking_on_same_court(self):
-        self.assert_overlap_is_rejected_for_status(Booking.Status.NO_SHOW)
+    def test_no_show_booking_does_not_block_an_overlapping_booking(self):
+        self.assert_overlap_is_allowed_for_status(Booking.Status.NO_SHOW)
 
 
 class BookingUpdateTests(BookingAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("update-admin")
+        self.platform_admin = self.create_platform_admin()
         self.club = self.create_club("Update Club", slug="update-club")
         self.court = self.create_court(self.club, "Update Court")
         self.other_court = self.create_court(self.club, "Other Update Court")
         self.booking = self.create_booking(self.court)
         self.client.force_authenticate(user=self.platform_admin)
 
-    def test_allowed_user_can_patch_basic_details(self):
+    def test_allowed_user_can_patch_identity_and_notes(self):
         original_club_player_id = self.booking.club_player_id
-        original_display_name = self.booking.club_player.display_name
-        original_phone = str(self.booking.club_player.player_profile.phone_number)
         response = self.client.patch(
             self.booking_detail_url(self.club, self.booking),
             {
@@ -2118,13 +2225,99 @@ class BookingUpdateTests(BookingAPITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.booking.refresh_from_db()
-        self.assertEqual(self.booking.club_player_id, original_club_player_id)
-        self.assertEqual(self.booking.club_player.display_name, original_display_name)
+        self.assertNotEqual(self.booking.club_player_id, original_club_player_id)
+        self.assertEqual(self.booking.club_player.display_name, "Updated Customer")
         self.assertEqual(
-            str(self.booking.club_player.player_profile.phone_number), original_phone
+            str(self.booking.club_player.player_profile.phone_number),
+            "+201000000004",
         )
         self.assertEqual(self.booking.notes, "Updated note")
-        self.assertEqual(response.data["customer_name"], original_display_name)
+        self.assertEqual(response.data["customer_name"], "Updated Customer")
+        self.assertEqual(response.data["customer_phone"], "+201000000004")
+        self.assertEqual(response.data["notes"], "Updated note")
+
+    def test_patch_same_phone_and_name_reuses_club_player(self):
+        original_club_player_id = self.booking.club_player_id
+        response = self.client.patch(
+            self.booking_detail_url(self.club, self.booking),
+            {
+                "customer_name": "Existing Customer",
+                "customer_phone": "+201000000001",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.club_player_id, original_club_player_id)
+        self.assertEqual(ClubPlayer.objects.filter(club=self.club).count(), 1)
+
+    def test_patch_same_phone_with_different_name_creates_new_club_player(self):
+        original_club_player = self.booking.club_player
+        response = self.client.patch(
+            self.booking_detail_url(self.club, self.booking),
+            {
+                "customer_name": "Updated Customer",
+                "customer_phone": "+201000000001",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.booking.refresh_from_db()
+        self.assertNotEqual(self.booking.club_player_id, original_club_player.id)
+        self.assertEqual(self.booking.club_player.display_name, "Updated Customer")
+        self.assertEqual(
+            self.booking.club_player.player_profile_id,
+            original_club_player.player_profile_id,
+        )
+        original_club_player.refresh_from_db()
+        self.assertEqual(original_club_player.display_name, "Existing Customer")
+
+    def test_patch_new_phone_creates_new_player_profile_and_club_player(self):
+        original_club_player_id = self.booking.club_player_id
+        original_profile_count = PlayerProfile.objects.count()
+        response = self.client.patch(
+            self.booking_detail_url(self.club, self.booking),
+            {
+                "customer_name": "New Customer",
+                "customer_phone": "+201000000005",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.booking.refresh_from_db()
+        self.assertNotEqual(self.booking.club_player_id, original_club_player_id)
+        self.assertEqual(PlayerProfile.objects.count(), original_profile_count + 1)
+        self.assertEqual(
+            str(self.booking.club_player.player_profile.phone_number),
+            "+201000000005",
+        )
+        self.assertEqual(self.booking.club_player.display_name, "New Customer")
+
+    def test_patch_preserves_historical_booking_club_player(self):
+        historical_booking = self.create_booking(
+            self.court,
+            start_time=self.time_at(18),
+            end_time=self.time_at(19),
+            customer_name="Existing Customer",
+            customer_phone="+201000000001",
+        )
+        original_club_player = historical_booking.club_player
+        response = self.client.patch(
+            self.booking_detail_url(self.club, self.booking),
+            {
+                "customer_name": "Updated Customer",
+                "customer_phone": "+201000000001",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        historical_booking.refresh_from_db()
+        self.assertEqual(historical_booking.club_player_id, original_club_player.id)
+        self.assertEqual(
+            historical_booking.club_player.display_name, "Existing Customer"
+        )
+        original_club_player.refresh_from_db()
+        self.assertEqual(original_club_player.display_name, "Existing Customer")
 
     def test_cannot_patch_status_in_sprint_3(self):
         response = self.client.patch(
@@ -2200,9 +2393,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         "next_recurring_booking_id",
         "client_request_id",
         "notes",
-        "cancellation_reason",
-        "no_show_reason",
-        "reschedule_reason",
+        "termination_reason",
         "completed_at",
         "cancelled_at",
         "no_show_at",
@@ -2216,10 +2407,10 @@ class BookingLifecycleActionTests(BookingAPITestCase):
     }
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("lifecycle-admin")
-        self.owner = self.create_user("lifecycle-owner")
-        self.staff = self.create_user("lifecycle-staff")
-        self.other_user = self.create_user("lifecycle-other-user")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.other_user = self.create_user()
         self.club = self.create_club("Lifecycle Club", slug="lifecycle-club")
         self.other_club = self.create_club(
             "Other Lifecycle Club", slug="other-lifecycle"
@@ -2253,7 +2444,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         price = max(court.default_price, court.minimum_deposit)
         self.create_working_hours(
             court,
-            weekday=local_start.weekday(),
+            weekday=to_sloty_weekday(local_start.weekday()),
             opens_at=local_start.time(),
             closes_at=local_end.time(),
             price=price,
@@ -2277,7 +2468,9 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             start_time=now - timedelta(minutes=10),
             end_time=now + timedelta(minutes=50),
         )
-        Booking.objects.filter(pk=booking.pk).update(created=now - timedelta(hours=2))
+        Booking.objects.filter(pk=booking.pk).update(
+            hold_expires_at=now - timedelta(hours=2)
+        )
         response = self.post_lifecycle(
             self.club,
             booking,
@@ -2318,7 +2511,8 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CANCELLED)
-        self.assertEqual(booking.cancellation_reason, "Customer cancelled")
+        self.assertEqual(booking.termination_reason, "Customer cancelled")
+        self.assertEqual(response.data["termination_reason"], "Customer cancelled")
 
     def test_cancellation_preview_and_cancel_create_signed_refund(self):
         self.set_court_minimum_deposit(self.court, Decimal("50.00"))
@@ -2334,7 +2528,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             booking,
             amount=Decimal("200.00"),
             payment_method=Transaction.PaymentMethod.CASH,
-            created_by=self.owner,
+            created_by=self.owner.profile,
         )
         self.client.force_authenticate(user=self.owner)
         preview = self.client.post(
@@ -2375,7 +2569,8 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.NO_SHOW)
-        self.assertEqual(booking.no_show_reason, "Customer did not arrive")
+        self.assertEqual(booking.termination_reason, "Customer did not arrive")
+        self.assertEqual(response.data["termination_reason"], "Customer did not arrive")
         self.assertIsNotNone(booking.no_show_at)
 
     def test_staff_cannot_change_booking_status_for_another_court_in_same_club(self):
@@ -2921,7 +3116,7 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             booking,
             amount=Decimal("200.00"),
             is_cancelled=True,
-            cancelled_by=self.platform_admin,
+            cancelled_by=self.platform_admin.profile,
             cancelled_at=timezone.now(),
             cancellation_reason="Wrong completion payment",
         )
@@ -2967,7 +3162,8 @@ class BookingLifecycleActionTests(BookingAPITestCase):
         booking.refresh_from_db()
         self.assertEqual(booking.court, self.same_club_other_court)
         self.assertEqual(booking.start_time, self.time_at(22))
-        self.assertEqual(booking.reschedule_reason, "Customer changed time")
+        self.assertEqual(booking.termination_reason, "Customer changed time")
+        self.assertEqual(response.data["termination_reason"], "Customer changed time")
         self.assertEqual(booking.transactions.count(), 0)
         self.assertTrue(
             AuditLog.objects.filter(
@@ -2976,6 +3172,23 @@ class BookingLifecycleActionTests(BookingAPITestCase):
                 entity_id=booking.id,
             ).exists()
         )
+
+    def test_reschedule_datetimes_require_timezone_information(self):
+        booking = self.create_booking(self.court, status=Booking.Status.HOLD)
+        response = self.post_lifecycle(
+            self.club,
+            booking,
+            "reschedule",
+            self.platform_admin,
+            {
+                "court": self.court.id,
+                "start_time": "2026-05-20T22:00:00",
+                "end_time": "2026-05-20T23:00:00",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(response, "start_time")
+        self.assert_field_error(response, "end_time")
 
     def test_reschedule_confirmed_booking_keeps_transactions_attached(self):
         booking = self.create_booking(self.court, status=Booking.Status.CONFIRMED)
@@ -3010,17 +3223,18 @@ class BookingLifecycleActionTests(BookingAPITestCase):
             end_time=self.time_at(23),
             customer_phone="+201000000778",
         )
-        response = self.post_lifecycle(
-            self.club,
-            booking,
-            "reschedule",
-            self.platform_admin,
-            {
-                "court": self.court.id,
-                "start_time": self.time_at(22).isoformat(),
-                "end_time": self.time_at(23).isoformat(),
-            },
-        )
+        with self.during_fixture_schedule():
+            response = self.post_lifecycle(
+                self.club,
+                booking,
+                "reschedule",
+                self.platform_admin,
+                {
+                    "court": self.court.id,
+                    "start_time": self.time_at(22).isoformat(),
+                    "end_time": self.time_at(23).isoformat(),
+                },
+            )
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assert_api_error(response, "BOOKING_SLOT_UNAVAILABLE")
         self.assertNotIn("booking", response.data)
@@ -3174,20 +3388,32 @@ class BookingLifecycleActionTests(BookingAPITestCase):
 class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("expiry-admin")
+        self.platform_admin = self.create_platform_admin()
         self.club = self.create_club("Expiry Club", slug="expiry-club")
         self.court = self.create_court(
             self.club, "Expiry Court", internal_hold_expiry_hours=12
         )
 
     def age_booking(self, booking, *, hours):
-        created = timezone.now() - timedelta(hours=hours)
-        Booking.objects.filter(pk=booking.pk).update(created=created)
+        deadline = (
+            timezone.now()
+            - timedelta(hours=hours)
+            + timedelta(hours=booking.court.internal_hold_expiry_hours)
+        )
+        Booking.objects.filter(pk=booking.pk).update(hold_expires_at=deadline)
         booking.refresh_from_db()
         return booking
 
     def future_slot(self, *, hours_from_now=8, duration_hours=1):
         start_time = timezone.now() + timedelta(hours=hours_from_now)
+        end_time = start_time + timedelta(hours=duration_hours)
+        return (start_time, end_time)
+
+    def aligned_future_slot(self, *, hours_from_now=8, duration_hours=1):
+        local_now = timezone.localtime(timezone.now())
+        start_time = local_now.replace(
+            hour=10, minute=0, second=0, microsecond=0
+        ) + timedelta(days=1, hours=max(0, hours_from_now - 8))
         end_time = start_time + timedelta(hours=duration_hours)
         return (start_time, end_time)
 
@@ -3341,6 +3567,126 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
         due_ids = due_hold_booking_candidate_ids(now=timezone.now())
         self.assertEqual(due_ids, [due_hold.id])
 
+    def test_due_hold_does_not_block_overlap_or_slots_before_cleanup(self):
+        from apps.bookings.services import (
+            generate_booking_slots,
+            validate_no_booking_overlap,
+        )
+        from apps.common.exceptions import SlotyAPIException
+        from apps.courts.models import CourtWorkingHour
+
+        for weekday in CourtWorkingHour.Weekday.values:
+            self.create_working_hours(
+                self.court,
+                weekday=weekday,
+                opens_at=time(0, 0),
+                closes_at=time(23, 0),
+                price=self.court.default_price,
+            )
+        due_start, due_end = self.aligned_future_slot(hours_from_now=8)
+        due_hold = self.age_booking(
+            self.create_booking(
+                self.court,
+                status=Booking.Status.HOLD,
+                start_time=due_start,
+                end_time=due_end,
+                customer_phone="+201000001041",
+            ),
+            hours=13,
+        )
+        still_blocking_start, still_blocking_end = self.aligned_future_slot(
+            hours_from_now=10
+        )
+        still_blocking = self.age_booking(
+            self.create_booking(
+                self.court,
+                status=Booking.Status.HOLD,
+                start_time=still_blocking_start,
+                end_time=still_blocking_end,
+                customer_phone="+201000001042",
+            ),
+            hours=1,
+        )
+
+        validate_no_booking_overlap(self.court, due_start, due_end)
+        due_hold.refresh_from_db()
+        self.assertEqual(due_hold.status, Booking.Status.HOLD)
+
+        with self.assertRaises(SlotyAPIException) as raised:
+            validate_no_booking_overlap(
+                self.court, still_blocking_start, still_blocking_end
+            )
+        self.assertEqual(raised.exception.api_code, "BOOKING_SLOT_UNAVAILABLE")
+        still_blocking.refresh_from_db()
+        self.assertEqual(still_blocking.status, Booking.Status.HOLD)
+
+        access = self.club_access_for(self.platform_admin, self.club)
+        local_start = timezone.localtime(due_start)
+        payload = generate_booking_slots(
+            access=access,
+            court=self.court,
+            date_from=local_start.date(),
+            date_to=local_start.date(),
+        )
+        overlapping = [
+            slot
+            for slot in payload["slots"]
+            if slot["start_time"] < due_end and slot["end_time"] > due_start
+        ]
+        self.assertTrue(overlapping)
+        self.assertTrue(all(slot["is_available"] for slot in overlapping))
+        self.assertTrue(all(slot["slot_status"] == "FREE" for slot in overlapping))
+
+    def test_due_hold_does_not_block_reschedule_before_cleanup(self):
+        from apps.bookings.services import (
+            reschedule_booking,
+            validate_no_booking_overlap,
+        )
+        from apps.courts.models import CourtWorkingHour
+
+        for weekday in CourtWorkingHour.Weekday.values:
+            self.create_working_hours(
+                self.court,
+                weekday=weekday,
+                opens_at=time(0, 0),
+                closes_at=time(23, 0),
+                price=self.court.default_price,
+            )
+        due_start, due_end = self.aligned_future_slot(hours_from_now=8)
+        due_hold = self.age_booking(
+            self.create_booking(
+                self.court,
+                status=Booking.Status.HOLD,
+                start_time=due_start,
+                end_time=due_end,
+                customer_phone="+201000001043",
+            ),
+            hours=13,
+        )
+        mover_start, mover_end = self.aligned_future_slot(hours_from_now=11)
+        mover = self.create_booking(
+            self.court,
+            status=Booking.Status.HOLD,
+            start_time=mover_start,
+            end_time=mover_end,
+            customer_phone="+201000001044",
+        )
+        access = self.club_access_for(self.platform_admin, self.club)
+        rescheduled = reschedule_booking(
+            access=access,
+            booking=mover,
+            actor=self.platform_admin.profile,
+            court=self.court,
+            start_time=due_start,
+            end_time=due_end,
+        )
+        due_hold.refresh_from_db()
+        self.assertEqual(due_hold.status, Booking.Status.HOLD)
+        self.assertEqual(rescheduled.start_time, due_start)
+        validate_no_booking_overlap(
+            self.court, mover_start, mover_end, exclude_booking=rescheduled
+        )
+
     def test_expire_due_holds_rechecks_expiry_after_lock(self):
         from apps.bookings.services import (
             due_hold_booking_candidate_ids,
@@ -3360,30 +3706,19 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
         )
         due_ids = due_hold_booking_candidate_ids(now=timezone.now())
         self.assertEqual(due_ids, [booking.id])
-        Booking.objects.filter(pk=booking.pk).update(created=timezone.now())
+        Booking.objects.filter(pk=booking.pk).update(
+            hold_expires_at=timezone.now() + timedelta(hours=1)
+        )
         expired = expire_locked_due_hold_bookings(due_ids=due_ids, now=timezone.now())
         booking.refresh_from_db()
         self.assertEqual(expired, [])
         self.assertEqual(booking.status, Booking.Status.HOLD)
 
-    def annotated_hold_expires_at(self, booking):
-        return (
-            annotate_booking_hold_expires_at(
-                Booking.objects.filter(pk=booking.pk).select_related("court")
-            )
-            .values_list("hold_expires_at", flat=True)
-            .get()
-        )
-
-    def test_policy_expiry_earlier_than_start_is_effective_deadline(self):
+    def test_hold_expiry_is_a_creation_snapshot_and_is_not_capped_by_start(self):
         self.court.internal_hold_expiry_hours = 2
         self.court.save(update_fields=["internal_hold_expiry_hours"])
-        created = timezone.datetime(
-            2026, 9, 4, 10, 0, tzinfo=timezone.get_current_timezone()
-        )
-        start_time = timezone.datetime(
-            2026, 9, 4, 15, 0, tzinfo=timezone.get_current_timezone()
-        )
+        now = timezone.now()
+        start_time = now + timedelta(hours=1)
         booking = self.create_booking(
             self.court,
             status=Booking.Status.HOLD,
@@ -3391,34 +3726,23 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             end_time=start_time + timedelta(hours=1),
             customer_phone="+201000001041",
         )
-        Booking.objects.filter(pk=booking.pk).update(created=created)
         booking.refresh_from_db()
-        expected = created + timedelta(hours=2)
-        self.assertEqual(compute_booking_hold_expires_at(booking), expected)
-        self.assertEqual(self.annotated_hold_expires_at(booking), expected)
+        self.assertEqual(
+            booking.hold_expires_at,
+            booking.created + timedelta(hours=2),
+        )
+        self.assertGreater(booking.hold_expires_at, booking.start_time)
+        self.assertTrue(timezone.is_aware(booking.hold_expires_at))
 
-    def test_start_time_earlier_than_policy_expiry_is_effective_deadline(self):
-        self.court.internal_hold_expiry_hours = 12
+        self.court.internal_hold_expiry_hours = 48
         self.court.save(update_fields=["internal_hold_expiry_hours"])
-        created = timezone.datetime(
-            2026, 9, 4, 19, 30, tzinfo=timezone.get_current_timezone()
-        )
-        start_time = timezone.datetime(
-            2026, 9, 4, 20, 0, tzinfo=timezone.get_current_timezone()
-        )
-        booking = self.create_booking(
-            self.court,
-            status=Booking.Status.HOLD,
-            start_time=start_time,
-            end_time=start_time + timedelta(hours=1),
-            customer_phone="+201000001042",
-        )
-        Booking.objects.filter(pk=booking.pk).update(created=created)
         booking.refresh_from_db()
-        self.assertEqual(compute_booking_hold_expires_at(booking), start_time)
-        self.assertEqual(self.annotated_hold_expires_at(booking), start_time)
+        self.assertEqual(
+            booking.hold_expires_at,
+            booking.created + timedelta(hours=2),
+        )
 
-    def test_hold_is_due_exactly_at_start_time(self):
+    def test_hold_is_due_at_deadline_boundary_not_at_booking_start(self):
         from apps.bookings.services import due_hold_booking_candidate_ids
 
         now = timezone.now()
@@ -3429,11 +3753,11 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             end_time=now + timedelta(hours=1),
             customer_phone="+201000001043",
         )
-        Booking.objects.filter(pk=booking.pk).update(created=now - timedelta(hours=1))
+        Booking.objects.filter(pk=booking.pk).update(hold_expires_at=now)
         due_ids = due_hold_booking_candidate_ids(now=now)
         self.assertIn(booking.id, due_ids)
 
-    def test_past_start_hold_is_automatic_expiry_candidate(self):
+    def test_past_start_hold_remains_active_until_its_deadline(self):
         from apps.bookings.services import due_hold_booking_candidate_ids
 
         now = timezone.now()
@@ -3444,17 +3768,13 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             end_time=now + timedelta(minutes=45),
             customer_phone="+201000001044",
         )
-        Booking.objects.filter(pk=booking.pk).update(
-            created=now - timedelta(minutes=30)
-        )
         due_ids = due_hold_booking_candidate_ids(now=now)
-        self.assertIn(booking.id, due_ids)
+        self.assertNotIn(booking.id, due_ids)
 
-    def test_python_and_orm_deadlines_match_across_court_expiry_hours(self):
+    def test_expiry_snapshot_does_not_follow_later_court_policy_changes(self):
         other_court = self.create_court(
             self.club, "Other Hours Court", internal_hold_expiry_hours=48
         )
-        created = timezone.now() - timedelta(hours=3)
         start_time = timezone.now() + timedelta(hours=10)
         short_booking = self.create_booking(
             self.court,
@@ -3470,30 +3790,23 @@ class BookingAutomaticExpiryCommandTests(BookingAPITestCase):
             end_time=start_time + timedelta(hours=1),
             customer_phone="+201000001046",
         )
-        Booking.objects.filter(pk__in=[short_booking.pk, long_booking.pk]).update(
-            created=created
-        )
+        short_deadline = short_booking.hold_expires_at
+        long_deadline = long_booking.hold_expires_at
+        self.court.internal_hold_expiry_hours = 72
+        self.court.save(update_fields=["internal_hold_expiry_hours"])
+        other_court.internal_hold_expiry_hours = 96
+        other_court.save(update_fields=["internal_hold_expiry_hours"])
         short_booking.refresh_from_db()
         long_booking.refresh_from_db()
-        self.assertEqual(
-            compute_booking_hold_expires_at(short_booking),
-            self.annotated_hold_expires_at(short_booking),
-        )
-        self.assertEqual(
-            compute_booking_hold_expires_at(long_booking),
-            self.annotated_hold_expires_at(long_booking),
-        )
-        self.assertNotEqual(
-            compute_booking_hold_expires_at(short_booking),
-            compute_booking_hold_expires_at(long_booking),
-        )
+        self.assertEqual(short_booking.hold_expires_at, short_deadline)
+        self.assertEqual(long_booking.hold_expires_at, long_deadline)
 
 
 class BookingFilterTests(BookingAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("filter-admin")
-        self.owner = self.create_user("filter-owner")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
         self.club = self.create_club("Filter Club", slug="filter-club")
         self.other_club = self.create_club("Other Filter Club", slug="other-filter")
         self.court = self.create_court(self.club, "Filter Court")
@@ -3512,7 +3825,8 @@ class BookingFilterTests(BookingAPITestCase):
             start_time=self.time_at(22),
             end_time=self.time_at(23),
             status=Booking.Status.CONFIRMED,
-            source=Booking.Source.ADMIN_CORRECTION,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
         )
         self.other_booking = self.create_booking(
             self.other_court,
@@ -3550,7 +3864,7 @@ class BookingFilterTests(BookingAPITestCase):
     def test_filter_by_source(self):
         response = self.client.get(
             self.booking_list_url(self.club),
-            {"source": Booking.Source.ADMIN_CORRECTION},
+            {"source": Booking.Source.RECURRING},
         )
         self.assertEqual(self.list_ids(response), {self.confirmed_booking.id})
 
@@ -3563,6 +3877,24 @@ class BookingFilterTests(BookingAPITestCase):
         )
         self.assertNotIn(self.other_booking.id, self.list_ids(response))
 
+    def test_date_filter_includes_last_microsecond_before_next_local_day(self):
+        next_day = self.time_at(0) + timedelta(days=1)
+        last_moment = next_day - timedelta(microseconds=1)
+        boundary_booking = self.create_booking(
+            self.court,
+            customer_phone="+201000001199",
+            start_time=last_moment,
+            end_time=next_day,
+            status=Booking.Status.CONFIRMED,
+        )
+
+        response = self.client.get(
+            self.booking_list_url(self.club), {"date": "2026-05-20"}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(boundary_booking.id, self.list_ids(response))
+
     def test_filter_by_date_from_and_date_to(self):
         response = self.client.get(
             self.booking_list_url(self.club),
@@ -3572,6 +3904,46 @@ class BookingFilterTests(BookingAPITestCase):
             },
         )
         self.assertEqual(self.list_ids(response), {self.confirmed_booking.id})
+
+    def test_date_only_range_is_inclusive_of_last_calendar_day(self):
+        next_day = self.create_booking(
+            self.court,
+            customer_phone="+201000001200",
+            start_time=self.time_at(20) + timedelta(days=1),
+            end_time=self.time_at(21) + timedelta(days=1),
+            status=Booking.Status.CONFIRMED,
+        )
+        same_day = self.client.get(
+            self.booking_list_url(self.club),
+            {"date_from": "2026-05-20", "date_to": "2026-05-20"},
+        )
+        self.assertEqual(same_day.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self.list_ids(same_day),
+            {self.booking.id, self.confirmed_booking.id},
+        )
+        self.assertNotIn(next_day.id, self.list_ids(same_day))
+
+        inclusive_range = self.client.get(
+            self.booking_list_url(self.club),
+            {"date_from": "2026-05-20", "date_to": "2026-05-21"},
+        )
+        self.assertEqual(inclusive_range.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self.list_ids(inclusive_range),
+            {self.booking.id, self.confirmed_booking.id, next_day.id},
+        )
+
+    def test_past_date_only_range_is_not_clamped_to_now(self):
+        response = self.client.get(
+            self.booking_list_url(self.club),
+            {"date_from": "2026-05-01", "date_to": "2026-05-20"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self.list_ids(response),
+            {self.booking.id, self.confirmed_booking.id},
+        )
 
     def test_invalid_date_filter_returns_400(self):
         response = self.client.get(
@@ -3596,7 +3968,7 @@ class BookingFilterTests(BookingAPITestCase):
         self.assertNotIn(self.other_booking.id, self.list_ids(response))
 
     def test_filters_still_respect_staff_assigned_court_scope(self):
-        staff = self.create_user("filter-staff")
+        staff = self.create_user()
         same_club_other_court = self.create_court(
             self.club, "Hidden Staff Filter Court"
         )
@@ -3755,7 +4127,7 @@ class BookingFilterTests(BookingAPITestCase):
             status=Booking.Status.HOLD,
         )
         Booking.objects.filter(pk=expiring_hold.pk).update(
-            created=timezone.now() - timedelta(minutes=45)
+            hold_expires_at=timezone.now() + timedelta(minutes=15)
         )
         response = self.client.get(
             self.booking_list_url(self.club), {"hold_expiring": "true"}
@@ -3829,7 +4201,7 @@ class BookingFilterTests(BookingAPITestCase):
         self.assertNotIn(other.id, self.list_ids(response))
 
     def test_search_respects_staff_court_scope(self):
-        staff = self.create_user("search-staff")
+        staff = self.create_user()
         hidden_court = self.create_court(self.club, "Hidden Search Court")
         visible = self.create_booking(
             self.court,
@@ -3892,6 +4264,33 @@ class BookingFilterTests(BookingAPITestCase):
         self.assertNotIn(completed.id, ids)
         self.assertNotIn(self.other_booking.id, ids)
 
+    def test_upcoming_excludes_logically_expired_holds(self):
+        now = timezone.now()
+        due_hold = self.create_booking(
+            self.court,
+            customer_phone="+201000001081",
+            start_time=now + timedelta(hours=2),
+            end_time=now + timedelta(hours=3),
+            status=Booking.Status.HOLD,
+        )
+        Booking.objects.filter(pk=due_hold.pk).update(hold_expires_at=now)
+        due_hold.refresh_from_db()
+        active_hold = self.create_booking(
+            self.court,
+            customer_phone="+201000001082",
+            start_time=now + timedelta(hours=4),
+            end_time=now + timedelta(hours=5),
+            status=Booking.Status.HOLD,
+        )
+        response = self.client.get(
+            self.booking_list_url(self.club), {"upcoming": "true"}
+        )
+        ids = self.list_ids(response)
+        self.assertIn(active_hold.id, ids)
+        self.assertNotIn(due_hold.id, ids)
+        due_hold.refresh_from_db()
+        self.assertEqual(due_hold.status, Booking.Status.HOLD)
+
     def test_hold_expires_at_matches_expiration_rule_and_is_null_when_not_hold(self):
         hold = self.create_booking(
             self.court, status=Booking.Status.HOLD, customer_phone="+201000000075"
@@ -3906,7 +4305,7 @@ class BookingFilterTests(BookingAPITestCase):
         hold_row = next(
             (item for item in list_response.data["results"] if item["id"] == hold.id)
         )
-        expected = compute_booking_hold_expires_at(hold)
+        expected = hold.hold_expires_at
         self.assertEqual(hold_row["hold_expires_at"], expected)
         self.assertEqual(detail_response.data["hold_expires_at"], expected)
         self.assertIsNone(confirmed_detail.data["hold_expires_at"])
@@ -4120,8 +4519,8 @@ class BookingFilterPatternTests(BookingAPITestCase):
 class BookingPaymentSummaryTests(BookingAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("payment-summary-admin")
-        self.staff = self.create_user("payment-summary-staff")
+        self.platform_admin = self.create_platform_admin()
+        self.staff = self.create_user()
         self.club = self.create_club("Payment Summary Club", slug="payment-summary")
         self.other_club = self.create_club(
             "Other Payment Summary Club", slug="other-payment-summary"
@@ -4174,7 +4573,7 @@ class BookingPaymentSummaryTests(BookingAPITestCase):
             self.booking,
             amount=Decimal("200.00"),
             is_cancelled=True,
-            cancelled_by=self.platform_admin,
+            cancelled_by=self.platform_admin.profile,
             cancelled_at=timezone.now(),
             cancellation_reason="Wrong payment",
         )
@@ -4218,7 +4617,7 @@ class BookingPaymentSummaryTests(BookingAPITestCase):
 class BookingQueryScalingTests(BookingAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("query-scale-admin")
+        self.platform_admin = self.create_platform_admin()
         self.club = self.create_club("Query Scale Club", slug="query-scale-club")
         self.court = self.create_court(self.club, "Query Scale Court")
         self.client.force_authenticate(user=self.platform_admin)
@@ -4291,7 +4690,10 @@ class BookingQueryScalingTests(BookingAPITestCase):
 
     def test_schedule_query_count_stays_bounded_across_slot_and_anchor_growth(self):
         self.create_working_hours(
-            self.court, weekday=2, opens_at=time(9, 0), closes_at=time(12, 0)
+            self.court,
+            weekday=CourtWorkingHour.Weekday.WEDNESDAY,
+            opens_at=time(9, 0),
+            closes_at=time(12, 0),
         )
 
         def slot_query_count(**params):
@@ -4386,7 +4788,7 @@ class BookingQueryScalingTests(BookingAPITestCase):
 class BookingRescheduleRefundEntitlementTests(BookingAPITestCase):
 
     def setUp(self):
-        self.owner = self.create_user("refund-reschedule-owner")
+        self.owner = self.create_user()
         self.club = self.create_club("Refund Reschedule Club", slug="refund-reschedule")
         self.court = self.create_court(self.club, "Refund Reschedule Court")
         grant_owner_club(self.owner, self.club)
@@ -4436,7 +4838,7 @@ class BookingRescheduleRefundEntitlementTests(BookingAPITestCase):
             booking,
             amount=Decimal(amount),
             payment_method=Transaction.PaymentMethod.CASH,
-            created_by=self.owner,
+            created_by=self.owner.profile,
         )
         return booking
 
@@ -4544,18 +4946,12 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         super().setUp()
         self.club = self.create_club("Status Actor Club", slug="status-actor-club")
         self.court = self.create_court(self.club, "Main Court")
-        self.platform_admin = self.create_platform_admin("status-admin")
-        self.owner = self.create_user(
-            "status-owner", first_name="Owner", last_name="User"
-        )
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user(first_name="Owner", last_name="User")
         grant_owner_club(self.owner, self.club)
-        self.staff_a = self.create_user(
-            "staff-a", first_name="Ahmed", last_name="Mohamed"
-        )
+        self.staff_a = self.create_user(first_name="Ahmed", last_name="Mohamed")
         grant_staff_court(self.staff_a, self.court)
-        self.staff_b = self.create_user(
-            "staff-b", first_name="Mahmoud", last_name="Ali"
-        )
+        self.staff_b = self.create_user(first_name="Mahmoud", last_name="Ali")
         grant_staff_court(self.staff_b, self.court)
 
     def post_lifecycle(self, club, booking, action_name, user, payload=None):
@@ -4585,7 +4981,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         self.assertEqual(booking.last_status_changed_by, self.staff_a.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
-            Booking.LastStatusActorType.INTERNAL_USER,
+            Booking.LastStatusActorType.PROFILE,
         )
 
     def test_cancellation_updates_actor(self):
@@ -4594,7 +4990,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             self.court,
             created_by=self.staff_a.profile,
             last_status_changed_by=self.staff_a.profile,
-            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
             start_time=future_start,
             end_time=future_start + timedelta(hours=1),
         )
@@ -4615,7 +5011,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         self.assertEqual(booking.last_status_changed_by, self.staff_b.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
-            Booking.LastStatusActorType.INTERNAL_USER,
+            Booking.LastStatusActorType.PROFILE,
         )
         self.client.force_authenticate(user=self.owner)
         detail_resp = self.client.get(self.booking_detail_url(self.club, booking))
@@ -4631,7 +5027,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             status=Booking.Status.CONFIRMED,
             created_by=self.staff_a.profile,
             last_status_changed_by=self.staff_a.profile,
-            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
         )
@@ -4654,7 +5050,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         self.assertEqual(booking.last_status_changed_by, self.staff_b.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
-            Booking.LastStatusActorType.INTERNAL_USER,
+            Booking.LastStatusActorType.PROFILE,
         )
 
     def test_completion_updates_actor(self):
@@ -4663,13 +5059,13 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             status=Booking.Status.CONFIRMED,
             created_by=self.staff_a.profile,
             last_status_changed_by=self.staff_a.profile,
-            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
             total_price=Decimal("300.00"),
         )
         self.create_transaction(
-            booking, amount=Decimal("300.00"), created_by=self.staff_a
+            booking, amount=Decimal("300.00"), created_by=self.staff_a.profile
         )
         complete_resp = self.post_lifecycle(
             self.club, booking, "complete", self.staff_b
@@ -4686,7 +5082,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         self.assertEqual(booking.last_status_changed_by, self.staff_b.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
-            Booking.LastStatusActorType.INTERNAL_USER,
+            Booking.LastStatusActorType.PROFILE,
         )
 
     def test_confirmed_by_transaction_updates_actor(self):
@@ -4696,7 +5092,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             status=Booking.Status.HOLD,
             created_by=self.staff_a.profile,
             last_status_changed_by=self.staff_a.profile,
-            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
             total_price=Decimal("300.00"),
@@ -4717,7 +5113,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         self.assertEqual(booking.last_status_changed_by, self.staff_b.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
-            Booking.LastStatusActorType.INTERNAL_USER,
+            Booking.LastStatusActorType.PROFILE,
         )
         detail_resp = self.client.get(self.booking_detail_url(self.club, booking))
         self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
@@ -4734,11 +5130,11 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             status=Booking.Status.HOLD,
             created_by=self.staff_a.profile,
             last_status_changed_by=self.staff_a.profile,
-            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
         )
-        expire_due_hold_bookings(now=self.time_at(20) + timedelta(days=10))
+        expire_due_hold_bookings(now=booking.hold_expires_at)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.EXPIRED)
         self.assertIsNone(booking.last_status_changed_by)
@@ -4753,13 +5149,13 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             detail_resp.data["last_status_changed_by_name"], "System (Automatic)"
         )
 
-    def test_manual_expiry_sets_internal_user(self):
+    def test_manual_expiry_sets_profile_actor(self):
         booking = self.create_booking(
             self.court,
             status=Booking.Status.HOLD,
             created_by=self.staff_a.profile,
             last_status_changed_by=self.staff_a.profile,
-            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
         )
@@ -4774,7 +5170,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         self.assertEqual(booking.last_status_changed_by, self.staff_b.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
-            Booking.LastStatusActorType.INTERNAL_USER,
+            Booking.LastStatusActorType.PROFILE,
         )
 
     def test_payment_cancellation_reverting_to_hold(self):
@@ -4785,13 +5181,13 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             status=Booking.Status.CONFIRMED,
             created_by=self.staff_a.profile,
             last_status_changed_by=self.staff_a.profile,
-            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
             total_price=Decimal("300.00"),
         )
         tx = self.create_transaction(
-            booking, amount=Decimal("100.00"), created_by=self.staff_a
+            booking, amount=Decimal("100.00"), created_by=self.staff_a.profile
         )
 
         class MockAccess:
@@ -4811,7 +5207,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         self.assertEqual(booking.last_status_changed_by, self.staff_b.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
-            Booking.LastStatusActorType.INTERNAL_USER,
+            Booking.LastStatusActorType.PROFILE,
         )
         self.client.force_authenticate(user=self.owner)
         detail_resp = self.client.get(self.booking_detail_url(self.club, booking))
@@ -4827,7 +5223,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             status=Booking.Status.HOLD,
             created_by=self.staff_a.profile,
             last_status_changed_by=self.staff_a.profile,
-            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
         )
@@ -4855,7 +5251,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
         self.assertEqual(booking.last_status_changed_by, self.staff_a.profile)
         self.assertEqual(
             booking.last_status_changed_by_type,
-            Booking.LastStatusActorType.INTERNAL_USER,
+            Booking.LastStatusActorType.PROFILE,
         )
 
     def test_historical_legacy_booking_never_falls_back_to_created_by(self):
@@ -4884,7 +5280,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             self.court,
             created_by=self.staff_a.profile,
             last_status_changed_by=self.staff_a.profile,
-            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
         )
@@ -4900,7 +5296,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
                 last_status_changed_by=(
                     self.staff_b.profile if i % 2 == 0 else self.staff_a.profile
                 ),
-                last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+                last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
                 start_time=self.time_at(10) + timedelta(days=i),
                 end_time=self.time_at(11) + timedelta(days=i),
             )
@@ -4913,15 +5309,13 @@ class BookingLastStatusActorTests(BookingAPITestCase):
     def test_tenant_isolation(self):
         other_club = self.create_club("Other Club", slug="other-club")
         other_court = self.create_court(other_club, "Other Court")
-        other_user = self.create_user(
-            "other-user", first_name="Foreign", last_name="Actor"
-        )
+        other_user = self.create_user(first_name="Foreign", last_name="Actor")
         grant_staff_court(other_user, other_court)
         booking_a = self.create_booking(
             self.court,
             created_by=self.staff_a.profile,
             last_status_changed_by=self.staff_a.profile,
-            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
         )
@@ -4929,7 +5323,7 @@ class BookingLastStatusActorTests(BookingAPITestCase):
             other_court,
             created_by=other_user.profile,
             last_status_changed_by=other_user.profile,
-            last_status_changed_by_type=Booking.LastStatusActorType.INTERNAL_USER,
+            last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
             start_time=self.time_at(20),
             end_time=self.time_at(21),
         )
@@ -4949,12 +5343,15 @@ class BookingMidnightWorkingHourAPITests(BookingAPITestCase):
 
     def setUp(self):
         super().setUp()
-        self.owner = self.create_user("owner_midnight")
+        self.owner = self.create_user()
         self.club = self.create_club("Midnight Club", slug="midnight-club")
         self.court = self.create_court(self.club, "Midnight Court")
         grant_owner_club(self.owner, self.club)
         self.working_hour = self.create_working_hours(
-            self.court, weekday=2, opens_at=time(10, 0), closes_at=time(0, 0)
+            self.court,
+            weekday=CourtWorkingHour.Weekday.WEDNESDAY,
+            opens_at=time(10, 0),
+            closes_at=time(0, 0),
         )
         self.set_price_periods(
             self.working_hour,
@@ -5008,12 +5405,13 @@ class BookingMidnightWorkingHourAPITests(BookingAPITestCase):
             end_time=self.time_at(23) + timedelta(hours=1),
             total_price=Decimal("300.00"),
         )
-        response = self.post_booking(
-            self.club,
-            self.court,
-            start_time=self.time_at(23).isoformat(),
-            end_time=(self.time_at(23) + timedelta(hours=1)).isoformat(),
-        )
+        with self.during_fixture_schedule():
+            response = self.post_booking(
+                self.club,
+                self.court,
+                start_time=self.time_at(23).isoformat(),
+                end_time=(self.time_at(23) + timedelta(hours=1)).isoformat(),
+            )
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(response.data["code"], "BOOKING_SLOT_UNAVAILABLE")
 
@@ -5067,7 +5465,7 @@ class SeededBarcelonaBookingCreationTests(BookingAPITestCase):
         call_command("seed_demo_data", verbosity=0)
         club = Club.objects.get(slug="barcelona-fc")
         court = Court.objects.get(club=club, name="Spotify Camp Nou")
-        staff = User.objects.get(username="staff_a")
+        staff = User.objects.get(email="staff_a@example.com")
         booking_date = timezone.localdate() + timedelta(days=9)
         start_time = timezone.make_aware(
             timezone.datetime.combine(booking_date, time(8, 0)),

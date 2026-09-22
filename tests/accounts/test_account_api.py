@@ -27,21 +27,20 @@ from apps.profiles.models import (
 class AccountAPITestCase(APITestCase):
     password = "test-pass-123"
 
-    def create_user(self, username: str, **extra_fields) -> User:
-        return User.objects.create_user(
-            username=username,
-            password=self.password,
-            **extra_fields,
-        )
+    def create_user(self, phone_number=None, **extra_fields) -> User:
+        extra_fields.setdefault("password", getattr(self, "password", "test-pass-123"))
+        from tests.profile_factories import create_user as factory_create_user
 
-    def create_platform_admin(self, username="platform-admin") -> User:
-        user = self.create_user(username=username)
+        return factory_create_user(phone_number=phone_number, **extra_fields)
+
+    def create_platform_admin(self, **extra_fields) -> User:
+        user = self.create_user(**extra_fields)
         AdminProfile.objects.create(user=user, role=Profile.Role.ADMIN)
         return user
 
-    def create_owner(self, username="owner-user", clubs=None, **extra_fields) -> User:
+    def create_owner(self, clubs=None, **extra_fields) -> User:
         created_by = extra_fields.pop("created_by", None)
-        user = self.create_user(username=username, **extra_fields)
+        user = self.create_user(**extra_fields)
         owner_profile = OwnerProfile.objects.create(
             user=user, role=Profile.Role.OWNER, created_by=created_by
         )
@@ -49,9 +48,9 @@ class AccountAPITestCase(APITestCase):
             owner_profile.clubs.set(clubs)
         return user
 
-    def create_staff(self, court: Court, username="staff-user", **extra_fields) -> User:
+    def create_staff(self, court: Court, **extra_fields) -> User:
         created_by = extra_fields.pop("created_by", None)
-        user = self.create_user(username=username, **extra_fields)
+        user = self.create_user(**extra_fields)
         staff_profile = StaffProfile.objects.create(
             user=user,
             role=Profile.Role.STAFF,
@@ -89,7 +88,6 @@ class MeAPITests(AccountAPITestCase):
 
     def test_authenticated_user_gets_me_profile(self):
         creator_user = self.create_user(
-            username="profile-creator",
             first_name="Creator",
             last_name="User",
         )
@@ -100,8 +98,7 @@ class MeAPITests(AccountAPITestCase):
         staff_club = self.create_club("Champions", "champions")
         staff_court = self.create_court(staff_club, "Court 1")
         user = self.create_staff(
-            court=staff_court,
-            username="profile-user",
+            staff_court,
             email="profile@example.com",
             first_name="Profile",
             last_name="User",
@@ -117,18 +114,17 @@ class MeAPITests(AccountAPITestCase):
             set(response.data),
             {
                 "id",
-                "username",
+                "phone_number",
                 "email",
                 "first_name",
                 "last_name",
-                "phone_number",
                 "is_active",
                 "profile_role",
                 "account_created_by",
             },
         )
         self.assertEqual(response.data["id"], user.id)
-        self.assertEqual(response.data["username"], user.username)
+        self.assertEqual(response.data["phone_number"], str(user.phone_number))
         self.assertEqual(response.data["profile_role"], "STAFF")
         self.assertEqual(
             response.data["account_created_by"],
@@ -138,7 +134,7 @@ class MeAPITests(AccountAPITestCase):
         self.assertNotIn("hash_password", response.data)
 
     def test_authenticated_user_without_creator_gets_null_account_created_by(self):
-        user = self.create_user(username="profile-user-without-creator")
+        user = self.create_user()
         self.client.force_authenticate(user=user)
 
         response = self.client.get(reverse("me"))
@@ -147,7 +143,7 @@ class MeAPITests(AccountAPITestCase):
         self.assertIsNone(response.data["account_created_by"])
 
     def test_me_response_prefetches_creator_and_profile(self):
-        creator_user = self.create_user(username="query-creator")
+        creator_user = self.create_user()
         creator = AdminProfile.objects.create(
             user=creator_user,
             role=Profile.Role.ADMIN,
@@ -155,8 +151,7 @@ class MeAPITests(AccountAPITestCase):
         staff_club = self.create_club("Query Club", "query-club")
         staff_court = self.create_court(staff_club, "Query Court")
         user = self.create_staff(
-            court=staff_court,
-            username="query-profile-user",
+            staff_court,
             created_by=creator,
         )
         self.client.force_authenticate(user=user)
@@ -182,9 +177,9 @@ class MeAPITests(AccountAPITestCase):
 
 
 class JWTAPITests(AccountAPITestCase):
-    def obtain_token(self, username, **extra_data):
+    def obtain_token(self, phone_number, **extra_data):
         payload = {
-            "username": username,
+            "phone_number": str(phone_number),
             "password": self.password,
         }
         payload.update(extra_data)
@@ -198,18 +193,18 @@ class JWTAPITests(AccountAPITestCase):
         return AccessToken(token)
 
     def test_active_user_can_obtain_token_without_club_slug(self):
-        user = self.create_user(username="active-token-user")
+        user = self.create_user()
 
-        response = self.obtain_token(user.username)
+        response = self.obtain_token(user.phone_number)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("access", response.data)
         self.assertIn("refresh", response.data)
 
     def test_token_lifetimes_follow_simple_jwt_settings(self):
-        user = self.create_user(username="lifetime-token-user")
+        user = self.create_user()
 
-        response = self.obtain_token(user.username)
+        response = self.obtain_token(user.phone_number)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         access = AccessToken(response.data["access"])
@@ -238,36 +233,41 @@ class JWTAPITests(AccountAPITestCase):
         )
 
     def test_invalid_credentials_fail(self):
-        user = self.create_user(username="invalid-token-user")
+        user = self.create_user()
 
         response = self.client.post(
             reverse("token_obtain_pair"),
-            {"username": user.username, "password": "wrong-password"},
+            {"phone_number": str(user.phone_number), "password": "wrong-password"},
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_login_failures_do_not_reveal_account_state(self):
-        active_user = self.create_user(username="enumeration-active-user")
+        active_user = self.create_user()
         inactive_user = self.create_user(
-            username="enumeration-inactive-user",
             is_active=False,
         )
 
         wrong_password_response = self.client.post(
             reverse("token_obtain_pair"),
-            {"username": active_user.username, "password": "wrong-password"},
+            {
+                "phone_number": str(active_user.phone_number),
+                "password": "wrong-password",
+            },
             format="json",
         )
         unknown_user_response = self.client.post(
             reverse("token_obtain_pair"),
-            {"username": "unknown-user", "password": "wrong-password"},
+            {"phone_number": "+201099999999", "password": "wrong-password"},
             format="json",
         )
         inactive_user_response = self.client.post(
             reverse("token_obtain_pair"),
-            {"username": inactive_user.username, "password": self.password},
+            {
+                "phone_number": str(inactive_user.phone_number),
+                "password": self.password,
+            },
             format="json",
         )
 
@@ -288,18 +288,54 @@ class JWTAPITests(AccountAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["code"], "VALIDATION_ERROR")
-        self.assertIn("username", response.data["field_errors"])
+        self.assertIn("phone_number", response.data["field_errors"])
         self.assertIn("password", response.data["field_errors"])
 
-    def test_inactive_user_cannot_obtain_token(self):
-        user = self.create_user(username="inactive-token-user", is_active=False)
+    def test_username_is_not_accepted_as_login_identifier(self):
+        response = self.client.post(
+            reverse("token_obtain_pair"),
+            {"username": "anything", "password": self.password},
+            format="json",
+        )
 
-        response = self.obtain_token(user.username)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("phone_number", response.data["field_errors"])
+
+    def test_normalized_egyptian_phone_logs_into_the_same_account(self):
+        self.create_user(phone_number="+201011122233")
+
+        response = self.client.post(
+            reverse("token_obtain_pair"),
+            {"phone_number": "01011122233", "password": self.password},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+
+    def test_openapi_login_request_uses_phone_number(self):
+        response = self.client.get(reverse("schema"))
+        schema_doc = yaml.safe_load(response.content.decode())
+        request_schema = schema_doc["paths"]["/api/v1/auth/token/"]["post"][
+            "requestBody"
+        ]["content"]["application/json"]["schema"]
+        if "$ref" in request_schema:
+            ref_name = request_schema["$ref"].rsplit("/", 1)[-1]
+            request_schema = schema_doc["components"]["schemas"][ref_name]
+        properties = request_schema["properties"]
+        self.assertIn("phone_number", properties)
+        self.assertIn("password", properties)
+        self.assertNotIn("username", properties)
+
+    def test_inactive_user_cannot_obtain_token(self):
+        user = self.create_user(is_active=False)
+
+        response = self.obtain_token(user.phone_number)
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_expired_access_token_returns_session_expired_code(self):
-        user = self.create_user(username="expired-access-user")
+        user = self.create_user()
         token = AccessToken.for_user(user)
         token.set_exp(lifetime=timedelta(seconds=-1))
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
@@ -310,7 +346,7 @@ class JWTAPITests(AccountAPITestCase):
         self.assertEqual(response.data["code"], "SESSION_EXPIRED")
 
     def test_stale_token_for_inactive_user_returns_user_inactive_code(self):
-        user = self.create_user(username="stale-inactive-user")
+        user = self.create_user()
         token = AccessToken.for_user(user)
         user.is_active = False
         user.save(update_fields=["is_active"])
@@ -322,7 +358,7 @@ class JWTAPITests(AccountAPITestCase):
         self.assertEqual(response.data["code"], "USER_INACTIVE")
 
     def test_stale_token_for_deleted_user_returns_user_deleted_code(self):
-        user = self.create_user(username="stale-deleted-user")
+        user = self.create_user()
         token = AccessToken.for_user(user)
         user.delete()
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
@@ -334,12 +370,11 @@ class JWTAPITests(AccountAPITestCase):
 
     def test_global_normal_token_contains_base_custom_claims(self):
         user = self.create_user(
-            username="claims-user",
             first_name="Claims",
             last_name="User",
         )
 
-        response = self.obtain_token(user.username)
+        response = self.obtain_token(user.phone_number)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         claims = self.decode_access(response.data["access"])
@@ -350,20 +385,20 @@ class JWTAPITests(AccountAPITestCase):
         self.assertNotIn("court_id", claims)
 
     def test_platform_admin_token_has_admin_role(self):
-        admin = self.create_platform_admin(username="claims-admin")
+        admin = self.create_platform_admin()
 
-        response = self.obtain_token(admin.username)
+        response = self.obtain_token(admin.phone_number)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         claims = self.decode_access(response.data["access"])
         self.assertEqual(claims["role"], "ADMIN")
-        self.assertEqual(claims["name"], admin.username)
+        self.assertEqual(claims["name"], admin.get_display_name())
 
     def test_platform_admin_token_with_club_slug_includes_club_context(self):
-        admin = self.create_platform_admin(username="claims-admin-club")
+        admin = self.create_platform_admin()
         club = self.create_club("Admin Claims Club", "admin-claims-club")
 
-        response = self.obtain_token(admin.username, club_slug=club.slug)
+        response = self.obtain_token(admin.phone_number, club_slug=club.slug)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         claims = self.decode_access(response.data["access"])
@@ -373,9 +408,9 @@ class JWTAPITests(AccountAPITestCase):
 
     def test_owner_token_with_club_slug_has_owner_claims(self):
         club = self.create_club("Owner Claims Club", "owner-claims-club")
-        owner = self.create_owner(username="claims-owner", clubs=[club])
+        owner = self.create_owner(clubs=[club])
 
-        response = self.obtain_token(owner.username, club_slug=club.slug)
+        response = self.obtain_token(owner.phone_number, club_slug=club.slug)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         claims = self.decode_access(response.data["access"])
@@ -386,9 +421,9 @@ class JWTAPITests(AccountAPITestCase):
     def test_staff_token_with_club_slug_has_staff_and_court_claims(self):
         club = self.create_club("Staff Claims Club", "staff-claims-club")
         court = self.create_court(club, "Staff Claims Court")
-        staff = self.create_staff(court=court, username="claims-staff")
+        staff = self.create_staff(court)
 
-        response = self.obtain_token(staff.username, club_slug=club.slug)
+        response = self.obtain_token(staff.phone_number, club_slug=club.slug)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         claims = self.decode_access(response.data["access"])
@@ -397,9 +432,9 @@ class JWTAPITests(AccountAPITestCase):
         self.assertEqual(claims["court_id"], court.id)
 
     def test_invalid_club_slug_is_rejected(self):
-        user = self.create_user(username="invalid-club-token-user")
+        user = self.create_user()
 
-        response = self.obtain_token(user.username, club_slug="missing-club")
+        response = self.obtain_token(user.phone_number, club_slug="missing-club")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["success"], False)
@@ -407,10 +442,10 @@ class JWTAPITests(AccountAPITestCase):
         self.assertIn("club_slug", response.data["field_errors"])
 
     def test_club_slug_without_scope_is_rejected_for_non_platform_user(self):
-        user = self.create_user(username="unauthorized-club-token-user")
+        user = self.create_user()
         club = self.create_club("Unauthorized Claims Club", "unauthorized-claims")
 
-        response = self.obtain_token(user.username, club_slug=club.slug)
+        response = self.obtain_token(user.phone_number, club_slug=club.slug)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.data["success"], False)
@@ -420,8 +455,8 @@ class JWTAPITests(AccountAPITestCase):
     def test_refresh_preserves_custom_claims(self):
         club = self.create_club("Refresh Claims Club", "refresh-claims")
         court = self.create_court(club, "Refresh Claims Court")
-        staff = self.create_staff(court=court, username="refresh-claims-staff")
-        token_response = self.obtain_token(staff.username, club_slug=club.slug)
+        staff = self.create_staff(court)
+        token_response = self.obtain_token(staff.phone_number, club_slug=club.slug)
 
         refresh_response = self.client.post(
             reverse("token_refresh"),
@@ -446,7 +481,7 @@ class JWTAPITests(AccountAPITestCase):
         self.assertEqual(response.data["code"], "TOKEN_NOT_VALID")
 
     def test_expired_refresh_token_returns_token_not_valid(self):
-        user = self.create_user(username="expired-refresh-user")
+        user = self.create_user()
         refresh = RefreshToken.for_user(user)
         refresh.set_exp(lifetime=timedelta(seconds=-1))
 
@@ -460,8 +495,8 @@ class JWTAPITests(AccountAPITestCase):
         self.assertEqual(response.data["code"], "TOKEN_NOT_VALID")
 
     def test_refresh_is_repeatable_without_rotation(self):
-        user = self.create_user(username="repeatable-refresh-user")
-        token_response = self.obtain_token(user.username)
+        user = self.create_user()
+        token_response = self.obtain_token(user.phone_number)
 
         first_response = self.client.post(
             reverse("token_refresh"),
@@ -482,8 +517,8 @@ class JWTAPITests(AccountAPITestCase):
         self.assertNotIn("refresh", second_response.data)
 
     def test_refresh_for_inactive_user_returns_user_inactive(self):
-        user = self.create_user(username="inactive-refresh-user")
-        token_response = self.obtain_token(user.username)
+        user = self.create_user()
+        token_response = self.obtain_token(user.phone_number)
         user.is_active = False
         user.save(update_fields=["is_active"])
 
@@ -497,8 +532,8 @@ class JWTAPITests(AccountAPITestCase):
         self.assertEqual(response.data["code"], "USER_INACTIVE")
 
     def test_refresh_for_deleted_user_returns_user_deleted(self):
-        user = self.create_user(username="deleted-refresh-user")
-        token_response = self.obtain_token(user.username)
+        user = self.create_user()
+        token_response = self.obtain_token(user.phone_number)
         user.delete()
 
         response = self.client.post(
@@ -511,7 +546,7 @@ class JWTAPITests(AccountAPITestCase):
         self.assertEqual(response.data["code"], "USER_DELETED")
 
     def test_claimless_access_and_refresh_tokens_require_reauthentication(self):
-        user = self.create_user(username="claimless-token-user")
+        user = self.create_user()
         refresh = RefreshToken.for_user(user)
         del refresh[api_settings.REVOKE_TOKEN_CLAIM]
         access = refresh.access_token
@@ -532,8 +567,8 @@ class JWTAPITests(AccountAPITestCase):
     def test_stale_club_claim_does_not_bypass_revoked_access(self):
         club = self.create_club("Stale Claims Club", "stale-claims-club")
         court = self.create_court(club, "Stale Claims Court")
-        staff = self.create_staff(court=court, username="stale-claims-user")
-        token_response = self.obtain_token(staff.username, club_slug=club.slug)
+        staff = self.create_staff(court)
+        token_response = self.obtain_token(staff.phone_number, club_slug=club.slug)
 
         # Revoke staff access by deleting the profile
         staff.profile.delete()
@@ -560,15 +595,15 @@ class PasswordChangeAPITests(AccountAPITestCase):
     new_password = "New-password-987"
 
     def setUp(self):
-        self.user = self.create_user(username="password-change-user")
+        self.user = self.create_user()
 
     def password_change_url(self):
         return reverse("password-change")
 
-    def obtain_token(self, username):
+    def obtain_token(self, phone_number):
         return self.client.post(
             reverse("token_obtain_pair"),
-            {"username": username, "password": self.password},
+            {"phone_number": str(phone_number), "password": self.password},
             format="json",
         )
 
@@ -599,7 +634,7 @@ class PasswordChangeAPITests(AccountAPITestCase):
             user=self.user, role=Profile.Role.OWNER
         )
         owner_profile.clubs.add(club)
-        player_user = self.create_user(username="password-change-player")
+        player_user = self.create_user()
         player_profile = PlayerProfile.objects.create(
             phone_number="+201066661111",
             full_name="Password Change Player",
@@ -671,7 +706,7 @@ class PasswordChangeAPITests(AccountAPITestCase):
         self.assertIn("new_password", response.data["field_errors"])
 
     def test_password_change_invalidates_existing_access_and_refresh_tokens(self):
-        token_response = self.obtain_token(self.user.username)
+        token_response = self.obtain_token(self.user.phone_number)
         self.authenticate_user()
 
         password_change_response = self.client.post(
@@ -691,7 +726,10 @@ class PasswordChangeAPITests(AccountAPITestCase):
         )
         new_login_response = self.client.post(
             reverse("token_obtain_pair"),
-            {"username": self.user.username, "password": self.new_password},
+            {
+                "phone_number": str(self.user.phone_number),
+                "password": self.new_password,
+            },
             format="json",
         )
 
@@ -708,7 +746,7 @@ class PasswordChangeAPITests(AccountAPITestCase):
 class PlatformUserManagementAPITests(AccountAPITestCase):
     user_list_response_fields = {
         "id",
-        "username",
+        "phone_number",
         "email",
         "first_name",
         "last_name",
@@ -720,7 +758,7 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
 
     def setUp(self):
         self.platform_admin = self.create_platform_admin()
-        self.non_platform_user = self.create_user(username="normal-user")
+        self.non_platform_user = self.create_user()
 
     def authenticate_platform_admin(self):
         self.client.force_authenticate(user=self.platform_admin)
@@ -743,11 +781,20 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         response = self.client.get(reverse("user-list"))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 2)
+        self.assertGreaterEqual(response.data["count"], 2)
         self.assertEqual(
             set(response.data["results"][0]), self.user_list_response_fields
         )
         self.assertNotIn("password", response.data["results"][0])
+
+        for user in (self.platform_admin, self.non_platform_user):
+            filtered = self.client.get(
+                reverse("user-list"),
+                {"search": str(user.phone_number)},
+            )
+            self.assertEqual(filtered.status_code, status.HTTP_200_OK)
+            listed_ids = {item["id"] for item in filtered.data["results"]}
+            self.assertIn(user.id, listed_ids)
 
     def test_platform_admin_can_retrieve_user(self):
         self.authenticate_platform_admin()
@@ -758,31 +805,38 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["id"], self.non_platform_user.id)
-        self.assertEqual(response.data["username"], self.non_platform_user.username)
+        self.assertEqual(
+            str(response.data["phone_number"]),
+            str(self.non_platform_user.phone_number),
+        )
         self.assertNotIn("password", response.data)
 
     def test_post_users_endpoint_is_disabled_and_cannot_create_profiles(self):
         self.authenticate_platform_admin()
 
+        before = User.objects.count()
         response = self.client.post(
             reverse("user-list"),
             {
-                "username": "bypassing-user",
+                "phone_number": "+201099900001",
+                "email": "bypassing-user@example.com",
                 "password": "new-user-pass-123",
             },
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
-        self.assertFalse(User.objects.filter(username="bypassing-user").exists())
+        self.assertEqual(User.objects.count(), before)
 
     def test_generic_user_endpoint_cannot_bypass_onboarding_hierarchy(self):
         self.authenticate_platform_admin()
 
+        before = User.objects.count()
         response = self.client.post(
             reverse("user-list"),
             {
-                "username": "bad-onboard-user",
+                "phone_number": "+201099900002",
+                "email": "bad-onboard-user@example.com",
                 "password": "new-user-pass-123",
                 "role": "OWNER",
             },
@@ -790,15 +844,17 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
-        self.assertFalse(User.objects.filter(username="bad-onboard-user").exists())
+        self.assertEqual(User.objects.count(), before)
 
     def test_create_payload_cannot_set_staff_or_superuser_flags(self):
         self.authenticate_platform_admin()
 
+        before = User.objects.count()
         response = self.client.post(
             reverse("user-list"),
             {
-                "username": "flagged-user",
+                "phone_number": "+201099900003",
+                "email": "flagged-user@example.com",
                 "password": "new-user-pass-123",
                 "is_staff": True,
                 "is_superuser": True,
@@ -807,7 +863,7 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
-        self.assertFalse(User.objects.filter(username="flagged-user").exists())
+        self.assertEqual(User.objects.count(), before)
 
     def test_platform_admin_can_patch_user_identity(self):
         self.authenticate_platform_admin()
@@ -864,13 +920,13 @@ class PlatformUserManagementAPITests(AccountAPITestCase):
 
 class OrphanBusinessUserIntegrityTests(AccountAPITestCase):
     def test_find_orphan_business_users_identifies_active_non_platform_orphans(self):
-        orphan = self.create_user(username="orphan-business-user")
-        inactive_user = self.create_user(username="inactive-business-user")
+        orphan = self.create_user()
+        inactive_user = self.create_user()
         inactive_user.is_active = False
         inactive_user.save(update_fields=["is_active"])
-        platform_admin = self.create_platform_admin("orphan-platform-admin")
+        platform_admin = self.create_platform_admin()
         club = self.create_club("Scoped Club", "scoped-club")
-        scoped_user = self.create_owner(username="scoped-business-user", clubs=[club])
+        scoped_user = self.create_owner(clubs=[club])
 
         orphan_ids = set(find_orphan_business_users().values_list("id", flat=True))
 
@@ -893,7 +949,6 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
 
         # Owner of Club A and Club B
         self.owner = self.create_owner(
-            "owner_user",
             clubs=[self.club_a, self.club_b],
             first_name="Tarek",
             last_name="Owner",
@@ -901,8 +956,7 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
 
         # Staff in Club A
         self.staff_a1 = self.create_staff(
-            court=self.court_a,
-            username="staff_ahmed",
+            self.court_a,
             first_name="Ahmed",
             last_name="Mohamed",
             email="ahmed@example.com",
@@ -910,8 +964,7 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
         )
 
         self.staff_a2 = self.create_staff(
-            court=self.court_a,
-            username="staff_alo",
+            self.court_a,
             first_name="Alo",
             last_name="Hassan",
             email="alo@example.com",
@@ -920,8 +973,7 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
 
         # Staff in Club B
         self.staff_b = self.create_staff(
-            court=self.court_b,
-            username="staff_beta",
+            self.court_b,
             first_name="Beta",
             last_name="Staff",
             email="beta@example.com",
@@ -930,8 +982,7 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
 
         # Staff in Club C (unrelated club)
         self.staff_c = self.create_staff(
-            court=self.court_c,
-            username="staff_gamma",
+            self.court_c,
             first_name="Alo",
             last_name="External",
             email="gamma@example.com",
@@ -939,7 +990,7 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
         )
 
         # External Owner of Club C
-        self.owner_c = self.create_owner("owner_c", clubs=[self.club_c])
+        self.owner_c = self.create_owner(clubs=[self.club_c])
 
         # Platform Admin
         self.platform_admin = self.create_platform_admin()
@@ -1034,7 +1085,9 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["id"], self.staff_a1.id)
-        self.assertEqual(response.data["username"], self.staff_a1.username)
+        self.assertEqual(
+            str(response.data["phone_number"]), str(self.staff_a1.phone_number)
+        )
 
     def test_owner_cannot_retrieve_out_of_scope_user(self):
         self.client.force_authenticate(user=self.owner)
@@ -1056,7 +1109,8 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
         create_resp = self.client.post(
             reverse("user-list"),
             {
-                "username": "new_staff",
+                "phone_number": "+201099900004",
+                "email": "new-staff@example.com",
                 "password": "password123",
             },
             format="json",
@@ -1076,7 +1130,7 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_unassigned_user_cannot_access_users_endpoint(self):
-        user = self.create_user("plain_user")
+        user = self.create_user()
         self.client.force_authenticate(user=user)
         response = self.client.get(reverse("user-list"))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -1090,7 +1144,7 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
         self.assertEqual(small.data["count"], 3)
 
         for index in range(10):
-            self.create_staff(self.court_a, username=f"list-scale-staff-{index}")
+            self.create_staff(self.court_a)
 
         self.client.force_authenticate(user=User.objects.get(pk=self.owner.pk))
         with CaptureQueriesContext(connection) as large_queries:

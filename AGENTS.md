@@ -53,7 +53,7 @@ Domain-specific business rules, models, invariants, and workflows live inside sc
 | **Audit** | [`apps/audit/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/audit/AGENTS.md) | Append-only activity trail, stable machine actions, event snapshot architecture. |
 | **Dashboard** | [`apps/dashboard/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/dashboard/AGENTS.md) | Operational vs. financial metrics, calendar, public availability contract. |
 | **Reports** | [`apps/reports/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/reports/AGENTS.md) | Analytical reports, court usage metrics, 31-day window, occupancy clipping. |
-| **Common** | [`apps/common/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/AGENTS.md) | Egypt locations, standardized error handling (`SlotyAPIException`), Authorization Spine, search, middleware. |
+| **Common** | [`apps/common/AGENTS.md`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/AGENTS.md) | Egypt locations, standardized error handling (`SlotyAPIException`), Authorization Spine, search, middleware, global timestamp bases. |
 | **Security Architecture (target)** | [`docs/architecture/security-architecture-v1.md`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md) | Long-term identity/auth/authorization target and migration guideline (not active-behavior authority). |
 
 ---
@@ -91,7 +91,7 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 | Concern | Target direction |
 | :--- | :--- |
 | Identity | `User` (auth) · `Profile` (application role; inherited `Profile.user` optional for `PlayerProfile`) · `PlayerProfile` → `ClubPlayer` → `Booking.club_player` (customers) |
-| Authentication | Answers “who?” only (JWT and own-password change). Never club/court/resource access. |
+| Authentication | Answers “who?” only (`phone_number` + password, JWT, and own-password change). Never club/court/resource access. There is no username. |
 | Authorization | Spine owns WHERE/WHO · domain `authorization.py` owns special business rules only |
 | Resource config | Implemented `authorization_config` contract only — no second metadata format |
 | Migration | Courts ✅ · Transactions (auth Spine v2) ✅ · Settlements (auth Spine v2) ✅ · Identity Foundation ✅ · Bookings (auth Spine v2) ✅ · Dashboard (auth Spine) ✅ · Audit (auth Spine v2) ✅ · Reports (auth Spine) ✅ · Clubs (auth Spine v2) ✅ · Auth & Lifecycle Hardening (Sprint 15/16) ✅ · Authorization Matrix & Compatibility Cleanup (Sprint 17) ✅ |
@@ -104,6 +104,9 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 - There is no heartbeat/presence API. Authorization mixins, ordinary API traffic, login, refresh, `/me`, and scope resolution never write presence state.
 - **Offline & Reconnect Safety**: Server is authoritative. Reconnect mutations require idempotency keys (`client_request_id`). Duplicate requests return `200 OK` with the existing entity; mismatched payloads return `409 Conflict`. Financial mutations (payments, refunds, settlements) require live server authority and can never be committed offline.
 - **Account and Profile Lifecycle**: `User` is authentication identity; the current `Profile` is application-role authority. A missing or invalid profile scope is denied immediately (`CLUB_ACCESS_REVOKED`), regardless of JWT claims.
+- **Business Actor IDs**: Actor and custody IDs accepted or returned by business APIs are `Profile.id` values. Display names may come from `Profile.user`; authentication account IDs are not accepted as alternate actor IDs.
+- **Demo Seed Identity**: `seed_demo_data` keeps `User` rows for authentication and creates explicit `AdminProfile`, `OwnerProfile`, and `StaffProfile` actors. Business rows store those Profile objects directly; rerunning the seed remains idempotent.
+- **Scheduling contract**: `apps/bookings` owns generated slot availability and stored HOLD deadlines. Read [`docs/scheduling-contract.md`](docs/scheduling-contract.md) and the live OpenAPI schema at `/api/v1/schema/` before changing booking or frontend-facing scheduling behavior.
 
 ---
 
@@ -122,12 +125,53 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 
 ---
 
+## Phone Number Handling Contract
+
+Phone numbers are identity-related data and must follow one validation path.
+
+Whenever an API request or response contains a phone number:
+
+- MUST use:
+
+from phonenumber_field.serializerfields import PhoneNumberField
+
+- MUST NOT use serializers.CharField for phone fields.
+- MUST NOT implement custom regex validation.
+- MUST NOT manually parse country codes inside serializers.
+
+Normalization responsibility:
+
+- API boundary: PhoneNumberField
+- Database: canonical E.164 representation
+- Services: consume validated phone values
+
+Any new endpoint exposing phone numbers must follow this rule.
+
+---
+
 ## 7. Database & Concurrency Rules
 
 - **Transactions**: Multi-model writes and state transitions must be wrapped in `transaction.atomic()`.
 - **Concurrency & Locking**: When concurrent requests can conflict (e.g. booking creation, slot reservation, rescheduling, settlements, transaction cancellation), lock affected rows using `select_for_update()`.
-- **Migrations**: Every model change requires a migration. Avoid data migrations inside schema migration files. The September 2026 pre-release Profile refactor intentionally rebuilt first-party migrations as one `0001_initial.py` per model-bearing app. Recreate development/test databases when adopting this baseline; do not migrate an obsolete database forward or fake its history.
+- **Migrations**: Every model change requires a migration. Avoid data migrations inside schema migration files. The September 2026 pre-release Profile refactor rebuilt first-party migrations from the final models. Each model-bearing app starts at `0001_initial.py`; Django may also emit `0002_initial.py` where circular foreign keys require a second file. Recreate development/test databases when adopting this baseline; do not migrate an obsolete database forward or fake its history. Tests use the real migration graph. After a reset, create the template sequentially (`pytest --create-db` on a small file or without `-n`), then run `pytest -n 4 --reuse-db`. Do not combine `-n` with `--create-db` on PostgreSQL: workers race `DROP`/`CREATE DATABASE` and fail with `DuplicateDatabase`, `ObjectInUse`, or `SSL connection has been closed unexpectedly`.
 - **Timezone**: Django `TIME_ZONE = "Africa/Cairo"` with `USE_TZ = True`. Datetimes are stored as UTC in the database and translated to local Cairo time for business logic.
+
+### Global Timestamp Contract
+
+All models that need timestamps MUST inherit from
+[`apps.common.models.SlotyCreatedModel`](apps/common/models.py) or
+[`apps.common.models.SlotyTimeStampedModel`](apps/common/models.py).
+
+- Never declare `created` / `modified` fields manually.
+- Never introduce `created_at` / `updated_at` without architecture approval.
+- Immutable / append-only records (`Transaction`, `TransactionAttempt`,
+  `BookingAttempt`, `AuditLog`, `Settlement`, `SettlementTransaction`,
+  `StaffCourtAccess`) use `SlotyCreatedModel` (`created` only).
+- Mutable business entities (`Profile` and children, `Club`, `Court`,
+  `Booking`, and similar operational rows) use `SlotyTimeStampedModel`
+  (`created` + `modified` from django-extensions `TimeStampedModel`).
+- Do not inherit `TimeStampedModel` directly. Models that do not need
+  timestamps stay on `models.Model` (or `AbstractUser`).
 
 ---
 
@@ -192,7 +236,7 @@ Investigate before changing application code.
 
 Do not unnecessarily recreate the test database. Prefer `--reuse-db` unless:
 
-- schema changes require recreation (`--create-db` after migrations),
+- schema changes require recreation (`pytest --create-db` sequentially after migrations, then `pytest -n 4 --reuse-db`),
 - database corruption is confirmed,
 - migrations themselves are being tested.
 
@@ -221,7 +265,13 @@ Key Django management commands for maintenance and development:
   ```bash
   python manage.py expire_hold_bookings
   ```
-  Evaluates unconfirmed `HOLD` bookings whose start time has arrived or whose court internal hold expiry duration has elapsed, transitioning them to `EXPIRED` and releasing their time slots.
+  Each HOLD stores `hold_expires_at` when it is created, using the court's
+  configured duration at that time. Active occupancy requires
+  `status=HOLD AND hold_expires_at > now`; changing court settings later does
+  not change an existing deadline. This command expires rows with
+  `status=HOLD AND hold_expires_at <= now`. Production uses
+  [`scripts/systemd/sloty-hold-expiry.timer`](scripts/systemd/sloty-hold-expiry.timer)
+  every 5 minutes. The timer is cleanup only; availability does not depend on it.
 - **Seed Demo Data**:
   ```bash
   python manage.py seed_demo_data

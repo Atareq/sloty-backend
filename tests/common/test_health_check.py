@@ -4,7 +4,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
 
-from apps.accounts.models import User
+from tests.profile_factories import create_user
 
 
 class HealthCheckTests(APITestCase):
@@ -27,7 +27,7 @@ class HealthCheckTests(APITestCase):
         self.assertEqual(response.data, {"status": "ok"})
 
     def test_health_does_not_require_jwt(self):
-        user = User.objects.create_user(username="health-user", password="pass-123")
+        user = create_user(password="pass-123")
         token = AccessToken.for_user(user)
         response = self.client.get(
             "/health/",

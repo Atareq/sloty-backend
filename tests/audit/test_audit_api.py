@@ -25,6 +25,7 @@ from apps.audit.views import AuditLogViewSet
 from apps.bookings.models import Booking
 from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
+from apps.profiles.models import Profile
 from apps.settlements.models import Settlement
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking
@@ -38,10 +39,11 @@ from tests.profile_factories import (
 class AuditAPITestCase(ProfileIdentityMixin, APITestCase):
     password = "test-pass-123"
 
-    def create_user(self, username: str, **extra_fields) -> User:
-        return User.objects.create_user(
-            username=username, password=self.password, **extra_fields
-        )
+    def create_user(self, phone_number=None, **extra_fields) -> User:
+        extra_fields.setdefault("password", getattr(self, "password", "test-pass-123"))
+        from tests.profile_factories import create_user as factory_create_user
+
+        return factory_create_user(phone_number=phone_number, **extra_fields)
 
     def create_club(self, name: str, slug: str | None = None, **extra_fields) -> Club:
         data = {"name": name, "governorate": "ASSIUT", "city": "ASSIUT_MARKAZ"}
@@ -152,7 +154,7 @@ class AuditAPITestCase(ProfileIdentityMixin, APITestCase):
 class AuditModelServiceTests(AuditAPITestCase):
 
     def setUp(self):
-        self.actor_user = self.create_platform_admin("audit-model-actor")
+        self.actor_user = self.create_platform_admin()
         self.actor = self.actor_user.profile
         self.club = self.create_club("Audit Model Club", slug="audit-model")
         self.court = self.create_court(self.club, "Audit Model Court")
@@ -169,7 +171,8 @@ class AuditModelServiceTests(AuditAPITestCase):
         AuditLog.objects.filter(pk=older.pk).update(created=self.time_at(10))
         AuditLog.objects.filter(pk=newer.pk).update(created=self.time_at(11))
         self.assertEqual(
-            list(AuditLog.objects.values_list("id", flat=True)), [newer.id, older.id]
+            list(AuditLog.objects.filter(club=self.club).values_list("id", flat=True)),
+            [newer.id, older.id],
         )
 
     def test_record_audit_log_creates_log_with_expected_data(self):
@@ -195,7 +198,10 @@ class AuditModelServiceTests(AuditAPITestCase):
         self.assertEqual(audit_log.metadata["source"], "test")
         self.assertEqual(
             audit_log.metadata["display_snapshot"],
-            {"actor_name": self.actor_user.username, "court_name": self.court.name},
+            {
+                "actor_name": self.actor_user.get_display_name(),
+                "court_name": self.court.name,
+            },
         )
 
     def test_record_audit_log_accepts_actor_none(self):
@@ -212,10 +218,10 @@ class AuditModelServiceTests(AuditAPITestCase):
 class AuditAccessAPITests(AuditAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("audit-access-admin")
-        self.owner = self.create_user("audit-access-owner")
-        self.staff = self.create_user("audit-access-staff")
-        self.other_user = self.create_user("audit-access-other")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.other_user = self.create_user()
         self.club = self.create_club("Audit Access Club", slug="audit-access")
         self.other_club = self.create_club("Other Audit Club", slug="other-audit")
         self.court = self.create_court(self.club, "Audit Court")
@@ -297,14 +303,14 @@ class AuditAccessAPITests(AuditAPITestCase):
         booking = self.create_booking(self.court, customer_name="Original Customer")
         transaction_obj = self.create_transaction(
             booking,
-            created_by=self.owner,
+            created_by=self.owner.profile,
             payment_method=Transaction.PaymentMethod.BANK_TRANSFER,
         )
         settlement = Settlement.objects.create(
             club=self.club,
             court=self.court,
             total_amount=Decimal("50.00"),
-            settled_by=self.owner,
+            settled_by=self.owner.profile,
         )
         logs = (
             record_audit_log(
@@ -416,11 +422,9 @@ class AuditAccessAPITests(AuditAPITestCase):
 class AuditFilterRegressionTests(AuditAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("audit-filter-admin")
-        self.actor = self.create_platform_admin("audit-filter-actor").profile
-        self.other_actor = self.create_platform_admin(
-            "audit-filter-other-actor"
-        ).profile
+        self.platform_admin = self.create_platform_admin()
+        self.actor = self.create_platform_admin().profile
+        self.other_actor = self.create_platform_admin().profile
         self.club = self.create_club("Audit Filter Club", slug="audit-filter")
         self.other_club = self.create_club("Other Filter Club", slug="other-filter")
         self.court = self.create_court(self.club, "Audit Filter Court")
@@ -501,6 +505,39 @@ class AuditFilterRegressionTests(AuditAPITestCase):
             {self.booking_log.id},
         )
 
+    def test_actor_filter_uses_profile_id_not_user_id(self):
+        for index in range(Profile.objects.count() + 1):
+            self.create_user()
+        actor_user = self.create_platform_admin()
+        actor_profile = actor_user.profile
+        self.assertNotEqual(actor_profile.id, actor_user.id)
+        actor_log = self.create_audit_log(
+            self.club,
+            court=self.court,
+            actor=actor_profile,
+            action=AuditLog.Action.BOOKING_CREATED,
+            entity_type="Booking",
+            entity_id=404,
+        )
+
+        profile_id_response = self.client.get(
+            self.audit_list_url(self.club), {"actor": actor_profile.id}
+        )
+        self.assertEqual(self.list_ids(profile_id_response), {actor_log.id})
+        self.assertEqual(
+            profile_id_response.data["results"][0]["actor"], actor_profile.id
+        )
+
+        account_only_user = self.create_user()
+        while Profile.objects.filter(pk=account_only_user.id).exists():
+            account_only_user = self.create_user(
+                f"audit-account-only-{User.objects.count()}"
+            )
+        user_id_response = self.client.get(
+            self.audit_list_url(self.club), {"actor": account_only_user.id}
+        )
+        self.assertEqual(self.list_ids(user_id_response), set())
+
     def test_filter_by_date_date_from_and_date_to(self):
         date_response = self.client.get(
             self.audit_list_url(self.club),
@@ -560,8 +597,8 @@ class AuditFilterRegressionTests(AuditAPITestCase):
 class AuditQueryScalingTests(AuditAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("audit-query-admin")
-        self.actor = self.create_platform_admin("audit-query-actor").profile
+        self.platform_admin = self.create_platform_admin()
+        self.actor = self.create_platform_admin().profile
         self.club = self.create_club("Audit Query Club", slug="audit-query")
         self.court = self.create_court(self.club, "Audit Query Court")
         self.client.force_authenticate(user=self.platform_admin)
@@ -588,13 +625,13 @@ class AuditQueryScalingTests(AuditAPITestCase):
 class AuditBusinessLoggingTests(AuditAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("audit-business-admin")
+        self.platform_admin = self.create_platform_admin()
         self.club = self.create_club("Audit Business Club", slug="audit-business")
         self.court = self.create_court(self.club, "Audit Business Court")
         self.create_working_hour_price_period(
             self.court, CourtWorkingHour.Weekday.FRIDAY
         )
-        self.staff = self.create_user("audit-business-staff")
+        self.staff = self.create_user()
         grant_staff_court(self.staff, self.court)
         self.client.force_authenticate(user=self.platform_admin)
 
@@ -757,7 +794,7 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             status=Booking.Status.CONFIRMED,
         )
         transaction_obj = self.create_transaction(
-            booking, created_by=self.platform_admin
+            booking, created_by=self.platform_admin.profile
         )
         response = self.client.post(
             self.transaction_cancel_url(self.club, transaction_obj),
@@ -794,14 +831,14 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             booking,
             amount=Decimal("80.00"),
             payment_reference="AUDIT-SETTLEMENT-1",
-            created_by=self.staff,
+            created_by=self.staff.profile,
         )
         Transaction.objects.filter(pk=transaction_obj.pk).update(
             created=self.time_at(22)
         )
         create_response = self.client.post(
             self.settlement_list_url(self.club),
-            {"user": self.staff.id},
+            {"collected_by": self.staff.profile.id},
             format="json",
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
@@ -811,7 +848,9 @@ class AuditBusinessLoggingTests(AuditAPITestCase):
             entity_type="Settlement",
             entity_id=settlement.id,
         )
-        self.assertEqual(create_log.after_data["settled_by_id"], self.platform_admin.id)
+        self.assertEqual(
+            create_log.after_data["settled_by_id"], self.platform_admin.profile.id
+        )
         self.assertEqual(create_log.after_data["transaction_count"], 1)
 
 
@@ -863,7 +902,7 @@ class AuditSeedSchemaTests(AuditAPITestCase):
 class AuditBookingPhoneSearchTests(AuditAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("audit-phone-admin")
+        self.platform_admin = self.create_platform_admin()
         self.club = self.create_club("Audit Phone Club", slug="audit-phone")
         self.other_club = self.create_club("Other Phone Club", slug="other-phone")
         self.court = self.create_court(self.club, "Audit Phone Court")

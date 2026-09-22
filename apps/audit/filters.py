@@ -24,7 +24,10 @@ class AuditLogFilter(django_filters.FilterSet):
     action = django_filters.ChoiceFilter(choices=AuditLog.Action.choices)
     entity_type = django_filters.CharFilter(field_name="entity_type")
     entity_id = django_filters.NumberFilter(field_name="entity_id")
-    actor = django_filters.NumberFilter(field_name="actor_id")
+    actor = django_filters.NumberFilter(
+        field_name="actor_id",
+        help_text=_("Filter by the AuditLog actor Profile ID."),
+    )
     court = django_filters.NumberFilter(field_name="court_id")
     date = django_filters.DateFilter(method="filter_date")
     date_from = django_filters.IsoDateTimeFilter(

@@ -11,18 +11,13 @@ from apps.profiles.models import Profile
 def actor_display_name(actor: Optional[Profile]) -> str:
     if actor is None:
         return ""
-    user = getattr(actor, "user", None)
-    if user:
-        full_name = user.get_full_name().strip()
-        return full_name or user.username
-    return str(actor)
+    return actor.get_display_name()
 
 
-def user_display_name(user) -> str:
-    if user is None:
+def profile_display_name(profile: Optional[Profile]) -> str:
+    if profile is None:
         return ""
-    full_name = user.get_full_name().strip()
-    return full_name or user.username
+    return profile.get_display_name()
 
 
 def booking_audit_snapshot(booking):
@@ -61,7 +56,7 @@ def transaction_audit_snapshot(transaction_obj):
         "payment_reference": transaction_obj.payment_reference,
         "occurred_at": transaction_obj.occurred_at.isoformat(),
         "collector_id": transaction_obj.created_by_id,
-        "collector_name": user_display_name(collector),
+        "collector_name": profile_display_name(collector),
         "court_id": transaction_obj.court_id,
         "court_name": court.name,
     }
@@ -73,10 +68,8 @@ def settlement_audit_snapshot(settlement):
         "court_id": settlement.court_id,
         "court_name": settlement.court.name if settlement.court_id else "",
         "settled_by_id": settlement.settled_by_id,
-        "settled_by_name": user_display_name(settlement.settled_by),
-        "created_at": (
-            settlement.created_at.isoformat() if settlement.created_at else None
-        ),
+        "settled_by_name": profile_display_name(settlement.settled_by),
+        "created": (settlement.created.isoformat() if settlement.created else None),
         "period_start": (
             settlement.period_start.isoformat() if settlement.period_start else None
         ),

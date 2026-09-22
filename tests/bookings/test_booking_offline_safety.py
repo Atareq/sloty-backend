@@ -12,7 +12,6 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.accounts.models import User
 from apps.bookings.models import Booking
 from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
@@ -20,6 +19,7 @@ from apps.players.models import ClubPlayer, PlayerProfile
 from apps.profiles.models import Profile, StaffCourtAccess, StaffProfile
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking
+from tests.profile_factories import create_user
 
 
 class BookingOfflineSafetyTests(APITestCase):
@@ -49,8 +49,7 @@ class BookingOfflineSafetyTests(APITestCase):
                 ends_at=time(0, 0),
                 price=Decimal("200.00"),
             )
-        self.staff = User.objects.create_user(
-            username="offline-staff",
+        self.staff = create_user(
             password=self.password,
         )
         self.staff_profile = StaffProfile.objects.create(

@@ -75,9 +75,9 @@ apps/bookings/
 - **Audit & Offline Traceability:**
   - `client_request_id`: `UUIDField(null=True, blank=True, db_index=True)` — Idempotency key per club
   - `notes`: `TextField(blank=True)`
-  - Reasons: `cancellation_reason`, `no_show_reason`, `reschedule_reason`
+  - Lifecycle reason: `termination_reason`
   - Lifecycle Timestamps: `completed_at`, `cancelled_at`, `no_show_at`, `expired_at`, `created`, `modified`
-  - Actors: `created_by` (FK `User`), `last_status_changed_by` (FK `User`), `last_status_changed_by_type` (`INTERNAL_USER`, `SYSTEM`)
+  - Actors: `created_by` (FK `Profile`), `last_status_changed_by` (FK `Profile`), `last_status_changed_by_type` (`PROFILE`, `SYSTEM`)
 - **Model Constraints:**
   - Check constraints for recurrence integrity (`booking_recurring_source_requires_status`, `booking_non_recurring_status_null`, `booking_non_recurring_previous_null`)
   - Unique constraint: `UNIQUE(club, client_request_id)` where `client_request_id IS NOT NULL`
@@ -85,6 +85,7 @@ apps/bookings/
 #### `BookingAttempt` (`apps/bookings/models.py`)
 - Persistent audit ledger for offline requests, synchronization attempts, and conflict resolution.
 - Key fields: `club`, `court`, `attempted_by` (FK `User`), `booking` (nullable FK to `Booking`), `client_request_id`, `customer_name`, `customer_phone`, `requested_start`, `requested_end`, `requested_at`, `requested_source`, `requested_recurring`, `outcome` (`SUCCESS`, `REJECTED`), `failure_code`, `failure_details` (JSON), `resolution` (`UNRESOLVED`, `DISMISSED`, `RESOLVED`).
+- Key fields: `club`, `court`, `attempted_by` (FK `Profile`), `booking` (nullable FK to `Booking`), `client_request_id`, `customer_name`, `customer_phone`, `requested_start`, `requested_end`, `requested_at`, `requested_source`, `requested_recurring`, `outcome` (`SUCCESS`, `REJECTED`), `failure_code`, `failure_details` (JSON), `resolution` (`UNRESOLVED`, `DISMISSED`, `RESOLVED`).
 
 ### 1.3 Service Layer Functions (`apps/bookings/services.py`)
 
@@ -364,7 +365,7 @@ Payload: {
 | **Cancel** | `POST /bookings/{id}/cancel/` | `HOLD`, `CONFIRMED` | `CANCELLED` | Matrix: `cancel` | `Club + Court` | If Staff: requires `reason`. Calculates refund policy. Creates refund transaction if paid. Ends recurrence if active. |
 | **Cancellation Preview** | `POST /bookings/{id}/cancellation-preview/` | `HOLD`, `CONFIRMED` | Read-only | Missing from Matrix | `Club + Court` | Calculates refund preview without mutating state. |
 | **Complete** | `POST /bookings/{id}/complete/` | `CONFIRMED` | `COMPLETED` | Matrix: `complete` | `Club + Court` | **Requires `remaining_amount == 0`**. If `continue_recurring`: spawns next weekly occurrence atomically, marks current `RENEWED`. |
-| **No-Show** | `POST /bookings/{id}/no-show/` | `CONFIRMED` | `NO_SHOW` | Matrix: `no_show` | `Club + Court` | Records `no_show_at` and `no_show_reason`. Ends recurrence if active. Slot remains blocking. |
+| **No-Show** | `POST /bookings/{id}/no-show/` | `CONFIRMED` | `NO_SHOW` | Matrix: `no_show` | `Club + Court` | Records `no_show_at` and `termination_reason`. Ends recurrence if active. Slot remains blocking. |
 | **Reschedule** | `POST /bookings/{id}/reschedule/` | `HOLD`, `CONFIRMED` | `HOLD` / `CONFIRMED` | Matrix: `reschedule` | `Club + Target Court` | Non-recurring only. Overlap check on new slot. Recalculates price (updates `total_price` only if higher). |
 | **Expire** | `POST /bookings/{id}/expire/` | `HOLD` | `EXPIRED` | Matrix: `expire` | `Club + Court` | Validates hold is expired based on court policy or start time. Releases slot. |
 | **End Recurrence** | `POST /bookings/{id}/end-recurrence/` | Active recurring `HOLD` / `CONFIRMED` | No status change | Matrix: `end_recurrence` | `Club + Court` | Sets `recurrence_status = ENDED`. Frees future virtual weekly slots. |

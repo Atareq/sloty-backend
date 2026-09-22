@@ -2,6 +2,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from drf_spectacular.utils import extend_schema_field
+from phonenumber_field.serializerfields import PhoneNumberField
 from rest_framework import serializers, status
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.serializers import (
@@ -16,7 +17,7 @@ from apps.profiles.models import Profile
 
 
 def get_token_name(user):
-    return user.get_full_name() or user.username
+    return user.get_display_name()
 
 
 def get_profile_for_token_context(*, user, club):
@@ -90,6 +91,10 @@ def build_token_claims(*, user, club_slug=None):
 
 class SlotyTokenObtainPairSerializer(TokenObtainPairSerializer):
     club_slug = serializers.SlugField(required=False, allow_blank=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields[self.username_field] = PhoneNumberField()
 
     @classmethod
     def get_token(cls, user):
@@ -165,16 +170,16 @@ class UserMeSerializer(serializers.ModelSerializer):
     profile_role = serializers.CharField(
         source="profile.role", read_only=True, allow_null=True
     )
+    phone_number = PhoneNumberField(read_only=True)
 
     class Meta:
         model = User
         fields = (
             "id",
-            "username",
+            "phone_number",
             "email",
             "first_name",
             "last_name",
-            "phone_number",
             "is_active",
             "profile_role",
             "account_created_by",
@@ -203,16 +208,16 @@ class UserListSerializer(serializers.ModelSerializer):
     profile_role = serializers.CharField(
         source="profile.role", read_only=True, allow_null=True
     )
+    phone_number = PhoneNumberField(read_only=True)
 
     class Meta:
         model = User
         fields = (
             "id",
-            "username",
+            "phone_number",
             "email",
             "first_name",
             "last_name",
-            "phone_number",
             "is_active",
             "profile_role",
             "created_by",
@@ -222,22 +227,22 @@ class UserListSerializer(serializers.ModelSerializer):
 
 class UserCreateSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
+    phone_number = PhoneNumberField(required=True)
 
     class Meta:
         model = User
         fields = (
             "id",
-            "username",
+            "phone_number",
             "password",
             "email",
             "first_name",
             "last_name",
-            "phone_number",
             "is_active",
         )
         read_only_fields = ("id",)
         extra_kwargs = {
-            "username": {"required": True},
+            "email": {"required": True},
         }
 
     def validate(self, attrs):
@@ -274,6 +279,8 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
 
 class UserUpdateSerializer(serializers.ModelSerializer):
+    phone_number = PhoneNumberField(required=False)
+
     class Meta:
         model = User
         fields = (

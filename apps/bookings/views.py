@@ -12,11 +12,7 @@ from rest_framework.mixins import (
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
-from apps.bookings.filters import (
-    BookingAttemptFilter,
-    BookingFilter,
-    annotate_booking_hold_expires_at,
-)
+from apps.bookings.filters import BookingAttemptFilter, BookingFilter
 from apps.bookings.models import Booking, BookingAttempt
 from apps.bookings.serializers import (
     BookingAttemptDetailSerializer,
@@ -105,9 +101,7 @@ class BookingViewSet(
         super().initial(request, *args, **kwargs)
 
     def filter_scoped_queryset(self, queryset):
-        return annotate_booking_hold_expires_at(
-            annotate_booking_paid_amount(queryset)
-        ).order_by("start_time", "id")
+        return annotate_booking_paid_amount(queryset).order_by("start_time", "id")
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -173,6 +167,14 @@ class BookingViewSet(
         tags=["Bookings"],
         parameters=[BookingSlotQuerySerializer],
         responses=BookingSlotsResponseSerializer,
+        description=(
+            "Returns backend-generated availability. Clients should render "
+            "available (and may read its is_available compatibility alias) "
+            "and use the timezone-aware ISO-8601 slot "
+            "start_time/end_time values as returned. A HOLD blocks only while "
+            "hold_expires_at is in the future; working-hours changes affect "
+            "future generated slots and do not hide existing bookings."
+        ),
     )
     @action(detail=False, methods=["get"])
     def slots(self, request, *args, **kwargs):

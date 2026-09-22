@@ -1,46 +1,32 @@
 from datetime import datetime, time, timedelta
 
 import django_filters
-from django.db.models import (
-    DateTimeField,
-    DurationField,
-    ExpressionWrapper,
-    F,
-    IntegerField,
-    Q,
-    Value,
-)
-from django.db.models.functions import Cast, Least
+from django import forms
+from django.core.exceptions import ValidationError
+from django.db.models import F, Q
 from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
 
 from apps.bookings.identity import booking_identity_search_q
 from apps.bookings.models import Booking, BookingAttempt
 
 
-def compute_booking_hold_expires_at(booking):
-    policy_expires_at = booking.created + timedelta(
-        hours=booking.court.internal_hold_expiry_hours
-    )
-    return min(policy_expires_at, booking.start_time)
+def logically_expired_hold_q(*, now=None):
+    """Match stored HOLD snapshots that are expired or have no deadline."""
+    now = now or timezone.now()
+    return Q(
+        status=Booking.Status.HOLD,
+    ) & (Q(hold_expires_at__isnull=True) | Q(hold_expires_at__lte=now))
 
 
-def annotate_booking_hold_expires_at(queryset):
-    hold_expiry_duration = ExpressionWrapper(
-        Cast("court__internal_hold_expiry_hours", IntegerField())
-        * Value(timedelta(hours=1)),
-        output_field=DurationField(),
-    )
-    policy_expires_at = ExpressionWrapper(
-        F("created") + hold_expiry_duration,
-        output_field=DateTimeField(),
-    )
-    return queryset.annotate(
-        hold_expires_at=Least(
-            policy_expires_at,
-            F("start_time"),
-            output_field=DateTimeField(),
-        )
-    )
+def exclude_logically_expired_holds(queryset, *, now=None):
+    """Omit HOLD rows that are still stored as HOLD but no longer occupy a slot.
+
+    Occupancy, overlap, availability, calendar, and utilization use this
+    check. Persisted ``EXPIRED`` is written later by ``expire_hold_bookings``.
+    """
+    now = now or timezone.now()
+    return queryset.exclude(logically_expired_hold_q(now=now))
 
 
 def booking_needs_action_q(*, now, include_expired=False):
@@ -66,7 +52,7 @@ def booking_needs_action_q(*, now, include_expired=False):
 
 def day_bounds(date_value):
     start = datetime.combine(date_value, time.min)
-    end = datetime.combine(date_value, time.max)
+    end = datetime.combine(date_value + timedelta(days=1), time.min)
     current_timezone = timezone.get_current_timezone()
     return (
         timezone.make_aware(start, current_timezone),
@@ -74,13 +60,69 @@ def day_bounds(date_value):
     )
 
 
+def parse_range_bound(value, *, is_end=False):
+    """Parse list ``date_from`` / ``date_to`` like slot calendar days.
+
+    ``YYYY-MM-DD`` is a local calendar day: ``date_from`` is that midnight,
+    ``date_to`` is the next midnight so the last day is inclusive. ISO
+    datetimes keep an exact instant and are not shifted to now.
+    """
+    raw_value = str(value).strip()
+    parsed_date = parse_date(raw_value)
+    if parsed_date is not None and "T" not in raw_value and " " not in raw_value:
+        start, end = day_bounds(parsed_date)
+        return end if is_end else start
+    parsed_datetime = parse_datetime(raw_value)
+    if parsed_datetime is not None:
+        if timezone.is_naive(parsed_datetime):
+            parsed_datetime = timezone.make_aware(
+                parsed_datetime, timezone.get_current_timezone()
+            )
+        return parsed_datetime
+    raise ValidationError("Enter a valid ISO datetime or YYYY-MM-DD date.")
+
+
+class DateOrAwareDateTimeField(forms.CharField):
+    default_error_messages = {
+        "invalid": "Enter a valid ISO datetime or YYYY-MM-DD date.",
+    }
+
+    def __init__(self, *args, is_end=False, **kwargs):
+        self.is_end = is_end
+        super().__init__(*args, **kwargs)
+
+    def to_python(self, value):
+        value = super().to_python(value)
+        if value in self.empty_values:
+            return None
+        try:
+            return parse_range_bound(value, is_end=self.is_end)
+        except ValidationError as exc:
+            raise ValidationError(exc.messages, code="invalid")
+
+
+class DateOrAwareDateTimeFilter(django_filters.Filter):
+    field_class = DateOrAwareDateTimeField
+
+
 class BookingFilter(django_filters.FilterSet):
     court = django_filters.NumberFilter(field_name="court_id")
     status = django_filters.ChoiceFilter(choices=Booking.Status.choices)
     source = django_filters.ChoiceFilter(choices=Booking.Source.choices)
     date = django_filters.DateFilter(method="filter_date")
-    date_from = django_filters.IsoDateTimeFilter(method="filter_date_from")
-    date_to = django_filters.IsoDateTimeFilter(method="filter_date_to")
+    date_from = DateOrAwareDateTimeFilter(
+        method="filter_date_from",
+        is_end=False,
+        help_text=(
+            "Range start as YYYY-MM-DD (local midnight) or an ISO datetime. "
+            "Not clamped to now; past ranges return past bookings."
+        ),
+    )
+    date_to = DateOrAwareDateTimeFilter(
+        method="filter_date_to",
+        is_end=True,
+        help_text=("Range end as YYYY-MM-DD (inclusive local day) or an ISO datetime."),
+    )
     needs_action = django_filters.BooleanFilter(method="filter_needs_action")
     overdue = django_filters.BooleanFilter(method="filter_overdue")
     remaining_amount_gt = django_filters.NumberFilter(
@@ -112,7 +154,8 @@ class BookingFilter(django_filters.FilterSet):
         method="filter_upcoming",
         help_text=(
             "true returns HOLD and CONFIRMED bookings whose end_time is still "
-            "in the future, including in-progress bookings."
+            "in the future, including in-progress bookings. HOLD rows whose "
+            "stored hold_expires_at deadline has passed are omitted."
         ),
     )
     ordering = django_filters.ChoiceFilter(
@@ -160,9 +203,6 @@ class BookingFilter(django_filters.FilterSet):
     def filter_date_to(self, queryset, name, value):
         return queryset.filter(start_time__lt=value)
 
-    def with_hold_expiry(self, queryset):
-        return annotate_booking_hold_expires_at(queryset)
-
     def expiring_hold_query(self):
         now = timezone.now()
         warning_end = now + timedelta(minutes=30)
@@ -181,7 +221,6 @@ class BookingFilter(django_filters.FilterSet):
     def filter_needs_action(self, queryset, name, value):
         if not value:
             return queryset
-        queryset = self.with_hold_expiry(queryset)
         return queryset.filter(
             booking_needs_action_q(
                 now=timezone.now(),
@@ -217,7 +256,7 @@ class BookingFilter(django_filters.FilterSet):
     def filter_hold_expiring(self, queryset, name, value):
         if not value:
             return queryset
-        return self.with_hold_expiry(queryset).filter(self.expiring_hold_query())
+        return queryset.filter(self.expiring_hold_query())
 
     def filter_search(self, queryset, name, value):
         cleaned = (value or "").strip()
@@ -230,7 +269,7 @@ class BookingFilter(django_filters.FilterSet):
     def filter_upcoming(self, queryset, name, value):
         if not value:
             return queryset
-        return queryset.filter(
+        return exclude_logically_expired_holds(queryset).filter(
             status__in={Booking.Status.HOLD, Booking.Status.CONFIRMED},
             end_time__gt=timezone.now(),
         )
@@ -251,14 +290,28 @@ class BookingAttemptFilter(django_filters.FilterSet):
     )
 
     court = django_filters.NumberFilter(field_name="court_id")
-    attempted_by = django_filters.NumberFilter(field_name="attempted_by_id")
+    attempted_by = django_filters.NumberFilter(
+        field_name="attempted_by_id",
+        help_text="Filter by the BookingAttempt actor Profile ID.",
+    )
     outcome = django_filters.ChoiceFilter(choices=BookingAttempt.Outcome.choices)
     resolution = django_filters.ChoiceFilter(choices=BookingAttempt.Resolution.choices)
     requested_source = django_filters.ChoiceFilter(choices=Booking.Source.choices)
     status = django_filters.ChoiceFilter(choices=STATUS_CHOICES, method="filter_status")
     date = django_filters.DateFilter(method="filter_date")
-    date_from = django_filters.IsoDateTimeFilter(method="filter_date_from")
-    date_to = django_filters.IsoDateTimeFilter(method="filter_date_to")
+    date_from = DateOrAwareDateTimeFilter(
+        method="filter_date_from",
+        is_end=False,
+        help_text=(
+            "Range start as YYYY-MM-DD (local midnight) or an ISO datetime. "
+            "Not clamped to now; past ranges return past attempts."
+        ),
+    )
+    date_to = DateOrAwareDateTimeFilter(
+        method="filter_date_to",
+        is_end=True,
+        help_text=("Range end as YYYY-MM-DD (inclusive local day) or an ISO datetime."),
+    )
 
     class Meta:
         model = BookingAttempt

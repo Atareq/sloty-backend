@@ -1,0 +1,16 @@
+[Unit]
+Description=Sloty HOLD booking expiry cleanup
+After=network.target
+
+[Service]
+Type=oneshot
+User=sloty
+Group=sloty
+WorkingDirectory=/srv/sloty/backend
+EnvironmentFile=/etc/sloty/env/prod.env
+Environment=DJANGO_SETTINGS_MODULE=config.settings.production
+ExecStart=/srv/sloty/backend/.venv/bin/python /srv/sloty/backend/manage.py expire_hold_bookings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

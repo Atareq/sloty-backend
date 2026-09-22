@@ -47,7 +47,7 @@ class AuditLogPresentationMixin:
                 "settled_by_name",
                 "total_amount",
                 "transaction_count",
-                "created_at",
+                "created",
             )
         else:
             keys = ()
@@ -101,15 +101,17 @@ class AuditLogPresentationMixin:
         if relation_name == "actor":
             user = getattr(related_obj, "user", None)
             if user:
-                full_name = user.get_full_name().strip()
-                return full_name or user.username, CURRENT_RELATION_FALLBACK
+                return user.get_display_name(), CURRENT_RELATION_FALLBACK
             return str(related_obj), CURRENT_RELATION_FALLBACK
         return related_obj.name, CURRENT_RELATION_FALLBACK
 
 
 class AuditLogListSerializer(AuditLogPresentationMixin, serializers.ModelSerializer):
     action_label = serializers.SerializerMethodField()
-    actor = serializers.PrimaryKeyRelatedField(read_only=True)
+    actor = serializers.PrimaryKeyRelatedField(
+        read_only=True,
+        help_text="Profile ID of the business actor; null for system events.",
+    )
     actor_name = serializers.SerializerMethodField()
     actor_name_source = serializers.SerializerMethodField()
     court_name = serializers.SerializerMethodField()
@@ -138,7 +140,10 @@ class AuditLogListSerializer(AuditLogPresentationMixin, serializers.ModelSeriali
 
 class AuditLogDetailSerializer(AuditLogPresentationMixin, serializers.ModelSerializer):
     action_label = serializers.SerializerMethodField()
-    actor = serializers.PrimaryKeyRelatedField(read_only=True)
+    actor = serializers.PrimaryKeyRelatedField(
+        read_only=True,
+        help_text="Profile ID of the business actor; null for system events.",
+    )
     actor_name = serializers.SerializerMethodField()
     actor_name_source = serializers.SerializerMethodField()
     court_name = serializers.SerializerMethodField()

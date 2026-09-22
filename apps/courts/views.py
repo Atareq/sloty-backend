@@ -98,17 +98,27 @@ class CourtViewSet(
 
 
 @extend_schema_view(
-    list=extend_schema(tags=["Courts"], responses=CourtWorkingHourSerializer),
+    list=extend_schema(
+        tags=["Courts"],
+        responses=CourtWorkingHourSerializer,
+        deprecated=True,
+    ),
     create=extend_schema(
         tags=["Courts"],
         request=CourtWorkingHourSerializer,
         responses=CourtWorkingHourSerializer,
+        deprecated=True,
     ),
-    retrieve=extend_schema(tags=["Courts"], responses=CourtWorkingHourSerializer),
+    retrieve=extend_schema(
+        tags=["Courts"],
+        responses=CourtWorkingHourSerializer,
+        deprecated=True,
+    ),
     partial_update=extend_schema(
         tags=["Courts"],
         request=CourtWorkingHourSerializer,
         responses=CourtWorkingHourSerializer,
+        deprecated=True,
     ),
 )
 class CourtWorkingHourViewSet(
