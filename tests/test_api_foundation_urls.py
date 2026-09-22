@@ -3,12 +3,12 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.accounts.models import User
 from apps.accounts.views import (
     PasswordChangeAPIView,
     SlotyTokenObtainPairView,
     SlotyTokenRefreshView,
 )
+from tests.profile_factories import create_user
 
 
 class ApiFoundationUrlTests(APITestCase):
@@ -23,7 +23,7 @@ class ApiFoundationUrlTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_authenticated_schema_url_returns_200(self):
-        user = User.objects.create_user(username="schema-user", password="pass-123")
+        user = create_user(password="pass-123")
         self.client.force_authenticate(user=user)
 
         response = self.client.get(reverse("schema"))
@@ -31,7 +31,7 @@ class ApiFoundationUrlTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_authenticated_swagger_url_returns_200(self):
-        user = User.objects.create_user(username="docs-user", password="pass-123")
+        user = create_user(password="pass-123")
         self.client.force_authenticate(user=user)
 
         response = self.client.get(reverse("swagger-ui"))

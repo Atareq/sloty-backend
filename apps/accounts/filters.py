@@ -10,7 +10,7 @@ from apps.profiles.models import Profile
 class UserFilter(django_filters.FilterSet):
     search = django_filters.CharFilter(
         method="filter_search",
-        help_text=_("Search users by username, name, email, or phone number."),
+        help_text=_("Search users by name, email, or phone number."),
     )
     is_active = django_filters.BooleanFilter(
         field_name="is_active",
@@ -35,8 +35,7 @@ class UserFilter(django_filters.FilterSet):
         if not cleaned:
             return queryset
         return queryset.filter(
-            Q(username__icontains=cleaned)
-            | Q(first_name__icontains=cleaned)
+            Q(first_name__icontains=cleaned)
             | Q(last_name__icontains=cleaned)
             | Q(email__icontains=cleaned)
             | Q(phone_number__icontains=cleaned)

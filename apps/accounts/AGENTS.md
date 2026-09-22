@@ -28,7 +28,9 @@ User                          ← this app (authentication identity)
 ## Important Models & Fields
 
 - [`User`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/models.py):
-  - `phone_number`: Standardized phone number field via `phonenumber_field` (optional on `User`; **not** the player identity key — that is `PlayerProfile.phone_number` UNIQUE).
+  - `phone_number`: required unique authentication identifier (`USERNAME_FIELD`), stored as E.164 via `django-phonenumber-field` with default region `EG`.
+  - `email`: required account contact field; not a login identifier.
+  - There is no `username` field.
   - No `role`, `created_by`, or platform-admin helper lives on `User`; read the linked enabled Profile for authorization facts.
   - Standard Django `is_staff` / `is_superuser` are not exposed in read responses or accepted in user creation payloads.
 
@@ -43,7 +45,7 @@ User                          ← this app (authentication identity)
 
 Authentication answers **only** “Who are you?”. It must not decide club/court/resource access.
 
-- `/api/v1/auth/token/`: JWT token obtain endpoint (`SlotyTokenObtainPairView`). Accepts optional `club_slug` to return **convenience** JWT claims (`role`, `club_id`, `court_id`).
+- `/api/v1/auth/token/`: JWT token obtain endpoint (`SlotyTokenObtainPairView`). Accepts `phone_number` + `password` and optional `club_slug` to return **convenience** JWT claims (`role`, `club_id`, `court_id`).
 - `/api/v1/auth/token/refresh/`: JWT token refresh endpoint. It rechecks the current user record before issuing access, so inactive, deleted, and password-changed accounts cannot refresh.
 - `/api/v1/auth/password/change/`: authenticated own-password endpoint. It accepts `current_password`, `new_password`, and `new_password_confirmation`, applies Django validators, and returns `204 No Content`.
 - Auth failure codes: expired access tokens raise `SESSION_EXPIRED`; malformed/expired refresh tokens use `TOKEN_NOT_VALID`; inactive accounts return `USER_INACTIVE`; deleted accounts return `USER_DELETED`; password-hash mismatches return `PASSWORD_CHANGED`.
@@ -60,6 +62,7 @@ Frontend must never treat “JWT contains `club_id`” as proof of access.
 - Tokens include SimpleJWT's signed password-hash digest and are revalidated against the current database password hash. A password change immediately invalidates previously issued access and refresh tokens; clients must sign in again.
 - The strict initial rollout also rejects claim-less tokens issued before this setting was enabled.
 - No admin can change another account's password through this endpoint. Password reset (email/SMS/OTP) is a future product phase and is not implemented.
+- Login credentials are `phone_number` + password. Email is required account information, not a login identifier. There is no username.
 - Login retains the generic credential failure response for unknown, incorrect-password, and inactive accounts to avoid account enumeration.
 
 ### Current Authenticated Profile
@@ -102,3 +105,9 @@ application-role value; access checks additionally require `is_enabled`.
 Create a concrete Profile child directly. User and profile creation is atomic,
 with creator provenance stored on `Profile.created_by` when applicable.
 Use `select_related("profile")`, not a plural profile prefetch.
+
+`seed_demo_data` keeps authentication accounts separate from business actors:
+the default hierarchy is `AdminProfile` → `OwnerProfile` → `StaffProfile`,
+with creator provenance on the Profile rows. Clubs, courts, bookings,
+transactions, settlements, and audit logs receive explicit Profile actors.
+The command remains idempotent across reruns.

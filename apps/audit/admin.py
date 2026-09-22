@@ -19,10 +19,7 @@ class AuditLogAdmin(admin.ModelAdmin):
     search_fields = (
         "club__name",
         "club__slug",
-        "actor__username",
-        "actor__first_name",
-        "actor__last_name",
-        "actor__user__username",
+        "actor__user__phone_number",
         "actor__user__first_name",
         "actor__user__last_name",
         "entity_type",

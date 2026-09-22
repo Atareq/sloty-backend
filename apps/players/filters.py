@@ -49,13 +49,13 @@ class ClubPlayerOrderingFilter(OrderingFilter):
     """
     Ordering filter for the ClubPlayer list endpoint.
 
-    Supports ordering by last_used_at (latest booking recency) and created_at
+    Supports ordering by last_used_at (latest booking recency) and created
     (authoritative player profile creation timestamp), with nulls sorted last
     for descending last_used_at.
     """
 
     ordering_param = "order_by"
-    ordering_fields = ("last_used_at", "created_at")
+    ordering_fields = ("last_used_at", "created")
 
     def get_ordering(self, request, queryset, view):
         params = request.query_params.get(
@@ -77,10 +77,10 @@ class ClubPlayerOrderingFilter(OrderingFilter):
                     order_expressions.append(F("last_used_at").desc(nulls_last=True))
                 elif term == "last_used_at":
                     order_expressions.append(F("last_used_at").asc(nulls_last=True))
-                elif term == "-created_at":
-                    order_expressions.append(F("player_profile__created_at").desc())
-                elif term == "created_at":
-                    order_expressions.append(F("player_profile__created_at").asc())
+                elif term == "-created":
+                    order_expressions.append(F("player_profile__created").desc())
+                elif term == "created":
+                    order_expressions.append(F("player_profile__created").asc())
                 else:
                     order_expressions.append(term)
             if "id" not in ordering and "-id" not in ordering:

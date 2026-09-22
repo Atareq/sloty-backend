@@ -2,10 +2,11 @@ from django.db import models
 from django.utils.translation import gettext_lazy as _
 
 from apps.clubs.models import Club
+from apps.common.models import SlotyCreatedModel
 from apps.courts.models import Court
 
 
-class AuditLog(models.Model):
+class AuditLog(SlotyCreatedModel):
     class Action(models.TextChoices):
         BOOKING_CREATED = "BOOKING_CREATED", _("Booking created")
         BOOKING_UPDATED = "BOOKING_UPDATED", _("Booking updated")
@@ -47,7 +48,6 @@ class AuditLog(models.Model):
     before_data = models.JSONField(blank=True, default=dict)
     after_data = models.JSONField(blank=True, default=dict)
     metadata = models.JSONField(blank=True, default=dict)
-    created = models.DateTimeField(auto_now_add=True, db_index=True)
 
     # Authorization Spine v2 resource-query contract
     # (apps/common/authorization/contracts.py). Audit is a club-scoped read
@@ -60,6 +60,7 @@ class AuditLog(models.Model):
             "club": {"path": "club"},
         },
         "default_scope": "club",
+        "select_related": ("club", "court", "actor"),
         "select_related": ("club", "court", "actor"),
         "prefetch_related": (),
     }

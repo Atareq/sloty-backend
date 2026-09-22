@@ -5,6 +5,8 @@ from decimal import Decimal
 from django.utils import timezone
 from django.utils.translation import pgettext
 
+from apps.bookings.filters import exclude_logically_expired_holds
+from apps.common.weekdays import to_sloty_weekday
 from apps.courts.pricing import datetime_for_local_date, working_hour_bounds
 from apps.reports.authorization import scoped_report_bookings, scoped_report_courts
 from apps.reports.constants import (
@@ -51,10 +53,13 @@ def empty_metrics():
     }
 
 
-def user_name(user):
+def profile_display_name(profile):
+    if profile is None:
+        return pgettext("reports missing staff", "Unknown")
+    user = profile.user
     if user is None:
         return pgettext("reports missing staff", "Unknown")
-    return user.get_full_name() or user.username
+    return user.get_display_name()
 
 
 def aware_combine(date_value, time_value, *, is_end=False):
@@ -174,7 +179,7 @@ def get_court_usage_report(*, access, query):
         for date_value in daterange(query["date_from"], query["date_to"]):
             window = period_window_for_working_hours(
                 date_value,
-                working_hours.get((court.id, date_value.weekday())),
+                working_hours.get((court.id, to_sloty_weekday(date_value.weekday()))),
                 query["period"],
                 query.get("hour_from"),
                 query.get("hour_to"),
@@ -204,15 +209,16 @@ def get_court_usage_report(*, access, query):
                 bucket_start = bucket_end
 
     queryset = annotate_booking_paid_amount(
-        scoped_report_bookings(access)
-        .filter(
-            court_id__in=court_ids,
-            status__in=query["included_statuses"],
-            start_time__lt=query["range_end"],
-            end_time__gt=query["range_start"],
-        )
-        .select_related("court", "created_by")
-        .order_by("start_time", "id")
+        exclude_logically_expired_holds(
+            scoped_report_bookings(access)
+            .filter(
+                court_id__in=court_ids,
+                status__in=query["included_statuses"],
+                start_time__lt=query["range_end"],
+                end_time__gt=query["range_start"],
+            )
+            .select_related("court", "created_by", "created_by__user")
+        ).order_by("start_time", "id")
     )
     if query.get("staff") is not None:
         queryset = queryset.filter(created_by=query["staff"])
@@ -247,7 +253,9 @@ def get_court_usage_report(*, access, query):
             for period_name in (PERIOD_DAYTIME, PERIOD_EVENING):
                 period_window = period_window_for_working_hours(
                     date_value,
-                    working_hours.get((court_id, date_value.weekday())),
+                    working_hours.get(
+                        (court_id, to_sloty_weekday(date_value.weekday()))
+                    ),
                     period_name,
                     None,
                     None,
@@ -308,7 +316,9 @@ def get_court_usage_report(*, access, query):
                 for period_name in target_periods:
                     period_window = period_window_for_working_hours(
                         current_date,
-                        working_hours.get((booking.court_id, current_date.weekday())),
+                        working_hours.get(
+                            (booking.court_id, to_sloty_weekday(current_date.weekday()))
+                        ),
                         period_name,
                         query.get("hour_from"),
                         query.get("hour_to"),
@@ -362,7 +372,7 @@ def get_court_usage_report(*, access, query):
             "hour_from": query.get("hour_from"),
             "hour_to": query.get("hour_to"),
             "staff": staff.id if staff else None,
-            "staff_name": user_name(staff) if staff else None,
+            "staff_name": profile_display_name(staff) if staff else None,
             "status": query.get("status"),
             "included_statuses": list(query["included_statuses"]),
             "demand_bucket_minutes": DEMAND_BUCKET_MINUTES,
@@ -398,7 +408,7 @@ def get_court_usage_report(*, access, query):
         "staff_booking_activity": [
             {
                 "staff": staff_id,
-                "staff_name": user_name(
+                "staff_name": profile_display_name(
                     next(
                         (
                             booking.created_by

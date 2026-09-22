@@ -1,5 +1,6 @@
 from datetime import time
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.db import connection
 from django.test import override_settings
@@ -29,11 +30,11 @@ class CourtUsageReportAPITestCase(APITestCase):
     password = "test-pass-123"
 
     def setUp(self):
-        self.admin = self.create_user("report-admin")
-        self.owner = self.create_user("report-owner")
-        self.staff = self.create_user("report-staff")
-        self.no_membership = self.create_user("report-outsider")
-        self.other_staff = self.create_user("other-report-staff")
+        self.admin = self.create_user()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.no_membership = self.create_user()
+        self.other_staff = self.create_user()
         self.club = self.create_club("Report Club", "report-club")
         self.other_club = self.create_club("Other Report Club", "other-report-club")
         self.court = self.create_court(self.club, "Court A")
@@ -57,7 +58,7 @@ class CourtUsageReportAPITestCase(APITestCase):
             status=Booking.Status.CONFIRMED,
             start_time=self.time_at(8, 30),
             end_time=self.time_at(9, 30),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             total_price=Decimal("300.00"),
         )
         self.completed = self.create_booking(
@@ -65,7 +66,7 @@ class CourtUsageReportAPITestCase(APITestCase):
             status=Booking.Status.COMPLETED,
             start_time=self.time_at(10),
             end_time=self.time_at(11),
-            created_by=self.owner,
+            created_by=self.owner.profile,
             total_price=Decimal("400.00"),
         )
         self.no_show = self.create_booking(
@@ -73,7 +74,7 @@ class CourtUsageReportAPITestCase(APITestCase):
             status=Booking.Status.NO_SHOW,
             start_time=self.time_at(18),
             end_time=self.time_at(19),
-            created_by=self.owner,
+            created_by=self.owner.profile,
             total_price=Decimal("500.00"),
         )
         self.hold = self.create_booking(
@@ -81,15 +82,20 @@ class CourtUsageReportAPITestCase(APITestCase):
             status=Booking.Status.HOLD,
             start_time=self.time_at(11),
             end_time=self.time_at(12),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             total_price=Decimal("200.00"),
         )
+        # ORM insert time is "now", so persist_booking snapshots a future
+        # deadline. Pin it to the report day so the HOLD is expired at real
+        # now and still active when tests freeze time to that morning.
+        Booking.objects.filter(pk=self.hold.pk).update(hold_expires_at=self.time_at(21))
+        self.hold.refresh_from_db()
         self.cancelled = self.create_booking(
             self.court,
             status=Booking.Status.CANCELLED,
             start_time=self.time_at(9),
             end_time=self.time_at(10),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             total_price=Decimal("999.00"),
         )
         self.cross_booking = self.create_booking(
@@ -121,12 +127,11 @@ class CourtUsageReportAPITestCase(APITestCase):
             created=self.time_at(day=6),
         )
 
-    def create_user(self, username, **extra_fields):
-        return User.objects.create_user(
-            username=username,
-            password=self.password,
-            **extra_fields,
-        )
+    def create_user(self, phone_number=None, **extra_fields) -> User:
+        extra_fields.setdefault("password", getattr(self, "password", "test-pass-123"))
+        from tests.profile_factories import create_user as factory_create_user
+
+        return factory_create_user(phone_number=phone_number, **extra_fields)
 
     def create_club(self, name, slug):
         return Club.objects.create(
@@ -266,17 +271,63 @@ class CourtUsageReportTests(CourtUsageReportAPITestCase):
                 period="custom",
                 hour_from="09:00",
                 hour_to="10:00",
-                staff=self.staff.id,
+                staff=self.staff.profile.id,
             ),
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["context"]["court"], self.court.id)
-        self.assertEqual(response.data["context"]["staff"], self.staff.id)
+        self.assertEqual(response.data["context"]["staff"], self.staff.profile.id)
         self.assertEqual(response.data["summary"]["booking_count"], 1)
         self.assertEqual(response.data["summary"]["occupied_minutes"], 30)
         self.assertEqual(response.data["summary"]["available_minutes"], 60)
         self.assertEqual(response.data["usage_by_period"][0]["period"], "custom")
+
+    def test_staff_filter_and_activity_use_profile_id_not_user_id(self):
+        extra = 0
+        while True:
+            extra += 1
+            staff_user = self.create_user()
+            staff_profile = self.create_profile_scope(
+                staff_user,
+                Profile.Role.STAFF,
+                club=self.club,
+            )
+            if staff_profile.id != staff_user.id:
+                break
+            self.create_user()
+            if extra > 50:
+                self.fail(
+                    "Could not create a staff actor whose Profile.id "
+                    "differs from User.id."
+                )
+        self.assertNotEqual(staff_profile.id, staff_user.id)
+        Booking.objects.filter(pk=self.confirmed.pk).update(created_by=staff_profile)
+
+        self.client.force_authenticate(user=self.owner)
+        profile_id_response = self.client.get(
+            self.url(), self.params(staff=staff_profile.id)
+        )
+        self.assertEqual(profile_id_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(profile_id_response.data["context"]["staff"], staff_profile.id)
+        self.assertEqual(
+            profile_id_response.data["staff_booking_activity"][0]["staff"],
+            staff_profile.id,
+        )
+        self.assertEqual(
+            profile_id_response.data["staff_booking_activity"][0]["staff_name"],
+            staff_user.get_display_name(),
+        )
+
+        account_only_user = self.create_user()
+        while Profile.objects.filter(pk=account_only_user.id).exists():
+            account_only_user = self.create_user(
+                f"report-account-only-{User.objects.count()}"
+            )
+        user_id_response = self.client.get(
+            self.url(), self.params(staff=account_only_user.id)
+        )
+        self.assertEqual(user_id_response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_hold_can_be_inspected_explicitly_and_cancelled_expired_rejected(self):
         self.client.force_authenticate(user=self.owner)
@@ -292,7 +343,9 @@ class CourtUsageReportTests(CourtUsageReportAPITestCase):
         )
 
         self.assertEqual(hold_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(hold_response.data["summary"]["booking_count"], 1)
+        self.assertEqual(hold_response.data["summary"]["booking_count"], 0)
+        self.assertEqual(hold_response.data["summary"]["occupied_minutes"], 0)
+        self.assertEqual(self.hold.status, Booking.Status.HOLD)
         self.assertEqual(cancelled_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(
             self.field_error_code(cancelled_response, "status"),
@@ -303,6 +356,16 @@ class CourtUsageReportTests(CourtUsageReportAPITestCase):
             self.field_error_code(expired_response, "status"),
             "INVALID_COURT_USAGE_STATUS",
         )
+
+    def test_active_hold_occupies_when_status_requested(self):
+        self.client.force_authenticate(user=self.owner)
+        with patch("django.utils.timezone.now", return_value=self.time_at(7)):
+            response = self.client.get(self.url(), self.params(status="HOLD"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["summary"]["booking_count"], 1)
+        self.assertEqual(response.data["summary"]["occupied_minutes"], 60)
+        self.hold.refresh_from_db()
+        self.assertEqual(self.hold.status, Booking.Status.HOLD)
 
     def test_low_demand_includes_zero_demand_working_hour_bucket(self):
         self.client.force_authenticate(user=self.owner)
@@ -422,7 +485,7 @@ class CourtUsageReportTests(CourtUsageReportAPITestCase):
         )
         invalid_staff = self.client.get(
             self.url(),
-            self.params(staff=self.other_staff.id),
+            self.params(staff=self.other_staff.profile.id),
         )
 
         self.assertEqual(invalid_range.status_code, status.HTTP_400_BAD_REQUEST)

@@ -28,13 +28,10 @@ class RequestAccessContext:
             raise ValueError("RequestAccessContext requires the current Profile.")
 
     @property
-    def user(self) -> Any:
-        return self.profile.user
-
-    @property
     def role(self) -> str:
         return self.profile.role
 
     @property
     def is_authenticated(self) -> bool:
-        return bool(self.user and getattr(self.user, "is_authenticated", False))
+        user = getattr(self.profile, "user", None)
+        return bool(user and getattr(user, "is_authenticated", False))

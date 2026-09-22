@@ -21,7 +21,7 @@ from django.db import IntegrityError, close_old_connections
 from django.test import TransactionTestCase
 from django.utils import timezone
 
-from apps.accounts.models import User
+from apps.bookings.identity import resolve_club_player
 from apps.bookings.models import Booking, BookingAttempt
 from apps.bookings.services import (
     cancel_booking,
@@ -41,6 +41,7 @@ from apps.profiles.models import AdminProfile, Profile, StaffCourtAccess, StaffP
 from apps.settlements.services import create as create_settlement
 from apps.transactions.models import Transaction, TransactionAttempt
 from apps.transactions.services import create_booking_transaction
+from tests.profile_factories import create_user
 
 pytestmark = pytest.mark.skipif(
     "postgresql" not in settings.DATABASES["default"]["ENGINE"],
@@ -50,14 +51,15 @@ pytestmark = pytest.mark.skipif(
 
 class PostgreSQLConcurrencyTests(TransactionTestCase):
     def setUp(self):
-        self.admin = User.objects.create_user(
-            username="pg-concurrency-admin",
+        self.admin = create_user(
             password="test-pass-123",
         )
-        AdminProfile.objects.create(user=self.admin, role=Profile.Role.ADMIN)
+        self.admin_profile = AdminProfile.objects.create(
+            user=self.admin, role=Profile.Role.ADMIN
+        )
         self.club = Club.objects.create(
             name="PG Concurrency Club",
-            slug="pg-concurrency",
+            slug=f"pg-concurrency-{uuid4().hex[:8]}",
             governorate="ASSIUT",
             city="ASSIUT_MARKAZ",
         )
@@ -124,7 +126,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
 
         def worker():
             return create_booking(
-                created_by=self.admin,
+                created_by=self.admin_profile,
                 court=self.court,
                 start_time=start,
                 end_time=end,
@@ -149,7 +151,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
 
         def worker():
             return create_booking(
-                created_by=self.admin,
+                created_by=self.admin_profile,
                 court=self.court,
                 start_time=start,
                 end_time=end,
@@ -161,17 +163,17 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         results, errors = self.run_threads([worker, worker])
         booking_ids = {booking_obj.id for booking_obj in results}
         self.assertFalse(errors)
-        self.assertEqual(booking_ids, {Booking.objects.get().id})
-        self.assertEqual(Booking.objects.count(), 1)
-        self.assertEqual(BookingAttempt.objects.count(), 1)
-        attempt = BookingAttempt.objects.get()
+        self.assertEqual(booking_ids, {Booking.objects.get(club=self.club).id})
+        self.assertEqual(Booking.objects.filter(club=self.club).count(), 1)
+        self.assertEqual(BookingAttempt.objects.filter(club=self.club).count(), 1)
+        attempt = BookingAttempt.objects.get(club=self.club)
         self.assertEqual(attempt.outcome, BookingAttempt.Outcome.SUCCESS)
         self.assertEqual(attempt.booking_id, next(iter(booking_ids)))
 
     def test_payment_race_on_same_hold_confirms_once(self):
         start, end = self.slot(18)
         booking = create_booking(
-            created_by=self.admin,
+            created_by=self.admin_profile,
             court=self.court,
             start_time=start,
             end_time=end,
@@ -187,7 +189,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
                 amount=Decimal("50.00"),
                 payment_method=Transaction.PaymentMethod.CASH,
                 payment_reference=reference,
-                created_by=self.admin,
+                created_by=self.admin_profile,
             )
 
         results, errors = self.run_threads(
@@ -205,7 +207,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
     ):
         start, end = self.slot(14)
         booking = create_booking(
-            created_by=self.admin,
+            created_by=self.admin_profile,
             court=self.court,
             start_time=start,
             end_time=end,
@@ -226,23 +228,26 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
                 client_request_id=client_request_id,
                 occurred_at=occurred_at,
                 occurred_at_provided=True,
-                created_by=self.admin,
+                created_by=self.admin_profile,
             )
 
         results, errors = self.run_threads([worker, worker])
         transaction_ids = {transaction_obj.id for transaction_obj in results}
         self.assertFalse(errors)
-        self.assertEqual(transaction_ids, {Transaction.objects.get().id})
+        self.assertEqual(
+            transaction_ids,
+            {Transaction.objects.get(booking=booking).id},
+        )
         self.assertEqual(Transaction.objects.filter(booking=booking).count(), 1)
-        self.assertEqual(TransactionAttempt.objects.count(), 1)
-        attempt = TransactionAttempt.objects.get()
+        self.assertEqual(TransactionAttempt.objects.filter(booking=booking).count(), 1)
+        attempt = TransactionAttempt.objects.get(booking=booking)
         self.assertEqual(attempt.outcome, TransactionAttempt.Outcome.SUCCESS)
         self.assertEqual(attempt.transaction_id, next(iter(transaction_ids)))
 
     def test_payment_race_cannot_overpay_remaining_amount(self):
         start, end = self.slot(13)
         booking = create_booking(
-            created_by=self.admin,
+            created_by=self.admin_profile,
             court=self.court,
             start_time=start,
             end_time=end,
@@ -260,7 +265,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
                 amount=Decimal("50.00"),
                 payment_method=Transaction.PaymentMethod.CASH,
                 payment_reference=reference,
-                created_by=self.admin,
+                created_by=self.admin_profile,
             )
 
         results, errors = self.run_threads(
@@ -276,7 +281,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
     def test_duplicate_payment_reference_race_rejects_second(self):
         start, end = self.slot(16)
         first = create_booking(
-            created_by=self.admin,
+            created_by=self.admin_profile,
             court=self.court,
             start_time=start,
             end_time=end,
@@ -285,7 +290,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         )
         second_start, second_end = self.slot(17)
         second = create_booking(
-            created_by=self.admin,
+            created_by=self.admin_profile,
             court=self.court,
             start_time=second_start,
             end_time=second_end,
@@ -301,7 +306,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
                 amount=Decimal("50.00"),
                 payment_method=Transaction.PaymentMethod.CASH,
                 payment_reference="PG-SHARED-REF",
-                created_by=self.admin,
+                created_by=self.admin_profile,
             )
 
         results, errors = self.run_threads(
@@ -314,8 +319,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         self.assertTrue(errors)
 
     def test_settlement_race_settles_transactions_once(self):
-        staff = User.objects.create_user(
-            username="pg-settle-staff",
+        staff = create_user(
             password="test-pass-123",
         )
         staff_prof = StaffProfile.objects.create(
@@ -324,7 +328,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         StaffCourtAccess.objects.create(staff_profile=staff_prof, court=self.court)
         start, end = self.slot(15)
         booking = create_booking(
-            created_by=staff,
+            created_by=staff_prof,
             court=self.court,
             start_time=start,
             end_time=end,
@@ -338,14 +342,14 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             amount=Decimal("50.00"),
             payment_method=Transaction.PaymentMethod.CASH,
             payment_reference="PG-SETTLE",
-            created_by=staff,
+            created_by=staff_prof,
         )
 
         def worker():
             return create_settlement(
                 club=self.club,
-                user=staff,
-                settled_by=self.admin,
+                collected_by=staff_prof,
+                settled_by=self.admin_profile,
             )
 
         results, errors = self.run_threads([worker, worker])
@@ -356,7 +360,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
     def test_hold_expiry_versus_payment_does_not_double_apply(self):
         start, end = self.slot(21)
         booking = create_booking(
-            created_by=self.admin,
+            created_by=self.admin_profile,
             court=self.court,
             start_time=start,
             end_time=end,
@@ -375,7 +379,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
                 amount=Decimal("50.00"),
                 payment_method=Transaction.PaymentMethod.CASH,
                 payment_reference="PG-EXPIRY-PAY",
-                created_by=self.admin,
+                created_by=self.admin_profile,
             )
 
         def expire():
@@ -391,7 +395,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
     def test_recurring_continuation_race_creates_one_next_booking(self):
         start, end = self.slot(19)
         booking = create_booking(
-            created_by=self.admin,
+            created_by=self.admin_profile,
             court=self.court,
             start_time=start,
             end_time=end,
@@ -406,14 +410,14 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             amount=booking.total_price,
             payment_method=Transaction.PaymentMethod.CASH,
             payment_reference="PG-RECUR-PAY",
-            created_by=self.admin,
+            created_by=self.admin_profile,
         )
 
         def worker():
             return complete_booking(
                 access=access,
                 booking=booking,
-                actor=self.admin,
+                actor=self.admin_profile,
                 continue_recurring=True,
             )
 
@@ -468,6 +472,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             ClubPlayer.objects.filter(
                 club=self.club,
                 player_profile=profile,
+                display_name="Concurrent CP",
             ).count(),
             1,
         )
@@ -475,7 +480,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
     def test_booking_state_transition_race_cancel_versus_complete(self):
         start, end = self.slot(10)
         booking = create_booking(
-            created_by=self.admin,
+            created_by=self.admin_profile,
             court=self.court,
             start_time=start,
             end_time=end,
@@ -489,7 +494,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             amount=booking.total_price,
             payment_method=Transaction.PaymentMethod.CASH,
             payment_reference="PG-TRANS-PAY",
-            created_by=self.admin,
+            created_by=self.admin_profile,
         )
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CONFIRMED)
@@ -498,7 +503,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             return cancel_booking(
                 access=access,
                 booking=booking,
-                actor=self.admin,
+                actor=self.admin_profile,
                 reason="Race Cancel",
             )
 
@@ -506,7 +511,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             return complete_booking(
                 access=access,
                 booking=booking,
-                actor=self.admin,
+                actor=self.admin_profile,
             )
 
         results, errors = self.run_threads([do_cancel, do_complete])
@@ -520,9 +525,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         self.assertEqual(len(errors), 1)
 
     def test_concurrent_staff_creation_enforces_one_profile_per_user(self):
-        user = User.objects.create_user(
-            username="concurrent-staff", password="test-pass-123"
-        )
+        user = create_user(password="test-pass-123")
 
         def worker():
             return StaffProfile.objects.create(
@@ -537,3 +540,59 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
         self.assertIsInstance(errors[0], (IntegrityError, ValidationError))
         profile = Profile.objects.get(user=user)
         self.assertEqual(StaffProfile.objects.get(user=user).pk, profile.pk)
+
+    def test_resolve_club_player_concurrent_resolution_creates_single_record(self):
+        phone = "+201099990066"
+        name = "Concurrent Resolve Name"
+
+        def worker():
+            return resolve_club_player(
+                club=self.club,
+                customer_name=name,
+                customer_phone=phone,
+            )
+
+        results, errors = self.run_threads([worker, worker])
+        self.assertFalse(errors)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].id, results[1].id)
+        self.assertEqual(
+            ClubPlayer.objects.filter(
+                club=self.club,
+                display_name=name,
+                player_profile__phone_number=phone,
+            ).count(),
+            1,
+        )
+
+    def test_resolve_club_player_distinct_names_creates_two_club_players(self):
+        phone = "+201099990077"
+        name_a = "Ahmed"
+        name_b = "Ahmed Ali"
+
+        def worker_a():
+            return resolve_club_player(
+                club=self.club,
+                customer_name=name_a,
+                customer_phone=phone,
+            )
+
+        def worker_b():
+            return resolve_club_player(
+                club=self.club,
+                customer_name=name_b,
+                customer_phone=phone,
+            )
+
+        results, errors = self.run_threads([worker_a, worker_b])
+        self.assertFalse(errors)
+        self.assertEqual(len(results), 2)
+        self.assertNotEqual(results[0].id, results[1].id)
+        self.assertEqual(PlayerProfile.objects.filter(phone_number=phone).count(), 1)
+        self.assertEqual(
+            ClubPlayer.objects.filter(
+                club=self.club,
+                player_profile__phone_number=phone,
+            ).count(),
+            2,
+        )

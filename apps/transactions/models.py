@@ -1,4 +1,3 @@
-from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
@@ -7,10 +6,11 @@ from django.utils.translation import gettext_lazy as _
 
 from apps.bookings.models import Booking
 from apps.clubs.models import Club
+from apps.common.models import SlotyCreatedModel
 from apps.courts.models import Court
 
 
-class Transaction(models.Model):
+class Transaction(SlotyCreatedModel):
     class Type(models.TextChoices):
         PAYMENT = "PAYMENT", _("Payment")
         REFUND = "REFUND", _("Refund")
@@ -55,7 +55,7 @@ class Transaction(models.Model):
     payment_reference = models.CharField(max_length=255, blank=True, default="")
     notes = models.TextField(blank=True)
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        "profiles.Profile",
         blank=True,
         null=True,
         on_delete=models.SET_NULL,
@@ -63,7 +63,7 @@ class Transaction(models.Model):
     )
     is_cancelled = models.BooleanField(default=False, db_index=True)
     cancelled_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        "profiles.Profile",
         blank=True,
         null=True,
         on_delete=models.SET_NULL,
@@ -72,8 +72,6 @@ class Transaction(models.Model):
     cancelled_at = models.DateTimeField(blank=True, null=True, db_index=True)
     cancellation_reason = models.TextField(blank=True)
     occurred_at = models.DateTimeField(default=timezone.now, db_index=True)
-    created = models.DateTimeField(auto_now_add=True, db_index=True)
-    modified = models.DateTimeField(auto_now=True)
 
     # Authorization Spine v2 resource-query contract
     # (apps/common/authorization/contracts.py). Operational boundary is
@@ -91,7 +89,9 @@ class Transaction(models.Model):
             "booking",
             "booking__club_player__player_profile",
             "created_by",
+            "created_by__user",
             "cancelled_by",
+            "cancelled_by__user",
         ),
         "prefetch_related": (),
     }
@@ -159,7 +159,7 @@ class Transaction(models.Model):
         super().save(*args, **kwargs)
 
 
-class TransactionAttempt(models.Model):
+class TransactionAttempt(SlotyCreatedModel):
     class Outcome(models.TextChoices):
         SUCCESS = "SUCCESS", _("Success")
         REJECTED = "REJECTED", _("Rejected")
@@ -185,7 +185,7 @@ class TransactionAttempt(models.Model):
         related_name="transaction_attempts",
     )
     attempted_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        "profiles.Profile",
         blank=True,
         null=True,
         on_delete=models.SET_NULL,
@@ -217,8 +217,6 @@ class TransactionAttempt(models.Model):
         default=Resolution.UNRESOLVED,
         db_index=True,
     )
-    created = models.DateTimeField(auto_now_add=True, db_index=True)
-    modified = models.DateTimeField(auto_now=True)
 
     # Authorization Spine v2 resource-query contract. Boundary is club+court.
     # Staff attempted_by restriction is applied in
@@ -235,6 +233,7 @@ class TransactionAttempt(models.Model):
             "booking",
             "booking__club_player__player_profile",
             "attempted_by",
+            "attempted_by__user",
             "transaction",
         ),
         "prefetch_related": (),

@@ -1,0 +1,10 @@
+[Unit]
+Description=Every 5 minutes Sloty HOLD expiry cleanup
+
+[Timer]
+OnCalendar=*-*-* *:00/5:00
+Persistent=true
+Unit=sloty-hold-expiry.service
+
+[Install]
+WantedBy=timers.target

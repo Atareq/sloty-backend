@@ -13,6 +13,7 @@ from rest_framework import status
 
 from apps.bookings.models import Booking
 from apps.bookings.services import due_hold_booking_candidate_ids
+from apps.courts.models import CourtWorkingHour
 from apps.settlements.models import Settlement, SettlementTransaction
 from tests.bookings.test_booking_api import BookingAPITestCase
 
@@ -42,12 +43,12 @@ class _ListHandler(logging.Handler):
 )
 class EndpointPerfMeasurementTests(BookingAPITestCase):
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("perf-admin")
+        self.platform_admin = self.create_platform_admin()
         self.club = self.create_club("Perf Club", slug="perf-club")
         self.court = self.create_court(self.club, "Perf Court")
         self.create_working_hours(
             self.court,
-            weekday=2,
+            weekday=CourtWorkingHour.Weekday.WEDNESDAY,
             opens_at=time(9, 0),
             closes_at=time(23, 0),
         )
@@ -258,7 +259,7 @@ class EndpointPerfMeasurementTests(BookingAPITestCase):
             club=self.club,
             court=self.court,
             total_amount=Decimal("50.00"),
-            settled_by=self.platform_admin,
+            settled_by=self.platform_admin.profile,
         )
         paid = self.booking.transactions.get()
         SettlementTransaction.objects.create(

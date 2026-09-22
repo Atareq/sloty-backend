@@ -34,7 +34,7 @@ child identity or manually declared composition field.
 - Staff belong to one club and may have zero or multiple court-access rows.
   Zero assignments grants no court resources. Every assignment must match the
   staff club. Assignment, staff-club, and court-club saves protect this invariant.
-- `StaffCourtAccess` is an ordinary association model, not a profile child.
+- `StaffCourtAccess` is an ordinary association model (`SlotyCreatedModel`), not a profile child.
 - Admin authority is enabled `Profile.role == ADMIN`; Django admin flags do not
   grant application access. The admin child has no additional data fields.
 - PlayerProfile is the global customer identity child. It keeps player-only
@@ -47,9 +47,11 @@ child identity or manually declared composition field.
   `PlayerProfile`; do not merge it into `User`, `Profile`, or `Booking`.
 
 The pre-release migration baseline intentionally starts from a recreated database.
-`0001_initial.py` represents this final schema directly; there is no supported
+`0001_initial.py` represents this final schema directly (Django may also emit
+`0002_initial.py` in other apps for circular foreign keys). There is no supported
 forward upgrade from the discarded development migrations.
 
 Run `pytest -n 4 --reuse-db tests/profiles/ tests/authorization/ tests/clubs/`
-after profile or authorization changes. Use `--create-db` once after resetting
-migration history so reused test databases do not retain the discarded schema.
+after profile or authorization changes. Recreate the test template sequentially
+with `pytest --create-db` after resetting migration history, then use
+`pytest -n 4 --reuse-db`. Do not combine `-n` with `--create-db` on PostgreSQL.

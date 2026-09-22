@@ -28,20 +28,19 @@ class OwnerOnboardingAPITests(APITestCase):
             city="MAADI",
         )
 
-        self.admin_user = create_admin_user("platform-admin")
+        self.admin_user = create_admin_user()
         self.admin_profile = self.admin_user.profile.admin_profile
 
-        self.owner_user = create_owner_user("existing-owner", clubs=[self.club1])
+        self.owner_user = create_owner_user(clubs=[self.club1])
         self.owner_profile = self.owner_user.profile.owner_profile
 
-        self.staff_user = create_staff_user("existing-staff", club=self.club1)
+        self.staff_user = create_staff_user(club=self.club1)
         self.staff_profile = self.staff_user.profile.staff_profile
 
     def test_admin_can_create_owner_atomically(self):
         self.client.force_authenticate(user=self.admin_user)
         url = "/api/v1/owners/"
         payload = {
-            "username": "new-club-owner",
             "password": "SecurePassword123!",
             "first_name": "Tarek",
             "last_name": "Owner",
@@ -54,14 +53,14 @@ class OwnerOnboardingAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         data = response.data
         self.assertEqual(data["role"], Profile.Role.OWNER)
-        self.assertEqual(data["username"], "new-club-owner")
+        self.assertEqual(str(data["phone_number"]), "+201011112222")
         self.assertEqual(data["first_name"], "Tarek")
         self.assertEqual(data["last_name"], "Owner")
         self.assertEqual(data["created_by"], self.admin_profile.pk)
         self.assertEqual(set(data["club_ids"]), {self.club1.id, self.club2.id})
 
         # Verify DB records
-        created_user = User.objects.get(username="new-club-owner")
+        created_user = User.objects.get(phone_number="+201011112222")
         self.assertTrue(created_user.check_password("SecurePassword123!"))
         profile = created_user.profile
         self.assertIsNotNone(profile)
@@ -82,27 +81,27 @@ class OwnerOnboardingAPITests(APITestCase):
         self.client.force_authenticate(user=self.owner_user)
         url = "/api/v1/owners/"
         payload = {
-            "username": "sub-owner",
+            "email": "user@example.com",
             "password": "Password123!",
             "club_ids": [self.club1.id],
         }
         response = self.client.post(url, payload, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertFalse(User.objects.filter(username="sub-owner").exists())
+        self.assertFalse(User.objects.filter(phone_number="+201011110001").exists())
 
     def test_staff_cannot_create_owner(self):
         self.client.force_authenticate(user=self.staff_user)
         url = "/api/v1/owners/"
         payload = {
-            "username": "staff-promoted-owner",
+            "email": "user@example.com",
             "password": "Password123!",
             "club_ids": [self.club1.id],
         }
         response = self.client.post(url, payload, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertFalse(User.objects.filter(username="staff-promoted-owner").exists())
+        self.assertFalse(User.objects.filter(phone_number="+201011110002").exists())
 
     def test_disabled_admin_cannot_create_owner(self):
         self.admin_user.profile.is_enabled = False
@@ -111,32 +110,33 @@ class OwnerOnboardingAPITests(APITestCase):
         self.client.force_authenticate(user=self.admin_user)
         url = "/api/v1/owners/"
         payload = {
-            "username": "blocked-owner",
+            "email": "user@example.com",
             "password": "Password123!",
             "club_ids": [self.club1.id],
         }
         response = self.client.post(url, payload, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertFalse(User.objects.filter(username="blocked-owner").exists())
+        self.assertFalse(User.objects.filter(phone_number="+201011110003").exists())
 
     def test_unauthenticated_user_cannot_create_owner(self):
         url = "/api/v1/owners/"
         payload = {
-            "username": "anon-owner",
+            "email": "user@example.com",
             "password": "Password123!",
             "club_ids": [self.club1.id],
         }
         response = self.client.post(url, payload, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-        self.assertFalse(User.objects.filter(username="anon-owner").exists())
+        self.assertFalse(User.objects.filter(phone_number="+201011110004").exists())
 
     def test_client_cannot_override_role_or_created_by(self):
         self.client.force_authenticate(user=self.admin_user)
         url = "/api/v1/owners/"
         payload = {
-            "username": "spoofed-owner",
+            "phone_number": "+201011110005",
+            "email": "user@example.com",
             "password": "Password123!",
             "role": "ADMIN",
             "created_by": 9999,
@@ -145,7 +145,7 @@ class OwnerOnboardingAPITests(APITestCase):
         response = self.client.post(url, payload, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        created_user = User.objects.get(username="spoofed-owner")
+        created_user = User.objects.get(phone_number="+201011110005")
         self.assertEqual(created_user.profile.role, Profile.Role.OWNER)
         self.assertEqual(created_user.profile.created_by_id, self.admin_profile.pk)
 
@@ -153,7 +153,8 @@ class OwnerOnboardingAPITests(APITestCase):
         self.client.force_authenticate(user=self.admin_user)
         url = "/api/v1/owners/"
         payload = {
-            "username": "rollback-owner",
+            "phone_number": "+201011110006",
+            "email": "user@example.com",
             "password": "Password123!",
             "club_ids": [self.club1.id, 99999],
         }
@@ -161,9 +162,9 @@ class OwnerOnboardingAPITests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         # Atomicity check: no User or OwnerProfile created
-        self.assertFalse(User.objects.filter(username="rollback-owner").exists())
+        self.assertFalse(User.objects.filter(phone_number="+201011110006").exists())
         self.assertFalse(
-            OwnerProfile.objects.filter(user__username="rollback-owner").exists()
+            OwnerProfile.objects.filter(user__phone_number="+201011110006").exists()
         )
 
     def test_admin_can_list_and_retrieve_owners(self):
@@ -181,4 +182,26 @@ class OwnerOnboardingAPITests(APITestCase):
         response = self.client.get(detail_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["profile_id"], self.owner_profile.pk)
-        self.assertEqual(response.data["username"], "existing-owner")
+        self.assertEqual(
+            str(response.data["phone_number"]), str(self.owner_user.phone_number)
+        )
+
+    def test_duplicate_normalized_phone_is_rejected(self):
+        self.client.force_authenticate(user=self.admin_user)
+        User.objects.create_user(
+            phone_number="+201011119999",
+            email="existing-phone@example.com",
+            password="Password123!",
+        )
+        url = "/api/v1/owners/"
+        payload = {
+            "phone_number": "01011119999",
+            "email": "duplicate-owner@example.com",
+            "password": "Password123!",
+            "club_ids": [self.club1.id],
+        }
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("phone_number", response.data["field_errors"])
+        self.assertEqual(User.objects.filter(phone_number="+201011119999").count(), 1)

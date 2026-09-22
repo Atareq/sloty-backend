@@ -40,10 +40,11 @@ class PlayerAPITestCase(APITestCase):
 
     password = "test-pass-123"
 
-    def create_user(self, username, **extra_fields) -> User:
-        return User.objects.create_user(
-            username=username, password=self.password, **extra_fields
-        )
+    def create_user(self, phone_number=None, **extra_fields) -> User:
+        extra_fields.setdefault("password", getattr(self, "password", "test-pass-123"))
+        from tests.profile_factories import create_user as factory_create_user
+
+        return factory_create_user(phone_number=phone_number, **extra_fields)
 
     def create_club(self, name, slug=None) -> Club:
         return Club.objects.create(
@@ -89,7 +90,7 @@ class ClubPlayerCRUDTests(PlayerAPITestCase):
     """ClubPlayer CRUD operations for an Owner."""
 
     def setUp(self):
-        self.owner = self.create_user("crud-owner")
+        self.owner = self.create_user()
         self.club = self.create_club("CRUD Club", slug="crud-club")
         grant_owner_club(self.owner, self.club)
         self.client.force_authenticate(user=self.owner)
@@ -125,7 +126,7 @@ class ClubPlayerCRUDTests(PlayerAPITestCase):
         self.create_club_player(self.club, profile_a, "Player A")
 
         other_club = self.create_club("Other Club", slug="other-club")
-        other_owner = self.create_user("other-owner")
+        other_owner = self.create_user()
         grant_owner_club(other_owner, other_club)
         other_profile = self.create_profile("+201011110004")
         self.create_club_player(other_club, other_profile, "Other Player")
@@ -176,8 +177,8 @@ class ClubPlayerCrossClubIsolationTests(PlayerAPITestCase):
     """Cross-club access must return 404 — no existence leak."""
 
     def setUp(self):
-        self.owner_a = self.create_user("iso-owner-a")
-        self.owner_b = self.create_user("iso-owner-b")
+        self.owner_a = self.create_user()
+        self.owner_b = self.create_user()
         self.club_a = self.create_club("Iso Club A", slug="iso-club-a")
         self.club_b = self.create_club("Iso Club B", slug="iso-club-b")
         grant_owner_club(self.owner_a, self.club_a)
@@ -216,8 +217,8 @@ class ClubPlayerRoleTests(PlayerAPITestCase):
 
     def setUp(self):
         self.club = self.create_club("Role Test Club", slug="role-test-club")
-        self.owner = self.create_user("role-owner")
-        self.staff = self.create_user("role-staff")
+        self.owner = self.create_user()
+        self.staff = self.create_user()
 
         grant_owner_club(self.owner, self.club)
         grant_staff_courts(self.staff, self.club)
@@ -239,7 +240,7 @@ class ClubPlayerRoleTests(PlayerAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
     def test_admin_can_list_players_for_unowned_club(self):
-        admin_user = self.create_user("role-admin")
+        admin_user = self.create_user()
         grant_admin(admin_user)
         # Verify no ownership relationship exists for admin
         self.assertFalse(hasattr(admin_user.profile, "owner_profile"))
@@ -261,7 +262,7 @@ class ClubPlayerRoleTests(PlayerAPITestCase):
 
     def test_staff_can_list_assigned_club_players_and_is_denied_other_club(self):
         other_club = self.create_club("Staff Other Club", slug="staff-other-club")
-        other_owner = self.create_user("staff-other-owner")
+        other_owner = self.create_user()
         grant_owner_club(other_owner, other_club)
 
         p_assigned = self.create_profile("+201033333001", full_name="Assigned Player")
@@ -290,7 +291,7 @@ class ClubPlayerRoleTests(PlayerAPITestCase):
         self.assertNotIn(str(cp_other.id), str(other_response.data))
 
     def test_disabled_owner_profile_cannot_list_players(self):
-        disabled_owner = self.create_user("disabled-owner")
+        disabled_owner = self.create_user()
         owner_profile = grant_owner_club(disabled_owner, self.club)
         owner_profile.is_enabled = False
         owner_profile.save(update_fields=["is_enabled"])
@@ -311,7 +312,7 @@ class ClubPlayerRoleTests(PlayerAPITestCase):
         self.assertNotIn(str(cp.id), str(response.data))
 
     def test_disabled_staff_profile_cannot_list_players(self):
-        disabled_staff = self.create_user("disabled-staff")
+        disabled_staff = self.create_user()
         staff_profile = grant_staff_courts(disabled_staff, self.club)
         staff_profile.is_enabled = False
         staff_profile.save(update_fields=["is_enabled"])
@@ -336,8 +337,8 @@ class ClubPlayerSamePhoneTwoClubsTests(PlayerAPITestCase):
     """Same phone number across two clubs creates one PlayerProfile, two ClubPlayers."""
 
     def setUp(self):
-        self.owner_a = self.create_user("dup-owner-a")
-        self.owner_b = self.create_user("dup-owner-b")
+        self.owner_a = self.create_user()
+        self.owner_b = self.create_user()
         self.club_a = self.create_club("Dup Club A", slug="dup-club-a")
         self.club_b = self.create_club("Dup Club B", slug="dup-club-b")
         grant_owner_club(self.owner_a, self.club_a)
@@ -391,7 +392,7 @@ class ClubPlayerCreateIdempotentTests(PlayerAPITestCase):
     """
 
     def setUp(self):
-        self.owner = self.create_user("idem-owner")
+        self.owner = self.create_user()
         self.club = self.create_club("Idem Club", slug="idem-club")
         grant_owner_club(self.owner, self.club)
         self.client.force_authenticate(user=self.owner)
@@ -436,7 +437,7 @@ class ClubPlayerFilterTests(PlayerAPITestCase):
     """Search and player_number filters narrow an already-authorized queryset."""
 
     def setUp(self):
-        self.owner = self.create_user("filter-owner")
+        self.owner = self.create_user()
         self.club = self.create_club("Filter Club", slug="filter-club")
         grant_owner_club(self.owner, self.club)
         self.client.force_authenticate(user=self.owner)
@@ -478,14 +479,70 @@ class ClubPlayerFilterTests(PlayerAPITestCase):
         self.assertIn(self.cp1.id, ids)
         self.assertNotIn(self.cp2.id, ids)
 
+    def test_search_phone_local_and_e164_return_same_player(self):
+        url_local = self.player_list_url(self.club) + "?search=01066661001"
+        url_e164 = self.player_list_url(self.club) + "?search=%2B201066661001"
+        resp_local = self.client.get(url_local)
+        resp_e164 = self.client.get(url_e164)
+        self.assertEqual(resp_local.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp_e164.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp_local.data["results"], resp_e164.data["results"])
+        self.assertEqual(len(resp_local.data["results"]), 1)
+        self.assertEqual(resp_local.data["results"][0]["id"], self.cp1.id)
+
+    def test_search_by_player_profile_full_name(self):
+        p = self.create_profile("+201066661003", full_name="Tarek Sayed")
+        cp = self.create_club_player(self.club, p, "Abu Sayed")
+        url = self.player_list_url(self.club) + "?search=Tarek"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [r["id"] for r in response.data["results"]]
+        self.assertIn(cp.id, ids)
+
+    def test_search_club_boundary_isolation(self):
+        other_club = self.create_club("Other Search Club", slug="other-search-club")
+        other_owner = self.create_user()
+        grant_owner_club(other_owner, other_club)
+        p_other = self.create_profile("+201066661004", full_name="Khalid Foreign")
+        cp_other = self.create_club_player(other_club, p_other, "Khalid Other")
+
+        url = self.player_list_url(self.club) + "?search=Khalid"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [r["id"] for r in response.data["results"]]
+        self.assertIn(self.cp1.id, ids)
+        self.assertNotIn(cp_other.id, ids)
+
+    def test_search_includes_both_with_and_without_account(self):
+        user = self.create_user()
+        p_with_account = self.create_profile(
+            "+201066661005", full_name="Account User", user=user
+        )
+        p_no_account = self.create_profile("+201066661006", full_name="No Account User")
+        cp_account = self.create_club_player(
+            self.club, p_with_account, "Player Account"
+        )
+        cp_no_account = self.create_club_player(
+            self.club, p_no_account, "Player No Account"
+        )
+
+        url = self.player_list_url(self.club) + "?search=Player"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data["results"]
+        account_item = next(r for r in results if r["id"] == cp_account.id)
+        no_account_item = next(r for r in results if r["id"] == cp_no_account.id)
+        self.assertTrue(account_item["player_profile"]["has_account"])
+        self.assertFalse(no_account_item["player_profile"]["has_account"])
+
 
 class ClubPlayerOrderingTests(PlayerAPITestCase):
     """
-    Tests for ordering ClubPlayer list results by last_used_at and created_at.
+    Tests for ordering ClubPlayer list results by last_used_at and created.
     """
 
     def setUp(self):
-        self.owner = self.create_user("ordering-owner")
+        self.owner = self.create_user()
         self.club = self.create_club("Ordering Club", slug="ordering-club")
         grant_owner_club(self.owner, self.club)
         self.client.force_authenticate(user=self.owner)
@@ -566,6 +623,19 @@ class ClubPlayerOrderingTests(PlayerAPITestCase):
         ids = [r["id"] for r in results]
         self.assertEqual(ids[:2], [self.cp_new.id, self.cp_old.id])
 
+    def test_default_ordering_is_desc_last_used_at_with_nulls_last(self):
+        """Without order_by param, defaults to newest-used first with nulls last."""
+        url = self.player_list_url(self.club)
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data["results"]
+        ids = [r["id"] for r in results]
+        self.assertEqual(ids[:2], [self.cp_new.id, self.cp_old.id])
+        self.assertIn(self.cp_unused.id, ids)
+        unused_index = ids.index(self.cp_unused.id)
+        self.assertGreater(unused_index, ids.index(self.cp_new.id))
+        self.assertGreater(unused_index, ids.index(self.cp_old.id))
+
     def test_order_by_asc_last_used_at_returns_oldest_used_first(self):
         """3. order_by=last_used_at works."""
         url = self.player_list_url(self.club) + "?order_by=last_used_at"
@@ -639,15 +709,15 @@ class ClubPlayerOrderingTests(PlayerAPITestCase):
             response.data["results"][0]["last_used_at"],
         )
 
-    def test_order_by_created_at_and_desc_created_at(self):
-        """Order by created_at and -created_at works."""
-        url_asc = self.player_list_url(self.club) + "?order_by=created_at"
+    def test_order_by_created_and_desc_created(self):
+        """Order by created and -created works."""
+        url_asc = self.player_list_url(self.club) + "?order_by=created"
         resp_asc = self.client.get(url_asc)
         self.assertEqual(resp_asc.status_code, status.HTTP_200_OK)
         ids_asc = [r["id"] for r in resp_asc.data["results"]]
         self.assertEqual(ids_asc, [self.cp_new.id, self.cp_old.id, self.cp_unused.id])
 
-        url_desc = self.player_list_url(self.club) + "?order_by=-created_at"
+        url_desc = self.player_list_url(self.club) + "?order_by=-created"
         resp_desc = self.client.get(url_desc)
         self.assertEqual(resp_desc.status_code, status.HTTP_200_OK)
         ids_desc = [r["id"] for r in resp_desc.data["results"]]
@@ -666,7 +736,7 @@ class ClubPlayerPaginationTests(PlayerAPITestCase):
     """ClubPlayer list pagination obeys standard DRF PageNumberPagination."""
 
     def setUp(self):
-        self.owner = self.create_user("page-owner")
+        self.owner = self.create_user()
         self.club = self.create_club("Page Club", slug="page-club")
         grant_owner_club(self.owner, self.club)
         self.client.force_authenticate(user=self.owner)
@@ -713,7 +783,7 @@ class PlayerProfileViewSetTests(PlayerAPITestCase):
     """PlayerProfile find-or-create and club-linked list."""
 
     def setUp(self):
-        self.owner = self.create_user("pp-owner")
+        self.owner = self.create_user()
         self.club = self.create_club("Profile Club", slug="profile-club")
         grant_owner_club(self.owner, self.club)
         self.client.force_authenticate(user=self.owner)
@@ -811,7 +881,7 @@ class PlayerProfileViewSetTests(PlayerAPITestCase):
         self.assertNotEqual(response.data["recommended_club_player_id"], v2.id)
 
     def test_has_account_true_when_user_linked(self):
-        u = self.create_user("pp-linked-user")
+        u = self.create_user()
         p = self.create_profile("+201077770006", user=u)
         self.create_club_player(self.club, p)
         response = self.client.get(self.profile_detail_url(self.club, p.pk))

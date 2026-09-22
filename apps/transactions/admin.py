@@ -37,7 +37,7 @@ class TransactionAdmin(admin.ModelAdmin):
         "court__name",
         "club__name",
         "club__slug",
-        "created_by__username",
+        "created_by__user__phone_number",
         "cancellation_reason",
     )
     readonly_fields = (
@@ -55,7 +55,6 @@ class TransactionAdmin(admin.ModelAdmin):
         "cancelled_at",
         "cancellation_reason",
         "created",
-        "modified",
     )
 
 
@@ -77,7 +76,6 @@ class TransactionAttemptAdmin(admin.ModelAdmin):
         "failure_code",
         "failure_details",
         "created",
-        "modified",
     )
     list_display = (
         "id",
@@ -113,7 +111,7 @@ class TransactionAttemptAdmin(admin.ModelAdmin):
         "court__name",
         "club__name",
         "club__slug",
-        "attempted_by__username",
+        "attempted_by__user__phone_number",
         "failure_code",
     )
     readonly_fields = historical_readonly_fields + ("resolution",)

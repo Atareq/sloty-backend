@@ -3,7 +3,6 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.test import APIRequestFactory, APITestCase, force_authenticate
 
-from apps.accounts.models import User
 from apps.clubs.models import Club
 from apps.common.authorization.matrix import ROLE_PERMISSIONS, is_action_allowed
 from apps.common.authorization.mixins import ClubScopedViewMixin
@@ -43,7 +42,7 @@ class BasePermissionAndMatrixTestCase(ProfileIdentityMixin, APITestCase):
         self.court = Court.objects.create(
             club=self.club, name="Court", default_price="200.00"
         )
-        self.staff = User.objects.create_user(username="staff", password="password")
+        self.staff = self.create_user(password="password")
         sp = StaffProfile.objects.create(
             user=self.staff, role=Profile.Role.STAFF, club=self.club
         )

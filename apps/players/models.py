@@ -13,10 +13,9 @@ Identity boundary:
   Spine v2 (SlotyScopedResourceMixin + scoped_queryset). Clubs cannot read or
   write each other's ClubPlayer rows.
 
-  The latest Booking.club_player relationship is the source of truth for the
-  current ClubPlayer identity. If no booking exists yet for that player in that
-  club, it falls back to the latest ClubPlayer record for that player/club.
-  Historical Booking.club_player relationships remain intact.
+  ClubPlayer identity is club + player_profile + exact display_name.
+  Historical Booking.club_player relationships remain intact. Last-used
+  recency is derived from the latest Booking, not from a version chain.
 """
 
 from django.db import models
@@ -67,8 +66,6 @@ class PlayerProfile(Profile):
             "A player is not verified until an explicit verification step runs."
         ),
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         default_related_name = "player_profile"
@@ -88,10 +85,9 @@ class ClubPlayer(models.Model):
     The same PlayerProfile may have different display_name and player_number
     values at different clubs — both are valid and expected.
 
-    The latest Booking.club_player relationship is the source of truth for the
-    current ClubPlayer identity. If no booking exists yet for that player in that
-    club, it falls back to the latest ClubPlayer record for that player/club.
-    Historical Booking.club_player relationships remain intact.
+    Identity is club + player_profile + exact display_name. A different exact
+    name is a different ClubPlayer. Historical Booking.club_player
+    relationships remain intact. Last-used recency is derived from bookings.
 
     Authorization Spine v2: default_scope="club".
     """
@@ -134,6 +130,12 @@ class ClubPlayer(models.Model):
             models.Index(fields=["club"]),
             models.Index(fields=["player_profile"]),
             models.Index(fields=["club", "player_profile"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["club", "player_profile", "display_name"],
+                name="unique_club_player_identity",
+            ),
         ]
 
     def __str__(self) -> str:

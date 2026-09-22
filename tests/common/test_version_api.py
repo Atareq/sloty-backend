@@ -8,7 +8,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.accounts.models import User
+from tests.profile_factories import create_user
 
 VALID_COMMIT = "91bd3aa28e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b"
 VALID_RELEASE = "v0.7.0"
@@ -26,8 +26,7 @@ class BackendVersionAPITests(APITestCase):
         settings_override.enable()
         self.addCleanup(settings_override.disable)
 
-        self.user = User.objects.create_user(
-            username="version-user",
+        self.user = create_user(
             password="test-pass-123",
         )
         self.client.force_authenticate(user=self.user)

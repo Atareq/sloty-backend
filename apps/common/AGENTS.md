@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-`apps/common/` owns cross-cutting infrastructure, standardized error handling, Egypt location choices, search utilities, and performance middleware. It contains no domain-specific business models.
+`apps/common/` owns cross-cutting infrastructure, standardized error handling, Egypt location choices, search utilities, performance middleware, and the global timestamp abstract models. It contains no domain-specific business tables.
 
 ## Shared Infrastructure
 
@@ -58,7 +58,7 @@
 > [`docs/architecture/security-architecture-v1.md`](file:///home/tarek/Desktop/sloty/sloty-backend/docs/architecture/security-architecture-v1.md)
 > Do not duplicate that document here. This section is the **implementation contract** for code under `apps/common/authorization/`. Mismatches with the target doc are transitional — code/tests win for active behavior.
 
-- **RequestAccessContext**: Fact container centered on the validated `profile`, plus `club`, `owner_profile`, `staff_profile`, explicitly targeted `court`, and assigned `court_ids`. Its `user` and `role` properties are derived from `profile`; it contains no permission decisions and does not load a Court for club-wide requests.
+- **RequestAccessContext**: Fact container centered on the validated `profile`, plus `club`, `owner_profile`, `staff_profile`, explicitly targeted `court`, and assigned `court_ids`. Its `role` property is derived from `profile`; authentication remains available from `request.user` at the request boundary. The context contains no permission decisions and does not load a Court for club-wide requests.
 - **Scope Resolver**: `resolve_club_scope(request, club_slug, court_id=None)` enforces URL club authority, derives scope from the enabled concrete Profile and its inherited children, caches on `request.access_context`, and raises `CLUB_ACCESS_REVOKED` (403) for missing or invalid scope.
 - **Role Matrix & Permission**: `SlotyBasePermission` evaluates centralized `ROLE_PERMISSIONS[role][viewset][action]` with strict default deny. Exposes clean `has_object_permission()` extension hook.
 - **ClubScopedViewMixin**: ViewSet mixin attaching context during `perform_authentication` before permission checks.
@@ -152,10 +152,19 @@ Rules:
 - Dedicated unauthenticated `GET /health/` (`authentication_classes = ()`, `AllowAny`). V1 liveness is in-process only: `{"status": "ok"}`. No PostgreSQL, no writes, no JWT.
 - Production deploy verifies `http://127.0.0.1:8020/health/` with `Host: api.sloty.baronlearning.com` and requires HTTP 200. Do not use `GET /` as the deploy probe.
 
+### 9. Canonical weekday conversion ([`apps/common/weekdays.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/weekdays.py))
+- Court working-hour integers are Saturday=0 … Friday=6.
+- Convert Python `date.weekday()` (Monday=0) with `to_sloty_weekday` / `to_python_weekday` at the calendar boundary. Do not compare Python weekday integers directly to `CourtWorkingHour.weekday`.
+
+### 10. Global Timestamp Bases ([`apps/common/models.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/common/models.py))
+
+- `SlotyCreatedModel`: abstract; `created = DateTimeField(auto_now_add=True)`. Use for immutable / append-only records.
+- `SlotyTimeStampedModel`: abstract subclass of django-extensions `TimeStampedModel` (`created` + `modified`). Use for mutable business entities.
+- Domain models must inherit these wrappers. Do not declare `created` / `modified` locally. Do not inherit `TimeStampedModel` directly. Do not add `created_at` / `updated_at`.
+
 ## Testing
 
 - Run with the project-standard command: `pytest -n 4 --reuse-db tests/common/ tests/authorization/`. Retry a failed node sequentially only if the parallel run reports a failure (see root `AGENTS.md` §8).
-- Test suite: [`tests/common/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/common/).
 - Test suites:
   - Infrastructure: [`tests/common/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/common/).
   - Authorization Spine: [`tests/authorization/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/authorization/).
@@ -164,6 +173,7 @@ Rules:
   - `test_base_permission_and_matrix.py`: Matrix verification, default deny, custom actions, object permission hook.
   - `test_scoped_resources.py`: Model configuration, club/court/future scoping, fail-closed behavior, relation loading, and DRF ViewSet composition.
   - `test_egypt_locations.py` / `test_locations_api.py`: Choice validation and API endpoint.
+  - `test_weekdays.py`: Saturday-first weekday conversion against Python `date.weekday()`.
   - `test_version_api.py`: Runtime release metadata endpoint.
   - `test_sql_query_stats_middleware.py`: Middleware counting and threshold logging.
 - Deployment/release metadata tests: [`tests/deploy/`](file:///home/tarek/Desktop/sloty/sloty-backend/tests/deploy/).

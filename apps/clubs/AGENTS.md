@@ -31,6 +31,9 @@ ADMIN -> AdminProfile
 - `governorate` and `city` use `apps.common.egypt_locations`; city must belong
   to the selected governorate.
 - `slug` is unique and generated with a numeric collision suffix where needed.
+- Keep the unique slug index. Do not add single-column indexes for location,
+  display name, or active flag unless an active query pattern and measurements
+  justify them.
 - `Club.created_by` records the creator's application `Profile` (admin).
 - A missing, malformed, or out-of-scope Profile must be denied with
   `CLUB_ACCESS_REVOKED`; JWT claims never override current database state.
@@ -63,5 +66,6 @@ There is no `ClubAccessContext` or `ClubScopedAccessMixin`.
 Detail routes use the inherited Profile primary key (`profile_id` in the URL).
 Staff serializers read inherited `user`, `role`, `is_enabled`, and timestamps
 directly. Court replacement locks the staff row; courts must belong to the URL
-club. Deletion removes the child and parent, retaining the authentication user
-and business history.
+club. DELETE disables the staff Profile (`is_enabled=False`), removes
+operational `StaffCourtAccess` rows, and keeps the Profile, User, and
+historical business records.

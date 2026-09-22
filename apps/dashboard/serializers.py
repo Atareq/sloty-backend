@@ -2,13 +2,14 @@ from datetime import datetime, time, timedelta
 
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
+from phonenumber_field.serializerfields import PhoneNumberField
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
-from apps.accounts.models import User
 from apps.bookings.models import Booking
 from apps.courts.models import Court
 from apps.dashboard.authorization import can_access_court
+from apps.profiles.models import Profile
 from apps.transactions.models import Transaction
 
 
@@ -170,9 +171,10 @@ class DashboardSummaryQuerySerializer(AccessScopedCourtMixin, serializers.Serial
         allow_null=True,
     )
     collected_by = serializers.PrimaryKeyRelatedField(
-        queryset=User.objects.all(),
+        queryset=Profile.objects.all(),
         required=False,
         allow_null=True,
+        help_text="Collector Profile ID from Transaction.created_by.",
     )
     payment_method = serializers.ChoiceField(
         choices=Transaction.PaymentMethod.choices,
@@ -336,8 +338,10 @@ class AvailabilitySlotSerializer(serializers.Serializer):
     start_time = serializers.DateTimeField()
     end_time = serializers.DateTimeField()
     is_available = serializers.BooleanField()
+    available = serializers.BooleanField()
     blocking_booking = serializers.IntegerField(allow_null=True)
     blocking_status = serializers.CharField(allow_null=True)
+    hold_expires_at = serializers.DateTimeField(allow_null=True)
 
 
 class AvailabilityResponseSerializer(serializers.Serializer):
@@ -374,7 +378,7 @@ class CalendarItemSerializer(serializers.Serializer):
     court_name = serializers.CharField(allow_blank=True)
     title = serializers.CharField()
     customer_name = serializers.CharField()
-    customer_phone = serializers.CharField()
+    customer_phone = PhoneNumberField(allow_blank=True)
     start_time = serializers.DateTimeField()
     end_time = serializers.DateTimeField()
     status = serializers.CharField()
@@ -451,7 +455,10 @@ class DashboardSummaryContextSerializer(serializers.Serializer):
     date_to = serializers.DateField()
     court = serializers.IntegerField(allow_null=True)
     court_name = serializers.CharField(allow_blank=True, allow_null=True)
-    collected_by = serializers.IntegerField(allow_null=True)
+    collected_by = serializers.IntegerField(
+        allow_null=True,
+        help_text="Profile ID recorded as Transaction.created_by.",
+    )
     collected_by_name = serializers.CharField(allow_blank=True, allow_null=True)
     payment_method = serializers.CharField(allow_null=True)
     settlement_status = serializers.CharField(allow_null=True)
@@ -471,7 +478,10 @@ class DashboardPaymentMethodTotalSerializer(serializers.Serializer):
 
 
 class DashboardStaffUnsettledMoneySerializer(serializers.Serializer):
-    collected_by = serializers.IntegerField(allow_null=True)
+    collected_by = serializers.IntegerField(
+        allow_null=True,
+        help_text="Profile ID recorded as Transaction.created_by.",
+    )
     collected_by_name = serializers.CharField(allow_blank=True)
     court = serializers.IntegerField(allow_null=True)
     court_name = serializers.CharField(allow_blank=True)

@@ -5,9 +5,9 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
-from apps.accounts.models import User
 from apps.courts.models import Court
 from apps.courts.pricing import is_valid_period_bounds
+from apps.profiles.models import Profile
 from apps.reports.authorization import (
     can_access_report_court,
     can_filter_reports_by_staff,
@@ -48,9 +48,10 @@ class CourtUsageReportQuerySerializer(serializers.Serializer):
     hour_from = serializers.TimeField(required=False, allow_null=True)
     hour_to = serializers.TimeField(required=False, allow_null=True)
     staff = serializers.PrimaryKeyRelatedField(
-        queryset=User.objects.all(),
+        queryset=Profile.objects.all(),
         required=False,
         allow_null=True,
+        help_text="Staff Profile ID used to filter Booking.created_by.",
     )
     status = serializers.CharField(
         required=False,
@@ -152,7 +153,10 @@ class CourtUsageContextSerializer(serializers.Serializer):
     period = serializers.CharField()
     hour_from = serializers.TimeField(allow_null=True)
     hour_to = serializers.TimeField(allow_null=True)
-    staff = serializers.IntegerField(allow_null=True)
+    staff = serializers.IntegerField(
+        allow_null=True,
+        help_text="Staff Profile ID used for this report filter.",
+    )
     staff_name = serializers.CharField(allow_null=True)
     status = serializers.CharField(allow_null=True)
     included_statuses = serializers.ListField(child=serializers.CharField())
@@ -186,7 +190,10 @@ class DemandHourSerializer(ReportUsageBaseSerializer):
 
 
 class StaffBookingActivitySerializer(serializers.Serializer):
-    staff = serializers.IntegerField(allow_null=True)
+    staff = serializers.IntegerField(
+        allow_null=True,
+        help_text="Staff Profile ID who created the bookings.",
+    )
     staff_name = serializers.CharField()
     booking_count = serializers.IntegerField()
     status_counts = serializers.DictField(child=serializers.IntegerField())

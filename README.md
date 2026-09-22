@@ -131,11 +131,12 @@ and tag, then creates or reuses the GitHub Release with the same values.
 The repository tracks placeholder-only templates in `env/`. Django production
 configuration is defined by `config/settings/base.py`: `SECRET_KEY`, `DEBUG`,
 `ALLOWED_HOSTS`, PostgreSQL `DB_*` settings, optional `DB_SSLMODE`, and the
-optional JWT and SQL-query-stat settings. No email-specific environment
-variables are currently consumed by this backend. Backup-only R2 settings are
-listed separately in `env/backup.env.example` and are not loaded by Gunicorn.
-A future root-run backup service may load both files; no backup service is
-implemented by this change.
+optional JWT and SQL-query-stat settings. `config.settings.production` refuses
+to start unless `DB_ENGINE` is PostgreSQL. Local and test settings still
+accept SQLite. `DEBUG` is read from the environment and is not forced off.
+No email-specific environment variables are currently consumed by this backend.
+Backup-only R2 settings are listed separately in `env/backup.env.example` and
+are not loaded by Gunicorn.
 
 On each trusted operator machine, secure local copies may use the same paths as
 the VPS. These files are private and are never part of Git:
@@ -259,18 +260,34 @@ sudo rm /etc/systemd/system/sloty-db-backup.timer /etc/systemd/system/sloty-db-b
 sudo systemctl daemon-reload
 ```
 
+HOLD expiry is evaluated in real time by booking logic.
+The systemd timer periodically persists cleanup.
+The timer is not required for slot availability correctness.
+
+Install the oneshot cleanup the same way as the backup timer (user `sloty`,
+`prod.env` only, every 5 minutes, `Persistent=true`):
+
+```bash
+sudo ln -sfn /srv/sloty/backend/scripts/systemd/sloty-hold-expiry.service /etc/systemd/system/sloty-hold-expiry.service
+sudo ln -sfn /srv/sloty/backend/scripts/systemd/sloty-hold-expiry.timer /etc/systemd/system/sloty-hold-expiry.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now sloty-hold-expiry.timer
+```
+
 Unauthenticated `GET /health/` is the dedicated deploy/systemd probe and returns
 `{"status": "ok"}` without touching PostgreSQL.
 
 ## Authentication Endpoints
 
-- `POST /api/v1/auth/token/` obtains JWT access and refresh tokens.
+- `POST /api/v1/auth/token/` obtains JWT access and refresh tokens using
+  `phone_number` + `password`. Email is required account information, not a
+  login identifier. There is no username.
 - `POST /api/v1/auth/token/refresh/` refreshes an access token.
 - `GET /api/v1/me/` returns the authenticated user's identity, `profile_role`,
   and account creator. Club scope is resolved from Profile extensions, not
   membership rows.
-- `GET /api/v1/users/` manages base user accounts for platform admin users.
-- `POST /api/v1/users/` creates platform admin users only.
+- `GET /api/v1/users/` lists and updates base user accounts for platform admin
+  users. `POST /api/v1/users/` is not an onboarding endpoint.
 
 Login is global and does not require a club slug. After login, clients call
 `/api/v1/me/` and then club-scoped endpoints with a club slug the current
@@ -314,6 +331,31 @@ API and no Manager role.
 
 OWNER, STAFF, and ADMIN live on `Profile.role`. STAFF requires an assigned court.
 
+## Business Actor IDs
+
+Business actor identifiers in API fields and filters are `Profile.id` values.
+They are separate from authentication `User.id`; a linked User may supply a
+display name without changing the actor identity.
+
+- Booking responses: `created_by` and `last_status_changed_by` are Profile IDs.
+- Booking attempt responses and `attempted_by` filters: Profile IDs.
+- Transaction responses: `created_by` (collector) and `cancelled_by` are
+  Profile IDs. The transaction `created_by` and transaction-attempt
+  `attempted_by` filters also take Profile IDs.
+- Settlement responses expose `settled_by`, the Profile that performed the
+  settlement; the `settled_by` list filter takes that Profile ID. Create,
+  preview, and summary `collected_by` fields and the settlement list filter use
+  the collector Profile stored as `Transaction.created_by`.
+- Dashboard `collected_by`, report `staff`, and audit `actor` filters take
+  Profile IDs. Report `staff` accepts an enabled StaffProfile in the selected
+  club.
+- Audit `actor`, dashboard and settlement `collected_by`, and report
+  `staff_booking_activity[].staff` response IDs are Profile IDs.
+
+Financial custody and settlement authority remain separate:
+`Transaction.created_by` identifies the collector, while `Settlement.settled_by`
+identifies the Profile who performed settlement.
+
 ## Egypt Locations and Club Address Fields
 
 - `GET /api/v1/egypt-locations/` returns public dropdown data for Egypt
@@ -337,6 +379,9 @@ requests.
 Court working hours are court-scoped. The nested `working-hours` route returns
 the selected court name, `pricing_configured`, and seven weekday rows. `PUT`
 replaces the weekly schedule and pricing for that court:
+replaces the weekly schedule and pricing for that court. Weekday numbering
+follows the Sloty convention: `0` Saturday, `1` Sunday, `2` Monday,
+`3` Tuesday, `4` Wednesday, `5` Thursday, `6` Friday.
 
 ```json
 {
@@ -390,8 +435,9 @@ Useful booking list filters:
 - `status`
 - `source`
 - `date`
-- `date_from`
-- `date_to`
+- `date_from` (`YYYY-MM-DD` local midnight, or an ISO datetime; not clamped
+  to now)
+- `date_to` (`YYYY-MM-DD` inclusive local day, or an ISO datetime)
 - `needs_action`
 - `overdue`
 - `has_remaining_amount`
@@ -415,10 +461,12 @@ Booking overlap validation treats `HOLD`, `CONFIRMED`, `COMPLETED`, and
 
 The slots endpoint generates availability rows from a selected court's working
 hours, pricing periods, and slot duration. It accepts `court` plus either
-`date` or `date_from`/`date_to` query parameters. Each slot includes
+`date` or inclusive `date_from`/`date_to` query parameters. Each slot includes
 `slot_price`, the current configured price for that specific slot. `FREE` and
 `UNAVAILABLE` may appear as response-level slot states for UI display, but they
-are not persisted booking statuses.
+are not persisted booking statuses. On the current local day, elapsed hours
+(`start_time` already in the past) are returned with `available=false`; past
+calendar days stay FREE so historical bookings can still be created.
 Starting a recurring booking can return `RECURRING_UNAVAILABLE` when the
 selected base slot is free but the weekly recurrence pattern conflicts later.
 
@@ -448,7 +496,8 @@ Minimal traceability endpoints:
 
 Useful booking-attempt filters are `court`, `attempted_by`, `outcome`,
 `resolution`, `requested_source`, `status` (`ACCEPTED`, `REJECTED`, or
-`DISMISSED`), `date`, `date_from`, and `date_to`. Staff see only their own
+`DISMISSED`), `date`, `date_from`, and `date_to` (`YYYY-MM-DD` is inclusive
+of that local day; ISO datetimes stay exact). Staff see only their own
 attempts on their assigned court. Owners, managers, and platform admins see the
 attempts on their assigned court. Owners and platform admins see the
 selected club scope. Dismissal is staff resolution of an unsuccessful attempt,
@@ -609,20 +658,27 @@ missed past occurrences are not backfilled.
 
 `expire` accepts an empty body and is allowed only for `HOLD` bookings.
 
-To expire due HOLD bookings, run:
+HOLD expiry is evaluated in real time by booking logic. A HOLD whose
+effective deadline
+`min(created + internal_hold_expiry_hours, start_time)` has passed does
+not block overlap, create, reschedule, slot availability, calendar
+occupancy, utilization, or court-usage occupancy, even while the row is
+still `HOLD`. Reads never mutate status.
+
+`python manage.py expire_hold_bookings` only persists `EXPIRED` on those
+rows. It is idempotent. There is no Celery worker. Production cleanup is
+the repo-owned systemd timer:
 
 ```bash
-python manage.py expire_hold_bookings
+sudo ln -sfn /srv/sloty/backend/scripts/systemd/sloty-hold-expiry.service /etc/systemd/system/sloty-hold-expiry.service
+sudo ln -sfn /srv/sloty/backend/scripts/systemd/sloty-hold-expiry.timer /etc/systemd/system/sloty-hold-expiry.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now sloty-hold-expiry.timer
 ```
 
-The command uses each court's effective hold deadline
-`min(created + internal_hold_expiry_hours, booking.start_time)` and is
-idempotent.
-There is no Celery worker. This repository does not ship a cron, systemd
-timer, or other scheduler unit. Production and staging must schedule this
-command (cron or equivalent, typically every 5 minutes) or HOLD bookings
-will not expire automatically. The product UI must not promise automatic
-cancel unless that job is actually running.
+The timer runs every 5 minutes (`Persistent=true`) as user `sloty` with
+`prod.env`. The timer is not required for slot availability correctness.
+Inspect cleanup with `journalctl -u sloty-hold-expiry.service`.
 
 ## Sprint 6 Settlement Endpoints
 
@@ -659,15 +715,15 @@ payment methods, while `totals_by_payment_method` gives signed per-method nets.
 Zero-net and negative-net collectors remain visible when candidate rows exist.
 
 Settlement list/detail include `court_name` (`null` when `court` is omitted)
-and `settled_by_name` (full name if present, otherwise username).
+and `settled_by_name` (full name if present, otherwise phone number).
 Settlement lines and preview transactions include booking customer name/phone
 and booking start/end times.
 
 Preview:
 
 ```text
-GET /api/v1/clubs/{club_slug}/settlements/preview/?collected_by={user_id}
-GET /api/v1/clubs/{club_slug}/settlements/preview/?collected_by={user_id}&court={court_id}
+GET /api/v1/clubs/{club_slug}/settlements/preview/?collected_by={profile_id}
+GET /api/v1/clubs/{club_slug}/settlements/preview/?collected_by={profile_id}&court={court_id}
 ```
 
 Preview is read-only. It creates no settlement rows, settlement lines, audit
@@ -950,14 +1006,14 @@ Main clubs:
 Token examples:
 
 ```json
-{"username": "staff_a", "password": "test-pass-123"}
+{"phone_number": "+201033333331", "password": "test-pass-123"}
 ```
 
 ```json
 {
-  "username": "staff_a",
+  "phone_number": "+201033333331",
   "password": "test-pass-123",
-  "club_slug": "demo-football-club"
+  "club_slug": "barcelona-fc"
 }
 ```
 
@@ -971,10 +1027,9 @@ This creates or repairs one club (`albaladya-test`), one court, all seven
 working-hour rows, and these development/test-only users. Never use these
 credentials in production:
 
-- `admin` / `Admin@123456`
-- `owner` / `Admin@123456`
-- `manager` / `Admin@123456`
-- `staff` / `Admin@123456`
+- `+201011111111` / `test-pass-123` (`platform_admin`)
+- `+201022222221` / `test-pass-123` (`owner_a`)
+- `+201033333331` / `test-pass-123` (`staff_a`)
 
 The seed command includes role-specific memberships, two courts per club,
 working hours, bookings across all statuses, transactions, pending and settled
@@ -1008,6 +1063,7 @@ pre-commit run --all-files
 The Profile inheritance refactor resets the pre-release migration history.
 Recreate the local development database before running `python manage.py migrate`;
 existing databases from the discarded history cannot be upgraded in place.
-First-party model apps each have one `0001_initial.py`. Recreate reused test
-databases once with `pytest -n 4 --reuse-db --create-db`, then use the standard
-`pytest -n 4 --reuse-db`.
+First-party model apps start at `0001_initial.py`. Django may also emit
+`0002_initial.py` for circular foreign keys. Recreate reused test databases
+once with sequential `pytest --create-db` (do not combine `-n` with
+`--create-db` on PostgreSQL), then use the standard `pytest -n 4 --reuse-db`.

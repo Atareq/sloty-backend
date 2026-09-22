@@ -7,18 +7,19 @@ Current Custody
 ---------------
 
 Current Custody is the signed net of all currently unsettled, non-cancelled
-Transaction rows inside the authorized Club scope. The authoritative candidate
-rule is `apps.settlements.services.get_current_unsettled_transactions()`:
-rule is `apps.settlements.services.get_unsettled_transactions_queryset()`:
+Transaction rows inside the authorized Club scope. Settlement preview/create
+build their candidates in `apps.settlements.services._calculate()`; dashboard
+custody uses `apps.dashboard.services.get_current_unsettled_transactions()`.
 
 - `club` is the selected authorized Club;
 - `settlement_line IS NULL`;
 - `is_cancelled = false`;
-- `created_by` is the collector when one is selected;
-- `court` narrows the result only when explicitly selected and authorized.
-- Financial Custody and Settlement are scoped by Club + optional Collector, NOT by Court.
-  A collector's custody includes all unsettled transactions collected by that user in the
-  Club across all courts. Court filtering is never applied to Current Custody or Settlement.
+- `created_by` is the collector Profile when one is selected;
+- Settlement preview/create candidates are Club-wide across courts; their optional `court`
+  value is validated metadata and does not narrow the candidate transactions.
+- Unsettled-summary applies an explicit in-club `court` filter to its displayed rows.
+- A collector's unfiltered custody includes all unsettled transactions collected by that
+  Profile in the Club across all courts.
 
 Transaction age, Booking date, dashboard/report periods, payment method, and a
 requested settlement status never redefine Current Custody.
@@ -35,10 +36,11 @@ Current Custody fields.
 One Concept / One Truth
 -----------------------
 
-Staff, Owner, Manager, unsettled-summary, Settlement Preview, Settlement
-Create, and Dashboard current-custody consumers use the same authoritative
-candidate definition. Roles change visibility and permitted actions, not the
-mathematics for an equivalent Club, collector, Court scope, and point in time.
+Staff, Owner, unsettled-summary, Settlement Preview, Settlement Create, and
+Dashboard current-custody consumers use the same authoritative candidate
+definition when given the same Club and collector without an explicit
+summary-only court filter. Roles change visibility and permitted actions, not
+the underlying candidate rule.
 Settlement Create re-queries and locks current authoritative candidates; it
 does not trust preview data or client-supplied Transaction IDs.
 
@@ -47,14 +49,11 @@ Court
 Court and Financial Custody
 ----------------------------
 
-The default management scope includes all Courts accessible to the actor in the
-selected Club. Court filtering is applied only when a Court is explicitly
-selected. Existing Staff Court restrictions remain unchanged.
-Clients request the all-Courts custody scope by omitting the `court` query
-parameter. They must not send `court=null`, choose `courts[0]`, or infer a
-default Court on behalf of the backend.
-Current Custody and Settlement are financially scoped by CLUB + optional COLLECTOR,
-not by COURT. This is intentionally different from operational Transaction and
+Settlement preview/create candidate scope is the full selected Club plus an
+optional collector. Their `court` parameter is metadata and does not narrow the
+candidate set. Unsettled-summary may narrow its rows by an explicitly selected
+in-club Court. Existing Staff Court restrictions on operational APIs remain
+unchanged. This is intentionally different from operational Transaction and
 Booking authorization.
 
 Operational transaction and booking authorization (Authorization Spine `scoped_queryset`)
@@ -78,6 +77,11 @@ Current Custody API Shape
 `totals_by_payment_method`, `period_start`, `period_end`, signed
 `total_amount`, signed `booking_payments`, signed `booking_refunds`, `is_self`,
 and `can_approve`.
+
+The API's `collected_by` identifier is the `Profile.id` stored in
+`Transaction.created_by`. Settlement records expose `settled_by` as the
+`Profile.id` of the actor who performed settlement; it does not replace or
+change the collector identity.
 
 `GET /api/v1/clubs/{club_slug}/settlements/preview/` returns the same
 collector-level custody fields for one collector plus optional `court` /

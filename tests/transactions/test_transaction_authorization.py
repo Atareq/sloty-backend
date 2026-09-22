@@ -45,8 +45,8 @@ TRANSACTION_ATTEMPT_VIEWSET_ACTIONS = ("list", "retrieve", "dismiss")
 class TransactionAuthorizationConfigTests(TransactionAPITestCase):
 
     def setUp(self):
-        self.owner = self.create_user("tx-config-owner")
-        self.staff = self.create_user("tx-config-staff")
+        self.owner = self.create_user()
+        self.staff = self.create_user()
         self.club = self.create_club("Tx Config Club", slug="tx-config-club")
         self.other_club = self.create_club(
             "Tx Config Other Club", slug="tx-config-other"
@@ -66,9 +66,11 @@ class TransactionAuthorizationConfigTests(TransactionAPITestCase):
         other_booking = self.create_booking(
             self.other_court, customer_phone="+201000000303"
         )
-        self.tx_a = self.create_transaction(booking_a, created_by=self.owner)
-        self.tx_b = self.create_transaction(booking_b, created_by=self.owner)
-        self.tx_other = self.create_transaction(other_booking, created_by=self.owner)
+        self.tx_a = self.create_transaction(booking_a, created_by=self.owner.profile)
+        self.tx_b = self.create_transaction(booking_b, created_by=self.owner.profile)
+        self.tx_other = self.create_transaction(
+            other_booking, created_by=self.owner.profile
+        )
 
     def context_for(self, user):
         request = APIRequestFactory().get(
@@ -172,11 +174,11 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
         self.court_a = self.create_court(self.club, "Court A")
         self.court_b = self.create_court(self.club, "Court B")
         self.other_court = self.create_court(self.other_club, "Other Club Court")
-        self.platform_admin = self.create_platform_admin("spine-admin")
-        self.owner = self.create_user("spine-owner")
-        self.staff = self.create_user("spine-staff")
-        self.other_staff = self.create_user("spine-other-staff")
-        self.other_club_user = self.create_user("other-club-user")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.other_staff = self.create_user()
+        self.other_club_user = self.create_user()
         grant_owner_club(self.owner, self.club)
         self.staff_membership = grant_staff_court(self.staff, self.court_a)
         grant_staff_court(self.other_staff, self.court_b)
@@ -194,13 +196,13 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
             end_time=self.time_at(19),
         )
         self.tx_court_a_staff = self.create_transaction(
-            self.booking_a, amount=Decimal("50.00"), created_by=self.staff
+            self.booking_a, amount=Decimal("50.00"), created_by=self.staff.profile
         )
         self.tx_court_a_owner = self.create_transaction(
-            self.booking_a, amount=Decimal("60.00"), created_by=self.owner
+            self.booking_a, amount=Decimal("60.00"), created_by=self.owner.profile
         )
         self.tx_court_b_other_staff = self.create_transaction(
-            self.booking_b, amount=Decimal("70.00"), created_by=self.other_staff
+            self.booking_b, amount=Decimal("70.00"), created_by=self.other_staff.profile
         )
 
     def create_attempt(self, booking, attempted_by, **extra_fields):
@@ -312,8 +314,8 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
 
     def test_transaction_attempt_authorization(self):
         """TransactionAttempt scoping and dismissal authority."""
-        staff_attempt = self.create_attempt(self.booking_a, self.staff)
-        other_attempt = self.create_attempt(self.booking_b, self.other_staff)
+        staff_attempt = self.create_attempt(self.booking_a, self.staff.profile)
+        other_attempt = self.create_attempt(self.booking_b, self.other_staff.profile)
         self.client.force_authenticate(user=self.staff)
         list_res = self.client.get(self.transaction_attempt_list_url(self.club))
         self.assertEqual(list_res.status_code, status.HTTP_200_OK)
@@ -352,13 +354,15 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
             booking=self.booking_b,
             amount=Decimal("120.00"),
             payment_method=Transaction.PaymentMethod.CASH,
-            created_by=self.staff,
+            created_by=self.staff.profile,
         )
         self.client.force_authenticate(user=self.staff)
         tx_list = self.client.get(self.transaction_list_url(self.club))
         self.assertIn(self.tx_court_a_staff.id, self.list_ids(tx_list))
         self.assertNotIn(tx_court_b_staff.id, self.list_ids(tx_list))
-        preview_res = preview_settlement(club=self.club, user=self.staff)
+        preview_res = preview_settlement(
+            club=self.club, collected_by=self.staff.profile
+        )
         candidate_ids = {tx["id"] for tx in preview_res["transactions"]}
         self.assertIn(self.tx_court_a_staff.id, candidate_ids)
         self.assertIn(tx_court_b_staff.id, candidate_ids)
@@ -373,7 +377,8 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
             self.transaction_list_url(self.club), {"court": self.court_b.id}
         )
         by_creator = self.client.get(
-            self.transaction_list_url(self.club), {"created_by": self.owner.id}
+            self.transaction_list_url(self.club),
+            {"created_by": self.owner.profile.id},
         )
         by_search = self.client.get(
             self.transaction_list_url(self.club), {"search": "Booking Court B"}

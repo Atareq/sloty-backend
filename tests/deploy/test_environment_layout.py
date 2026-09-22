@@ -85,6 +85,17 @@ def test_service_and_deploy_script_load_only_new_production_env():
     assert "/etc/sloty/backend.env" not in deploy
 
 
+def test_production_settings_require_postgresql_and_do_not_force_debug_off():
+    production = (REPO_ROOT / "config/settings/production.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ImproperlyConfigured" in production
+    assert "Production settings require DB_ENGINE=postgresql." in production
+    assert "DEBUG = False" not in production
+    assert "DEBUG=False" not in production.replace(" ", "")
+
+
 def test_real_production_env_files_are_untracked_and_ignored():
     for relative_path in ("env/prod.env", "env/backup.env"):
         tracked = subprocess.run(

@@ -1,5 +1,6 @@
 from datetime import time, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 import yaml
 from django.core.management import call_command
@@ -15,6 +16,7 @@ from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
+from apps.profiles.models import Profile, StaffProfile
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 from tests.booking_factories import persist_booking
@@ -33,10 +35,11 @@ class DashboardAPITestCase(ProfileIdentityMixin, APITestCase):
         self.assertEqual(response.data["code"], "VALIDATION_ERROR")
         self.assertIn(field, response.data["field_errors"])
 
-    def create_user(self, username: str, **extra_fields) -> User:
-        return User.objects.create_user(
-            username=username, password=self.password, **extra_fields
-        )
+    def create_user(self, phone_number=None, **extra_fields) -> User:
+        extra_fields.setdefault("password", getattr(self, "password", "test-pass-123"))
+        from tests.profile_factories import create_user as factory_create_user
+
+        return factory_create_user(phone_number=phone_number, **extra_fields)
 
     def create_club(self, name: str, slug: str, **extra_fields) -> Club:
         data = {
@@ -104,24 +107,20 @@ class DashboardAPITestCase(ProfileIdentityMixin, APITestCase):
         return transaction_obj
 
     def create_settlement(self, club: Club, **extra_fields) -> Settlement:
-        created = extra_fields.pop("created", None) or extra_fields.pop(
-            "created_at", self.time_at(14)
-        )
+        created = extra_fields.pop("created", self.time_at(14))
         extra_fields.pop("period_start", None)
         extra_fields.pop("period_end", None)
         extra_fields.pop("status", None)
         extra_fields.pop("transaction_count", None)
         extra_fields.pop("settled_at", None)
         extra_fields.pop("modified", None)
-        extra_fields.pop("collected_by", None)
-        extra_fields.pop("created_by", None)
         data = {
             "club": club,
             "total_amount": Decimal("100.00"),
         }
         data.update(extra_fields)
         settlement = Settlement.objects.create(**data)
-        Settlement.objects.filter(pk=settlement.pk).update(created_at=created)
+        Settlement.objects.filter(pk=settlement.pk).update(created=created)
         settlement.refresh_from_db()
         return settlement
 
@@ -164,10 +163,10 @@ class DashboardAPITestCase(ProfileIdentityMixin, APITestCase):
 class DashboardDataMixin:
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("dashboard-admin")
-        self.owner = self.create_user("dashboard-owner")
-        self.staff = self.create_user("dashboard-staff")
-        self.other_staff = self.create_user("dashboard-other-staff")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.other_staff = self.create_user()
         self.club = self.create_club("Dashboard Club", "dashboard-club")
         self.other_club = self.create_club("Other Dashboard Club", "other-dashboard")
         self.court = self.create_court(self.club, "Dashboard Court 1")
@@ -187,6 +186,8 @@ class DashboardDataMixin:
             end_time=self.time_at(10),
             status=Booking.Status.HOLD,
         )
+        Booking.objects.filter(pk=self.hold.pk).update(hold_expires_at=self.time_at(21))
+        self.hold.refresh_from_db()
         self.confirmed = self.create_booking(
             self.court,
             customer_name="Confirmed Customer",
@@ -246,13 +247,13 @@ class DashboardDataMixin:
         self.pending_transaction = self.create_transaction(
             self.confirmed,
             amount=Decimal("100.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             created=self.time_at(13),
         )
         self.settled_transaction = self.create_transaction(
             self.completed,
             amount=Decimal("300.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             created=self.time_at(13, 10),
         )
         self.unsettled_transaction = self.create_transaction(
@@ -260,14 +261,14 @@ class DashboardDataMixin:
             amount=Decimal("80.00"),
             payment_method=Transaction.PaymentMethod.DIGITAL_WALLET,
             payment_reference="DASH-DIGITAL-001",
-            created_by=self.staff,
+            created_by=self.staff.profile,
             created=self.time_at(13, 20),
         )
         self.settled_settlement = self.create_settlement(
             self.club,
             court=self.court,
             total_amount=Decimal("400.00"),
-            settled_by=self.platform_admin,
+            settled_by=self.platform_admin.profile,
             created=self.time_at(14, 10),
         )
         SettlementTransaction.objects.create(
@@ -292,7 +293,7 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(len(response.data["slots"]), 4)
         slot = response.data["slots"][0]
         self.assertEqual(set(slot), {"start_time", "end_time", "availability"})
-        self.assertEqual(slot["availability"], "UNAVAILABLE")
+        self.assertEqual(slot["availability"], "AVAILABLE")
         payload = response.content.decode()
         for private_value in (
             "blocking_booking",
@@ -346,23 +347,34 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
 
     def test_working_hours_generate_slots_and_block_blocking_bookings(self):
         self.client.force_authenticate(user=self.platform_admin)
-        response = self.client.get(
-            self.availability_url(self.club, self.court), {"date": "2026-07-06"}
-        )
+        with patch("django.utils.timezone.now", return_value=self.time_at(7)):
+            response = self.client.get(
+                self.availability_url(self.club, self.court), {"date": "2026-07-06"}
+            )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["slots"]), 4)
-        self.assertEqual(response.data["slots"][0]["is_available"], False)
-        self.assertEqual(response.data["slots"][0]["blocking_status"], "NO_SHOW")
+        self.assertEqual(response.data["slots"][0]["is_available"], True)
+        self.assertEqual(response.data["slots"][0]["available"], True)
+        self.assertIsNone(response.data["slots"][0]["blocking_status"])
         self.assertEqual(response.data["slots"][1]["is_available"], False)
         self.assertEqual(response.data["slots"][1]["blocking_status"], "HOLD")
+        self.assertEqual(
+            response.data["slots"][1]["hold_expires_at"],
+            timezone.localtime(self.hold.hold_expires_at).isoformat(),
+        )
         self.assertEqual(response.data["slots"][2]["is_available"], False)
         self.assertEqual(response.data["slots"][2]["blocking_status"], "CONFIRMED")
+        self.assertIsNone(response.data["slots"][2]["hold_expires_at"])
         self.assertEqual(response.data["slots"][3]["is_available"], False)
         self.assertEqual(response.data["slots"][3]["blocking_status"], "COMPLETED")
 
     def test_closed_day_returns_no_slots(self):
-        CourtWorkingHour.objects.filter(court=self.court, weekday=1).delete()
-        CourtWorkingHour.objects.create(court=self.court, weekday=1)
+        CourtWorkingHour.objects.filter(
+            court=self.court, weekday=CourtWorkingHour.Weekday.TUESDAY
+        ).delete()
+        CourtWorkingHour.objects.create(
+            court=self.court, weekday=CourtWorkingHour.Weekday.TUESDAY
+        )
         self.client.force_authenticate(user=self.platform_admin)
         response = self.client.get(
             self.availability_url(self.club, self.court), {"date": "2026-07-07"}
@@ -375,7 +387,9 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
         short_court = self.create_court(
             self.club, "Thirty Minute Court", slot_duration_minutes=30
         )
-        working_hour = CourtWorkingHour.objects.create(court=short_court, weekday=0)
+        working_hour = CourtWorkingHour.objects.create(
+            court=short_court, weekday=CourtWorkingHour.Weekday.MONDAY
+        )
         CourtWorkingHourPricePeriod.objects.create(
             working_hour=working_hour,
             starts_at=time(8, 0),
@@ -388,6 +402,32 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["slots"]), 2)
+
+    def test_slots_in_the_last_48_hours_remain_available_for_historical_booking(self):
+        free_court = self.create_court(self.club, "Elapsed Slot Court")
+        self.create_working_hours(free_court)
+        self.client.force_authenticate(user=self.platform_admin)
+        with patch("django.utils.timezone.now", return_value=self.time_at(9, 30)):
+            response = self.client.get(
+                self.availability_url(self.club, free_court), {"date": "2026-07-06"}
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slots = response.data["slots"]
+        self.assertEqual(len(slots), 4)
+        self.assertTrue(slots[0]["available"])
+        self.assertTrue(slots[0]["is_available"])
+        self.assertTrue(slots[1]["available"])
+        self.assertTrue(slots[2]["available"])
+        self.assertTrue(slots[3]["available"])
+
+        with patch(
+            "django.utils.timezone.now",
+            return_value=self.time_at(9, 30) + timedelta(days=80),
+        ):
+            historical_day = self.client.get(
+                self.availability_url(self.club, free_court), {"date": "2026-07-06"}
+            )
+        self.assertTrue(all(slot["available"] for slot in historical_day.data["slots"]))
 
 
 class CalendarTests(DashboardDataMixin, DashboardAPITestCase):
@@ -433,6 +473,87 @@ class CalendarTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertNotIn(
             self.cross_club_booking.id, {item["id"] for item in response.data["items"]}
         )
+
+    def test_logically_expired_hold_is_omitted_from_calendar(self):
+        Booking.objects.filter(pk=self.hold.pk).update(
+            hold_expires_at=timezone.now() - timedelta(seconds=1)
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+        response = self.client.get(self.calendar_url(self.club), {"date": "2026-07-06"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = {item["id"] for item in response.data["items"]}
+        self.assertNotIn(self.hold.id, ids)
+        self.assertIn(self.confirmed.id, ids)
+        self.hold.refresh_from_db()
+        self.assertEqual(self.hold.status, Booking.Status.HOLD)
+
+    def test_working_hours_change_affects_slots_but_keeps_existing_booking(self):
+        booking = self.create_booking(
+            self.court,
+            customer_name="Earlier Booking",
+            customer_phone="+201000001901",
+            start_time=self.time_at(8),
+            end_time=self.time_at(9),
+            status=Booking.Status.CONFIRMED,
+        )
+        for working_hour in self.court.working_hours.all():
+            working_hour.pricing_periods.all().delete()
+            CourtWorkingHourPricePeriod.objects.create(
+                working_hour=working_hour,
+                starts_at=time(10, 0),
+                ends_at=time(12, 0),
+                price=self.court.default_price,
+            )
+
+        self.client.force_authenticate(user=self.platform_admin)
+        calendar = self.client.get(self.calendar_url(self.club), {"date": "2026-07-06"})
+        availability = self.client.get(
+            self.availability_url(self.club, self.court), {"date": "2026-07-06"}
+        )
+
+        self.assertEqual(calendar.status_code, status.HTTP_200_OK)
+        self.assertIn(booking.id, {item["id"] for item in calendar.data["items"]})
+        self.assertEqual(availability.status_code, status.HTTP_200_OK)
+        self.assertEqual(availability.data["opens_at"], "10:00:00")
+        self.assertTrue(
+            all(
+                slot["start_time"] >= self.time_at(10).isoformat()
+                for slot in availability.data["slots"]
+            )
+        )
+
+    def test_deleting_working_hours_closes_availability_but_keeps_booking(self):
+        booking = self.create_booking(
+            self.court,
+            customer_name="Historical Booking",
+            customer_phone="+201000001902",
+            start_time=self.time_at(8),
+            end_time=self.time_at(9),
+            status=Booking.Status.CONFIRMED,
+        )
+        self.court.working_hours.all().delete()
+        self.client.force_authenticate(user=self.platform_admin)
+
+        calendar = self.client.get(self.calendar_url(self.club), {"date": "2026-07-06"})
+        availability = self.client.get(
+            self.availability_url(self.club, self.court), {"date": "2026-07-06"}
+        )
+
+        self.assertEqual(calendar.status_code, status.HTTP_200_OK)
+        self.assertIn(booking.id, {item["id"] for item in calendar.data["items"]})
+        self.assertEqual(availability.status_code, status.HTTP_200_OK)
+        self.assertTrue(availability.data["is_closed"])
+        self.assertEqual(availability.data["slots"], [])
+
+    def test_active_hold_remains_on_calendar_before_deadline(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        with patch("django.utils.timezone.now", return_value=self.time_at(7)):
+            response = self.client.get(
+                self.calendar_url(self.club), {"date": "2026-07-06"}
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = {item["id"] for item in response.data["items"]}
+        self.assertIn(self.hold.id, ids)
 
     def test_calendar_keeps_club_player_version_after_roster_change(self):
         from apps.players.models import ClubPlayer
@@ -533,7 +654,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertIsNone(response.data["courts"][0]["total_paid_amount"])
 
     def test_other_club_and_no_membership_users_are_rejected(self):
-        no_membership_user = self.create_user("dashboard-no-membership")
+        no_membership_user = self.create_user()
         for user in (self.other_staff, no_membership_user):
             self.client.force_authenticate(user=user)
             response = self.client.get(self.summary_url(self.club), self.range_params())
@@ -579,7 +700,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.create_transaction(
             booking_occurs_later,
             amount=Decimal("300.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             created=timezone.datetime(
                 2026, 8, 17, 14, 0, tzinfo=timezone.get_current_timezone()
             ),
@@ -587,7 +708,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.create_transaction(
             booking_occurs_in_range,
             amount=Decimal("200.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             created=timezone.datetime(
                 2026, 8, 16, 14, 0, tzinfo=timezone.get_current_timezone()
             ),
@@ -717,7 +838,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         )
         self.assertEqual(len(response.data["staff_unsettled_money"]), 1)
         staff_money = response.data["staff_unsettled_money"][0]
-        self.assertEqual(staff_money["collected_by"], self.staff.id)
+        self.assertEqual(staff_money["collected_by"], self.staff.profile.id)
         self.assertIsNone(staff_money["court"])
         self.assertEqual(staff_money["court_name"], "")
         self.assertEqual(staff_money["total_unsettled_amount"], "80.00")
@@ -736,36 +857,36 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.create_transaction(
             self.confirmed,
             amount=Decimal("500.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             created=selected_at,
         )
         self.create_transaction(
             self.confirmed,
             amount=Decimal("300.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             created=selected_at + timedelta(minutes=5),
         )
         self.create_transaction(
             self.confirmed,
             transaction_type=Transaction.Type.REFUND,
             amount=Decimal("-200.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             created=selected_at + timedelta(minutes=10),
         )
         self.create_transaction(
             self.confirmed,
             transaction_type=Transaction.Type.REFUND,
             amount=Decimal("-100.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             created=selected_at - timedelta(days=1),
         )
         self.create_transaction(
             self.confirmed,
             amount=Decimal("700.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             created=selected_at + timedelta(minutes=15),
             is_cancelled=True,
-            cancelled_by=self.platform_admin,
+            cancelled_by=self.platform_admin.profile,
             cancelled_at=selected_at + timedelta(minutes=16),
             cancellation_reason="Excluded from dashboard totals",
         )
@@ -791,7 +912,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             self.confirmed,
             amount=Decimal("20.00"),
             payment_method=Transaction.PaymentMethod.CASH,
-            created_by=self.staff,
+            created_by=self.staff.profile,
             created=self.time_at(13) - timedelta(days=2),
         )
         self.client.force_authenticate(user=self.platform_admin)
@@ -799,7 +920,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             self.summary_url(self.club),
             {
                 **self.range_params(),
-                "collected_by": self.staff.id,
+                "collected_by": self.staff.profile.id,
                 "payment_method": Transaction.PaymentMethod.DIGITAL_WALLET,
                 "settlement_status": "unsettled",
             },
@@ -812,7 +933,9 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(summary["unsettled_transaction_count"], 2)
         self.assertEqual(summary["unsettled_transaction_total_amount"], "100.00")
         self.assertEqual(summary["staff_with_unsettled_transactions_count"], 1)
-        self.assertEqual(response.data["context"]["collected_by"], self.staff.id)
+        self.assertEqual(
+            response.data["context"]["collected_by"], self.staff.profile.id
+        )
         self.assertEqual(
             response.data["context"]["payment_method"],
             Transaction.PaymentMethod.DIGITAL_WALLET,
@@ -823,7 +946,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         old_unsettled = self.create_transaction(
             self.confirmed,
             amount=Decimal("20.00"),
-            created_by=self.owner,
+            created_by=self.owner.profile,
             created=self.time_at(13) - timedelta(days=2),
         )
         self.client.force_authenticate(user=self.platform_admin)
@@ -840,11 +963,50 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             {item["collected_by"] for item in response.data["staff_unsettled_money"]},
         )
 
+    def test_collector_filter_and_response_use_profile_id(self):
+        for index in range(Profile.objects.count() + 1):
+            self.create_user()
+        collector_user = self.create_user()
+        collector = StaffProfile.objects.create(
+            user=collector_user,
+            role=Profile.Role.STAFF,
+            club=self.club,
+        )
+        self.assertNotEqual(collector.id, collector_user.id)
+        self.create_transaction(
+            self.confirmed,
+            amount=Decimal("25.00"),
+            created_by=collector,
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+        response = self.client.get(
+            self.summary_url(self.club),
+            {**self.range_params(), "collected_by": collector.id},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["context"]["collected_by"], collector.id)
+        self.assertEqual(
+            [row["collected_by"] for row in response.data["staff_unsettled_money"]],
+            [collector.id],
+        )
+
+        account_only_user = self.create_user()
+        while Profile.objects.filter(pk=account_only_user.id).exists():
+            account_only_user = self.create_user(
+                f"dashboard-account-only-{User.objects.count()}"
+            )
+        user_id_response = self.client.get(
+            self.summary_url(self.club),
+            {**self.range_params(), "collected_by": account_only_user.id},
+        )
+        self.assertEqual(user_id_response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_locked_mohamed_dataset_separates_period_activity_from_current_custody(
         self,
     ):
-        mohamed = self.create_user("dashboard-mohamed")
-        grant_staff_court(mohamed, self.court)
+        mohamed = self.create_user()
+        mohamed_profile = grant_staff_court(mohamed, self.court)
         booking = self.create_booking(
             self.court,
             customer_name="Mohamed custody dataset",
@@ -854,43 +1016,43 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         self.create_transaction(
             booking,
             amount=Decimal("500.00"),
-            created_by=mohamed,
+            created_by=mohamed_profile,
             created=self.time_at(12) - timedelta(days=10),
         )
         self.create_transaction(
             booking,
             amount=Decimal("900.00"),
-            created_by=mohamed,
+            created_by=mohamed_profile,
             created=self.time_at(12),
         )
         self.create_transaction(
             booking,
             transaction_type=Transaction.Type.REFUND,
             amount=Decimal("-150.00"),
-            created_by=mohamed,
+            created_by=mohamed_profile,
             created=self.time_at(12, 5),
         )
         self.create_transaction(
             booking,
             amount=Decimal("300.00"),
-            created_by=mohamed,
+            created_by=mohamed_profile,
             created=self.time_at(12, 10),
             is_cancelled=True,
-            cancelled_by=self.platform_admin,
+            cancelled_by=self.platform_admin.profile,
             cancelled_at=self.time_at(12, 11),
             cancellation_reason="Excluded correction",
         )
         settled_payment = self.create_transaction(
             booking,
             amount=Decimal("400.00"),
-            created_by=mohamed,
+            created_by=mohamed_profile,
             created=self.time_at(12, 15),
         )
         settlement = self.create_settlement(
             self.club,
             court=self.court,
             total_amount=settled_payment.amount,
-            settled_by=self.platform_admin,
+            settled_by=self.platform_admin.profile,
             created=self.time_at(13, 30),
         )
         SettlementTransaction.objects.create(
@@ -910,7 +1072,7 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             (
                 item
                 for item in response.data["staff_unsettled_money"]
-                if item["collected_by"] == mohamed.id
+                if item["collected_by"] == mohamed.profile.id
             )
         )
         self.assertEqual(mohamed_row["unsettled_transaction_count"], 3)
@@ -958,27 +1120,28 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
         owner_unsettled = self.create_transaction(
             self.confirmed,
             amount=Decimal("200.00"),
-            created_by=self.owner,
+            created_by=self.owner.profile,
             created=self.time_at(13, 40),
         )
         self.create_transaction(
             self.other_court_booking,
             amount=Decimal("20.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             created=self.time_at(13, 45),
         )
-        settled_only_user = self.create_user("dashboard-settled-only")
+        settled_only_user = self.create_user()
+        settled_only_profile = grant_staff_court(settled_only_user, self.court)
         settled_only_transaction = self.create_transaction(
             self.confirmed,
             amount=Decimal("400.00"),
-            created_by=settled_only_user,
+            created_by=settled_only_profile,
             created=self.time_at(13, 50),
         )
         settled_only_settlement = self.create_settlement(
             self.club,
             court=self.court,
             total_amount=settled_only_transaction.amount,
-            settled_by=self.platform_admin,
+            settled_by=self.platform_admin.profile,
             created=self.time_at(14, 20),
         )
         SettlementTransaction.objects.create(
@@ -986,20 +1149,22 @@ class DashboardSummaryTests(DashboardDataMixin, DashboardAPITestCase):
             transaction=settled_only_transaction,
             amount=settled_only_transaction.amount,
         )
+        cancelled_only_user = self.create_user()
+        cancelled_only_profile = grant_staff_court(cancelled_only_user, self.court)
         self.create_transaction(
             self.confirmed,
             amount=Decimal("70.00"),
-            created_by=self.create_user("cancelled-only-collector"),
+            created_by=cancelled_only_profile,
             created=self.time_at(13, 55),
             is_cancelled=True,
-            cancelled_by=self.platform_admin,
+            cancelled_by=self.platform_admin.profile,
             cancelled_at=timezone.now(),
             cancellation_reason="Cancelled-only collector",
         )
         self.create_transaction(
             self.cross_club_booking,
             amount=Decimal("999.00"),
-            created_by=self.other_staff,
+            created_by=self.other_staff.profile,
             created=self.time_at(13, 58),
         )
         self.client.force_authenticate(user=self.platform_admin)
@@ -1077,15 +1242,30 @@ class CourtUtilizationTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         results = {item["court"]: item for item in response.data["results"]}
         self.assertEqual(set(results), {self.court.id, self.other_court.id})
-        self.assertEqual(results[self.court.id]["booking_count"], 3)
-        self.assertEqual(results[self.court.id]["booked_minutes"], 180)
+        self.assertEqual(results[self.court.id]["booking_count"], 2)
+        self.assertEqual(results[self.court.id]["booked_minutes"], 120)
         self.assertEqual(results[self.court.id]["available_minutes"], 240)
-        self.assertEqual(results[self.court.id]["utilization_percentage"], "75.00")
+        self.assertEqual(results[self.court.id]["utilization_percentage"], "50.00")
         self.assertEqual(results[self.court.id]["transaction_total"], "400.00")
         self.assertEqual(results[self.other_court.id]["booked_minutes"], 60)
         self.assertEqual(
             results[self.other_court.id]["utilization_percentage"], "25.00"
         )
+        self.assertEqual(self.hold.status, Booking.Status.HOLD)
+
+    def test_active_hold_counts_in_utilization_before_deadline(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        with patch("django.utils.timezone.now", return_value=self.time_at(7)):
+            response = self.client.get(
+                self.utilization_url(self.club), self.range_params()
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = {item["court"]: item for item in response.data["results"]}
+        self.assertEqual(results[self.court.id]["booking_count"], 3)
+        self.assertEqual(results[self.court.id]["booked_minutes"], 180)
+        self.assertEqual(results[self.court.id]["utilization_percentage"], "75.00")
+        self.hold.refresh_from_db()
+        self.assertEqual(self.hold.status, Booking.Status.HOLD)
 
     def test_zero_working_hours_avoids_division_by_zero(self):
         court = self.create_court(self.club, "No Hours Court")
@@ -1143,7 +1323,7 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
     def test_seed_demo_data_supports_sprint_8_manual_testing(self):
         call_command("seed_demo_data", verbosity=0)
         call_command("seed_demo_data", verbosity=0)
-        platform_admin = User.objects.get(username="platform_admin")
+        platform_admin = User.objects.get(email="platform_admin@example.com")
         booking = (
             Booking.objects.filter(
                 club__slug="barcelona-fc", status__in=Booking.BLOCKING_STATUSES
@@ -1196,15 +1376,15 @@ class DashboardQueryScalingTests(DashboardDataMixin, DashboardAPITestCase):
         with CaptureQueriesContext(connection) as first:
             first_response = self.client.get(self.summary_url(self.club), params)
         for index in range(1, 30):
-            collector = self.create_user(f"dashboard-custody-collector-{index}")
-            grant_staff_court(collector, self.court)
+            collector = self.create_user()
+            collector_profile = grant_staff_court(collector, self.court)
             booking = self.create_booking(
                 self.court,
                 customer_phone=f"+201000007{index:03d}",
                 status=Booking.Status.CONFIRMED,
             )
             self.create_transaction(
-                booking, amount=Decimal("10.00"), created_by=collector
+                booking, amount=Decimal("10.00"), created_by=collector_profile
             )
         with CaptureQueriesContext(connection) as second:
             second_response = self.client.get(self.summary_url(self.club), params)
@@ -1221,7 +1401,7 @@ class DashboardMidnightWorkingHourTests(DashboardDataMixin, DashboardAPITestCase
         super().setUp()
         self.midnight_court = self.create_court(self.club, "Midnight Court")
         working_hour = CourtWorkingHour.objects.create(
-            court=self.midnight_court, weekday=0
+            court=self.midnight_court, weekday=CourtWorkingHour.Weekday.MONDAY
         )
         CourtWorkingHourPricePeriod.objects.create(
             working_hour=working_hour,

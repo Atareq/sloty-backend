@@ -3,10 +3,11 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
 
+from apps.common.models import SlotyCreatedModel, SlotyTimeStampedModel
 from apps.courts.models import Court
 
 
-class Profile(models.Model):
+class Profile(SlotyTimeStampedModel):
     """Concrete parent and sole application-role authority for an account."""
 
     class Role(models.TextChoices):
@@ -31,12 +32,24 @@ class Profile(models.Model):
     )
     role = models.CharField(max_length=16, choices=Role.choices, db_index=True)
     is_enabled = models.BooleanField(default=True, db_index=True)
-    created = models.DateTimeField(auto_now_add=True)
-    modified = models.DateTimeField(auto_now=True)
+
+    def get_display_name(self):
+        user = getattr(self, "user", None)
+        if user is not None:
+            return user.get_display_name()
+        return str(self)
 
     def __str__(self):
         identity = self.user or "unlinked"
         return f"{identity} ({self.role})"
+
+    def __eq__(self, other):
+        if isinstance(other, Profile):
+            return self.pk is not None and self.pk == other.pk
+        return super().__eq__(other)
+
+    def __hash__(self):
+        return super().__hash__()
 
     def clean(self):
         super().clean()
@@ -101,14 +114,13 @@ class AdminProfile(Profile):
         default_related_name = "admin_profile"
 
 
-class StaffCourtAccess(models.Model):
+class StaffCourtAccess(SlotyCreatedModel):
     staff_profile = models.ForeignKey(
         StaffProfile, on_delete=models.CASCADE, related_name="court_accesses"
     )
     court = models.ForeignKey(
         "courts.Court", on_delete=models.CASCADE, related_name="staff_court_accesses"
     )
-    created = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [

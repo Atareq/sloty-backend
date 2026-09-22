@@ -20,7 +20,6 @@ from django.db import transaction
 from django.test import TestCase
 from django.utils import timezone
 
-from apps.accounts.models import User
 from apps.bookings.models import Booking
 from apps.clubs.models import Club
 from apps.common.exceptions import SlotyAPIException
@@ -35,12 +34,12 @@ from apps.players.services import (
     link_player_to_user,
 )
 from apps.profiles.models import Profile
+from tests.profile_factories import create_user
 
 
-def make_user(username, **kwargs):
-    return User.objects.create_user(
-        username=username, password="test-pass-123", **kwargs
-    )
+def make_user(*_unused, **kwargs):
+    kwargs.setdefault("password", "test-pass-123")
+    return create_user(**kwargs)
 
 
 def make_club(name, slug=None):
@@ -241,7 +240,7 @@ class ClubPlayerUniquenessTests(TestCase):
 
 
 class GetOrCreateClubPlayerTests(TestCase):
-    """Service: get_or_create_club_player returns/creates current identity."""
+    """Service: get_or_create_club_player uses the exact identity triple."""
 
     def setUp(self):
         self.club = make_club("Gamma Club", slug="gamma-club")
@@ -255,29 +254,30 @@ class GetOrCreateClubPlayerTests(TestCase):
         self.assertEqual(cp.display_name, "Player One")
         self.assertEqual(cp.player_number, 10)
 
-    def test_returns_current_even_if_display_name_differs(self):
+    def test_same_exact_name_reuses_existing_row(self):
         existing = ClubPlayer.objects.create(
             club=self.club, player_profile=self.profile, display_name="Existing"
         )
         cp, created = get_or_create_club_player(
-            self.club, self.profile, display_name="Different Name"
+            self.club, self.profile, display_name="Existing"
         )
         self.assertFalse(created)
         self.assertEqual(cp.pk, existing.pk)
-        self.assertEqual(cp.display_name, "Existing")
 
-    def test_does_not_create_a_second_row(self):
-        get_or_create_club_player(self.club, self.profile, display_name="Old Identity")
-        cp, created = get_or_create_club_player(
-            self.club, self.profile, display_name="New Identity"
+    def test_different_exact_name_creates_a_second_row(self):
+        first, _ = get_or_create_club_player(
+            self.club, self.profile, display_name="Ahmed"
         )
-        self.assertFalse(created)
-        self.assertEqual(cp.display_name, "Old Identity")
+        second, created = get_or_create_club_player(
+            self.club, self.profile, display_name="Ahmed Ali"
+        )
+        self.assertTrue(created)
+        self.assertNotEqual(first.pk, second.pk)
         self.assertEqual(
             ClubPlayer.objects.filter(
                 club=self.club, player_profile=self.profile
             ).count(),
-            1,
+            2,
         )
 
 

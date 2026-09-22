@@ -1,19 +1,12 @@
 from decimal import Decimal
 
-from django.db import transaction
 from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import extend_schema_field
 from phonenumber_field.serializerfields import PhoneNumberField
 from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
 
-from apps.audit.models import AuditLog
-from apps.audit.services import booking_audit_snapshot, record_audit_log
-from apps.bookings.filters import compute_booking_hold_expires_at
-from apps.bookings.identity import (
-    booking_customer_display_name,
-    booking_customer_display_phone,
-)
+from apps.bookings.identity import booking_customer_display_name
 from apps.bookings.models import Booking, BookingAttempt
 from apps.bookings.services import (
     FREE_SLOT_STATUS,
@@ -21,6 +14,7 @@ from apps.bookings.services import (
     RECURRING_RESERVED_SLOT_STATUS,
     UNAVAILABLE_SLOT_STATUS,
     create_booking,
+    update_booking,
     validate_booking_duration,
 )
 from apps.common.authorization.querysets import scoped_queryset
@@ -28,7 +22,6 @@ from apps.common.authorization.scopes import ResourceScope
 from apps.common.exceptions import SlotyAPIException
 from apps.common.serializers import TimezoneAwareDateTimeField
 from apps.courts.models import Court
-from apps.profiles.models import Profile
 from apps.transactions.models import Transaction
 from apps.transactions.services import get_booking_paid_amount
 
@@ -38,7 +31,12 @@ def format_money(value):
 
 
 def _serializer_access(serializer):
-    return serializer.context.get("access_context") or serializer.context["club_access"]
+    request = serializer.context.get("request")
+    return (
+        serializer.context.get("access_context")
+        or serializer.context.get("club_access")
+        or getattr(request, "access_context", None)
+    )
 
 
 def _court_is_in_authorized_scope(access, court):
@@ -80,17 +78,43 @@ class BookingPaymentSummaryMixin(serializers.Serializer):
         return get_paid_amount_for_booking(obj) >= obj.total_price
 
 
+class BookingDatetimeReadMixin(serializers.Serializer):
+    start_time = serializers.DateTimeField(
+        read_only=True,
+        help_text="Timezone-aware ISO-8601 booking start datetime.",
+    )
+    end_time = serializers.DateTimeField(
+        read_only=True,
+        help_text="Timezone-aware ISO-8601 booking end datetime.",
+    )
+
+
+class BookingTerminationReasonReadMixin(serializers.Serializer):
+    termination_reason = serializers.CharField(
+        read_only=True,
+        help_text=(
+            "Reason supplied for the latest cancellation, no-show, or "
+            "reschedule action. Earlier events remain in the audit log."
+        ),
+    )
+
+
 class BookingHoldExpiresAtMixin(serializers.Serializer):
     hold_expires_at = serializers.SerializerMethodField()
 
-    @extend_schema_field(serializers.DateTimeField(allow_null=True))
+    @extend_schema_field(
+        serializers.DateTimeField(
+            allow_null=True,
+            help_text=(
+                "Timezone-aware ISO-8601 deadline for this HOLD; null when the "
+                "booking is not on hold."
+            ),
+        )
+    )
     def get_hold_expires_at(self, obj):
         if obj.status != Booking.Status.HOLD:
             return None
-        annotated_value = getattr(obj, "hold_expires_at", None)
-        if annotated_value is not None:
-            return annotated_value
-        return compute_booking_hold_expires_at(obj)
+        return obj.hold_expires_at
 
 
 class BookingRecurrenceReadMixin:
@@ -114,24 +138,28 @@ class BookingIdentityReadMixin(serializers.Serializer):
     """
 
     customer_name = serializers.SerializerMethodField()
-    customer_phone = serializers.SerializerMethodField()
+    customer_phone = PhoneNumberField(
+        source="club_player.player_profile.phone_number",
+        read_only=True,
+    )
 
     @extend_schema_field(serializers.CharField())
     def get_customer_name(self, obj) -> str:
         return booking_customer_display_name(obj)
-
-    @extend_schema_field(serializers.CharField())
-    def get_customer_phone(self, obj) -> str:
-        return booking_customer_display_phone(obj)
 
 
 class BookingLastStatusActorMixin(serializers.Serializer):
     last_status_changed_by = serializers.SerializerMethodField()
     last_status_changed_by_name = serializers.SerializerMethodField()
 
-    @extend_schema_field(serializers.IntegerField(allow_null=True))
+    @extend_schema_field(
+        serializers.IntegerField(
+            allow_null=True,
+            help_text="Profile ID of the actor who last changed booking status.",
+        )
+    )
     def get_last_status_changed_by(self, obj):
-        if obj.last_status_changed_by_type == Booking.LastStatusActorType.INTERNAL_USER:
+        if obj.last_status_changed_by_type == Booking.LastStatusActorType.PROFILE:
             return obj.last_status_changed_by_id
         return None
 
@@ -140,23 +168,30 @@ class BookingLastStatusActorMixin(serializers.Serializer):
         if obj.last_status_changed_by_type == Booking.LastStatusActorType.SYSTEM:
             return "System (Automatic)"
         if (
-            obj.last_status_changed_by_type == Booking.LastStatusActorType.INTERNAL_USER
+            obj.last_status_changed_by_type == Booking.LastStatusActorType.PROFILE
             and obj.last_status_changed_by is not None
         ):
-            full_name = obj.last_status_changed_by.get_full_name().strip()
-            return full_name or obj.last_status_changed_by.username
+            actor_user = getattr(obj.last_status_changed_by, "user", None)
+            if actor_user:
+                return actor_user.get_display_name()
+            return str(obj.last_status_changed_by)
         return None
 
 
 class BookingListSerializer(
     BookingIdentityReadMixin,
+    BookingDatetimeReadMixin,
+    BookingTerminationReasonReadMixin,
     BookingPaymentSummaryMixin,
     BookingHoldExpiresAtMixin,
     BookingRecurrenceReadMixin,
     BookingLastStatusActorMixin,
     serializers.ModelSerializer,
 ):
-    created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    created_by = serializers.PrimaryKeyRelatedField(
+        read_only=True,
+        help_text="Profile ID of the booking creator.",
+    )
     court_name = serializers.CharField(source="court.name", read_only=True)
     is_recurring = serializers.SerializerMethodField()
     next_recurring_booking_id = serializers.SerializerMethodField()
@@ -184,6 +219,7 @@ class BookingListSerializer(
             "next_recurring_booking_id",
             "client_request_id",
             "hold_expires_at",
+            "termination_reason",
             "notes",
             "last_status_changed_by",
             "last_status_changed_by_name",
@@ -195,13 +231,18 @@ class BookingListSerializer(
 
 class BookingDetailSerializer(
     BookingIdentityReadMixin,
+    BookingDatetimeReadMixin,
+    BookingTerminationReasonReadMixin,
     BookingPaymentSummaryMixin,
     BookingHoldExpiresAtMixin,
     BookingRecurrenceReadMixin,
     BookingLastStatusActorMixin,
     serializers.ModelSerializer,
 ):
-    created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    created_by = serializers.PrimaryKeyRelatedField(
+        read_only=True,
+        help_text="Profile ID of the booking creator.",
+    )
     is_recurring = serializers.SerializerMethodField()
     next_recurring_booking_id = serializers.SerializerMethodField()
 
@@ -227,9 +268,7 @@ class BookingDetailSerializer(
             "next_recurring_booking_id",
             "client_request_id",
             "notes",
-            "cancellation_reason",
-            "no_show_reason",
-            "reschedule_reason",
+            "termination_reason",
             "completed_at",
             "cancelled_at",
             "no_show_at",
@@ -245,13 +284,33 @@ class BookingDetailSerializer(
 
 
 class BookingCreateSerializer(serializers.ModelSerializer):
-    customer_name = serializers.CharField(max_length=255, write_only=True)
-    customer_phone = PhoneNumberField(write_only=True)
+    start_time = TimezoneAwareDateTimeField(
+        help_text="Timezone-aware ISO-8601 booking start datetime."
+    )
+    end_time = TimezoneAwareDateTimeField(
+        help_text="Timezone-aware ISO-8601 booking end datetime."
+    )
+    customer_name = serializers.CharField(
+        max_length=255,
+        write_only=True,
+        help_text=(
+            "Customer display name for this booking. Exact match against "
+            "ClubPlayer.display_name within the club; creates a new ClubPlayer "
+            "if no exact name match exists."
+        ),
+    )
+    customer_phone = PhoneNumberField(
+        write_only=True,
+        help_text=(
+            "Customer phone number. Global identity key resolving to PlayerProfile."
+        ),
+    )
     is_recurring = serializers.BooleanField(
         required=False,
         default=False,
         write_only=True,
     )
+
     requested_at = TimezoneAwareDateTimeField(required=False, write_only=True)
     club_player_id = serializers.IntegerField(
         required=False,
@@ -306,35 +365,23 @@ class BookingCreateSerializer(serializers.ModelSerializer):
             )
         if not _court_is_in_authorized_scope(access, court):
             raise PermissionDenied("You cannot create bookings for this court.")
-        if (
-            source == Booking.Source.ADMIN_CORRECTION
-            and access.profile.role != Profile.Role.ADMIN
-        ):
-            raise serializers.ValidationError(
-                {"source": "Only Platform Super Admin can use ADMIN_CORRECTION."}
-            )
         if source == Booking.Source.RECURRING:
             raise serializers.ValidationError(
                 {"source": _("Use is_recurring=true to create recurring bookings.")}
             )
-        if source == Booking.Source.ADMIN_CORRECTION and is_recurring:
-            raise serializers.ValidationError(
-                {"is_recurring": _("Admin correction cannot create a recurrence.")}
-            )
-
         validate_booking_duration(court, attrs["start_time"], attrs["end_time"])
         attrs["source"] = Booking.Source.RECURRING if is_recurring else source
         return attrs
 
     def create(self, validated_data):
-        request = self.context["request"]
+        access = _serializer_access(self)
         validated_data.pop("is_recurring", None)
         requested_at = validated_data.pop("requested_at", None)
         court = validated_data.pop("court")
         start_time = validated_data.pop("start_time")
         end_time = validated_data.pop("end_time")
         return create_booking(
-            created_by=request.user,
+            created_by=access.profile if access else None,
             court=court,
             start_time=start_time,
             end_time=end_time,
@@ -368,11 +415,16 @@ class BookingAttemptListSerializer(
     serializers.ModelSerializer,
 ):
     court_name = serializers.CharField(source="court.name", read_only=True)
-    attempted_by_username = serializers.CharField(
-        source="attempted_by.username",
+    attempted_by = serializers.PrimaryKeyRelatedField(
+        read_only=True,
+        help_text="Profile ID of the actor who attempted the booking request.",
+    )
+    attempted_by_name = serializers.CharField(
+        source="attempted_by.get_display_name",
         read_only=True,
         default="",
     )
+    customer_phone = PhoneNumberField(read_only=True)
 
     class Meta:
         model = BookingAttempt
@@ -382,7 +434,7 @@ class BookingAttemptListSerializer(
             "court",
             "court_name",
             "attempted_by",
-            "attempted_by_username",
+            "attempted_by_name",
             "client_request_id",
             "customer_name",
             "customer_phone",
@@ -398,7 +450,6 @@ class BookingAttemptListSerializer(
             "failure_code",
             "resolved_booking",
             "created",
-            "modified",
         )
         read_only_fields = fields
 
@@ -417,6 +468,7 @@ class BookingCancelSerializer(serializers.Serializer):
         required=False,
         allow_blank=True,
         trim_whitespace=True,
+        help_text="Cancellation reason; returned as termination_reason.",
     )
     refund_payment_method = serializers.ChoiceField(
         choices=Transaction.PaymentMethod.choices,
@@ -477,17 +529,23 @@ class BookingNoShowSerializer(serializers.Serializer):
         required=False,
         allow_blank=True,
         trim_whitespace=True,
+        help_text="No-show reason; returned as termination_reason.",
     )
 
 
 class BookingRescheduleSerializer(serializers.Serializer):
     court = serializers.PrimaryKeyRelatedField(queryset=Court.objects.all())
-    start_time = serializers.DateTimeField()
-    end_time = serializers.DateTimeField()
+    start_time = TimezoneAwareDateTimeField(
+        help_text="Timezone-aware ISO-8601 booking start datetime."
+    )
+    end_time = TimezoneAwareDateTimeField(
+        help_text="Timezone-aware ISO-8601 booking end datetime."
+    )
     reason = serializers.CharField(
         required=False,
         allow_blank=True,
         trim_whitespace=True,
+        help_text="Reschedule reason; returned as termination_reason.",
     )
 
     def validate(self, attrs):
@@ -601,10 +659,17 @@ class BookingSlotBookingSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=Booking.Status.choices)
     status_label = serializers.CharField()
     customer_name = serializers.CharField()
-    customer_phone = serializers.CharField()
+    customer_phone = PhoneNumberField(allow_blank=True)
     total_booking_value = serializers.CharField()
     total_paid_amount = serializers.CharField()
     remaining_amount = serializers.CharField()
+    hold_expires_at = serializers.DateTimeField(
+        allow_null=True,
+        help_text=(
+            "Timezone-aware ISO-8601 deadline for a blocking HOLD; null for "
+            "other booking statuses."
+        ),
+    )
     source = serializers.ChoiceField(choices=Booking.Source.choices)
     is_recurring = serializers.BooleanField()
     recurrence_status = serializers.ChoiceField(
@@ -616,7 +681,7 @@ class BookingSlotBookingSerializer(serializers.Serializer):
 class BookingSlotRecurringContextSerializer(serializers.Serializer):
     anchor_booking_id = serializers.IntegerField()
     customer_name = serializers.CharField()
-    customer_phone = serializers.CharField()
+    customer_phone = PhoneNumberField(allow_blank=True)
     recurrence_status = serializers.ChoiceField(
         choices=Booking.RecurrenceStatus.choices
     )
@@ -624,8 +689,12 @@ class BookingSlotRecurringContextSerializer(serializers.Serializer):
 
 class BookingSlotSerializer(serializers.Serializer):
     date = serializers.DateField()
-    start_time = serializers.DateTimeField()
-    end_time = serializers.DateTimeField()
+    start_time = serializers.DateTimeField(
+        help_text="Timezone-aware ISO-8601 slot start datetime; use as returned."
+    )
+    end_time = serializers.DateTimeField(
+        help_text="Timezone-aware ISO-8601 slot end datetime; use as returned."
+    )
     slot_price = serializers.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -639,7 +708,14 @@ class BookingSlotSerializer(serializers.Serializer):
         ]
         + list(Booking.Status.choices)
     )
-    is_available = serializers.BooleanField()
+    is_available = serializers.BooleanField(
+        help_text=(
+            "Backend-calculated availability; clients should display it as returned."
+        )
+    )
+    available = serializers.BooleanField(
+        help_text="Backend-calculated availability for frontend scheduling consumers."
+    )
     booking = BookingSlotBookingSerializer(allow_null=True)
     recurring_anchor_booking_id = serializers.IntegerField(allow_null=True)
     recurring_context = BookingSlotRecurringContextSerializer(allow_null=True)
@@ -647,22 +723,30 @@ class BookingSlotSerializer(serializers.Serializer):
     recurring_blocked_reason = serializers.CharField(allow_null=True)
     first_recurring_conflict_start = serializers.DateTimeField(allow_null=True)
     label = serializers.CharField()
+    slot_type = serializers.ChoiceField(choices=("GENERATED", "BOOKING_ONLY"))
 
 
 class BookingSlotsResponseSerializer(serializers.Serializer):
-    court = serializers.IntegerField()
-    court_name = serializers.CharField()
-    date_from = serializers.DateField()
-    date_to = serializers.DateField()
-    slot_duration_minutes = serializers.IntegerField()
-    message = serializers.CharField(required=False)
     slots = BookingSlotSerializer(many=True)
 
 
 class BookingUpdateSerializer(serializers.ModelSerializer):
+    customer_name = serializers.CharField(
+        max_length=255,
+        required=False,
+        write_only=True,
+    )
+    customer_phone = PhoneNumberField(
+        required=False,
+        write_only=True,
+    )
+
     class Meta:
         model = Booking
-        fields = ("notes",)
+        fields = ("notes", "customer_name", "customer_phone")
+        extra_kwargs = {
+            "notes": {"required": False, "allow_blank": True},
+        }
 
     def validate(self, attrs):
         if self.instance.status in Booking.LOCKED_STATUSES:
@@ -672,33 +756,13 @@ class BookingUpdateSerializer(serializers.ModelSerializer):
         return attrs
 
     def update(self, instance, validated_data):
-        changed = any(
-            getattr(instance, field) != value for field, value in validated_data.items()
+        access = _serializer_access(self)
+        actor = access.profile if access else None
+        return update_booking(
+            booking=instance,
+            updated_by=actor,
+            **validated_data,
         )
-        before_data = booking_audit_snapshot(instance) if changed else {}
-
-        with transaction.atomic():
-            updated_booking = super().update(instance, validated_data)
-            if changed:
-                request = self.context.get("request")
-                actor = getattr(request, "user", None)
-                access = getattr(request, "access_context", None)
-                actor = (
-                    access.profile
-                    if access and access.profile
-                    else getattr(getattr(request, "user", None), "profile", None)
-                )
-                record_audit_log(
-                    club=updated_booking.club,
-                    court=updated_booking.court,
-                    actor=actor,
-                    action=AuditLog.Action.BOOKING_UPDATED,
-                    entity_type="Booking",
-                    entity_id=updated_booking.id,
-                    before_data=before_data,
-                    after_data=booking_audit_snapshot(updated_booking),
-                )
-            return updated_booking
 
     def to_representation(self, instance):
         return BookingDetailSerializer(instance, context=self.context).data

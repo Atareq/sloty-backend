@@ -11,7 +11,7 @@ Validates:
 5. Staff assigned-court isolation returns 404 (no existence leak) for retrieve
    and every lifecycle action.
 6. Staff can manage another staff member's booking on the same assigned court.
-7. BookingAttempt Staff visibility stays attempted_by=request.user.
+7. BookingAttempt Staff visibility is scoped to the authenticated Profile actor.
 8. ROLE_PERMISSIONS covers every migrated BookingViewSet action.
 """
 
@@ -64,9 +64,9 @@ LIFECYCLE_POST_ACTIONS = (
 class BookingAuthorizationConfigTests(BookingAPITestCase):
 
     def setUp(self):
-        self.owner = self.create_user("booking-config-owner")
-        self.staff = self.create_user("booking-config-staff")
-        self.other_staff = self.create_user("booking-config-other-staff")
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.other_staff = self.create_user()
         self.club = self.create_club("Booking Config Club", slug="booking-config-club")
         self.other_club = self.create_club(
             "Booking Config Other Club", slug="booking-config-other"
@@ -78,10 +78,10 @@ class BookingAuthorizationConfigTests(BookingAPITestCase):
         grant_staff_court(self.staff, self.court_a)
         grant_staff_court(self.other_staff, self.court_a)
         self.owner_booking = self.create_booking(
-            self.court_a, created_by=self.owner, customer_phone="+201000000101"
+            self.court_a, created_by=self.owner.profile, customer_phone="+201000000101"
         )
         self.staff_booking = self.create_booking(
-            self.court_a, created_by=self.staff, customer_phone="+201000000102"
+            self.court_a, created_by=self.staff.profile, customer_phone="+201000000102"
         )
         self.other_court_booking = self.create_booking(
             self.court_b, customer_phone="+201000000103"
@@ -183,11 +183,11 @@ class BookingViewSetSpineCompositionTests(BookingAPITestCase):
 class BookingAuthorizationAPITests(BookingAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("booking-auth-admin")
-        self.owner = self.create_user("booking-auth-owner")
-        self.staff = self.create_user("booking-auth-staff")
-        self.peer_staff = self.create_user("booking-auth-peer-staff")
-        self.outsider = self.create_user("booking-auth-outsider")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.peer_staff = self.create_user()
+        self.outsider = self.create_user()
         self.club = self.create_club("Booking Auth Club", slug="booking-auth-club")
         self.other_club = self.create_club(
             "Booking Auth Other Club", slug="booking-auth-other"
@@ -200,10 +200,10 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
         grant_staff_court(self.peer_staff, self.court)
         grant_owner_club(self.outsider, self.other_club)
         self.owner_booking = self.create_booking(
-            self.court, created_by=self.owner, customer_phone="+201000000201"
+            self.court, created_by=self.owner.profile, customer_phone="+201000000201"
         )
         self.staff_booking = self.create_booking(
-            self.court, created_by=self.staff, customer_phone="+201000000202"
+            self.court, created_by=self.staff.profile, customer_phone="+201000000202"
         )
         self.other_court_booking = self.create_booking(
             self.same_club_other_court,
@@ -308,7 +308,7 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
     def test_staff_can_complete_peer_booking_on_assigned_court(self):
         booking = self.create_booking(
             self.court,
-            created_by=self.staff,
+            created_by=self.staff.profile,
             status=Booking.Status.CONFIRMED,
             customer_phone="+201000000205",
         )
@@ -320,27 +320,29 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
 
     def test_owner_and_staff_can_patch_customer_snapshot_fields(self):
         for actor in (self.owner, self.staff):
-            with self.subTest(actor=actor.username):
+            with self.subTest(actor=str(actor.phone_number)):
                 self.client.force_authenticate(user=actor)
                 response = self.client.patch(
                     self.booking_detail_url(self.club, self.staff_booking),
-                    {"notes": f"patched by {actor.username}"},
+                    {"notes": f"patched by {actor.phone_number}"},
                     format="json",
                 )
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
-                self.assertEqual(response.data["notes"], f"patched by {actor.username}")
+                self.assertEqual(
+                    response.data["notes"], f"patched by {actor.phone_number}"
+                )
 
     def test_staff_attempt_queryset_stays_attempted_by_self(self):
-        own_attempt = self.create_attempt(self.court, self.staff)
+        own_attempt = self.create_attempt(self.court, self.staff.profile)
         peer_attempt = self.create_attempt(
             self.court,
-            self.peer_staff,
+            self.peer_staff.profile,
             requested_start=self.time_at(21),
             requested_end=self.time_at(22),
         )
         other_court_own_attempt = self.create_attempt(
             self.same_club_other_court,
-            self.staff,
+            self.staff.profile,
             requested_start=self.time_at(22),
             requested_end=self.time_at(23),
         )
@@ -364,7 +366,7 @@ class BookingAuthorizationAPITests(BookingAPITestCase):
         self.assertEqual(dismiss_peer.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_owner_can_list_peer_attempts_but_cannot_dismiss_them(self):
-        attempt = self.create_attempt(self.court, self.staff)
+        attempt = self.create_attempt(self.court, self.staff.profile)
         self.client.force_authenticate(user=self.owner)
         list_response = self.client.get(self.booking_attempt_list_url(self.club))
         detail_response = self.client.get(

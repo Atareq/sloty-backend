@@ -34,10 +34,19 @@ from tests.profile_factories import (
 class SettlementAPITestCase(ProfileIdentityMixin, APITestCase):
     password = "test-pass-123"
 
-    def create_user(self, username: str, **extra_fields) -> User:
-        return User.objects.create_user(
-            username=username, password=self.password, **extra_fields
-        )
+    def create_user(self, phone_number=None, **extra_fields) -> User:
+        extra_fields.setdefault("password", getattr(self, "password", "test-pass-123"))
+        from tests.profile_factories import create_user as factory_create_user
+
+        return factory_create_user(phone_number=phone_number, **extra_fields)
+
+    def create_user_id_without_profile(self, *_unused) -> int:
+        from apps.profiles.models import Profile
+
+        candidate = self.create_user()
+        while Profile.objects.filter(pk=candidate.id).exists():
+            candidate = self.create_user()
+        return candidate.id
 
     def create_club(self, name: str, slug: str | None = None, **extra_fields) -> Club:
         data = {"name": name, "governorate": "ASSIUT", "city": "ASSIUT_MARKAZ"}
@@ -90,14 +99,6 @@ class SettlementAPITestCase(ProfileIdentityMixin, APITestCase):
         extra_fields.pop("transaction_count", None)
         extra_fields.pop("settled_at", None)
         extra_fields.pop("modified", None)
-        if "collected_by" in extra_fields:
-            collector = extra_fields.pop("collected_by")
-            if "settled_by" not in extra_fields:
-                extra_fields["settled_by"] = collector
-        if "created_by" in extra_fields:
-            creator = extra_fields.pop("created_by")
-            if "settled_by" not in extra_fields:
-                extra_fields["settled_by"] = creator
         data = {
             "club": club,
             "total_amount": Decimal("50.00"),
@@ -129,14 +130,6 @@ class SettlementAPITestCase(ProfileIdentityMixin, APITestCase):
 
     def settlement_payload(self, **extra_fields):
         data = {}
-        default_user = getattr(self, "staff", None) or getattr(self, "collector", None)
-        if default_user is not None:
-            data["user"] = default_user.id
-        if "user" in extra_fields:
-            data["user"] = extra_fields.pop("user")
-        elif "collected_by" in extra_fields:
-            val = extra_fields.pop("collected_by")
-            data["user"] = val.id if hasattr(val, "id") else val
         data.update(extra_fields)
         return data
 
@@ -165,9 +158,9 @@ class SettlementModelTests(SettlementAPITestCase):
     def test_settlement_can_be_created(self):
         settlement = self.create_settlement(self.club, court=self.court)
         self.assertEqual(settlement.club, self.club)
-        self.assertIsNotNone(settlement.created_at)
+        self.assertIsNotNone(settlement.created)
 
-    def test_settlement_line_links_one_transaction(self):
+    def test_settlement_transaction_link_is_established(self):
         settlement = self.create_settlement(self.club, court=self.court)
         line = SettlementTransaction.objects.create(
             settlement=settlement,
@@ -213,7 +206,7 @@ class SettlementModelTests(SettlementAPITestCase):
         self.assertEqual(settlement.period_start, self.transaction_obj.created)
         self.assertEqual(settlement.period_end, t2.created)
 
-    def test_line_amount_must_be_positive(self):
+    def test_zero_amount_settlement_transaction_is_invalid(self):
         settlement = self.create_settlement(self.club, court=self.court)
         line = SettlementTransaction(
             settlement=settlement,
@@ -227,18 +220,19 @@ class SettlementModelTests(SettlementAPITestCase):
 class SettlementAccessTests(SettlementAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("access-admin")
-        self.owner = self.create_user("access-owner")
-        self.staff = self.create_user("access-staff")
-        self.other_user = self.create_user("access-other")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.other_user = self.create_user()
         self.club = self.create_club("Access Club", slug="settlement-access")
         self.other_club = self.create_club(
             "Other Access Club", slug="other-settlement-access"
         )
         self.court = self.create_court(self.club, "Access Court")
         self.other_court = self.create_court(self.other_club, "Other Access Court")
+        self.staff_profile = grant_staff_court(self.staff, self.court)
         self.booking = self.create_booking(self.court)
-        self.create_transaction(self.booking, created_by=self.staff)
+        self.create_transaction(self.booking, created_by=self.staff_profile)
         self.settlement = self.create_settlement(self.club, court=self.court)
         grant_owner_club(self.owner, self.club)
         grant_staff_court(self.staff, self.court)
@@ -253,11 +247,11 @@ class SettlementAccessTests(SettlementAPITestCase):
         list_response = self.client.get(self.settlement_list_url(self.club))
         preview_response = self.client.get(
             self.settlement_preview_url(self.club),
-            self.settlement_payload(user=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
         )
         create_response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(user=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
             format="json",
         )
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
@@ -283,13 +277,11 @@ class SettlementAccessTests(SettlementAPITestCase):
 class SettlementPreviewCreateTests(SettlementAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("preview-admin")
-        self.owner = self.create_user("preview-owner")
-        self.staff = self.create_user(
-            "preview-staff", first_name="Ahmed", last_name="Ali"
-        )
-        self.other_staff = self.create_user("preview-other-staff")
-        self.inactive_staff = self.create_user("preview-inactive-staff")
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user()
+        self.staff = self.create_user(first_name="Ahmed", last_name="Ali")
+        self.other_staff = self.create_user()
+        self.inactive_staff = self.create_user()
         self.club = self.create_club("Preview Club", slug="settlement-preview")
         self.other_club = self.create_club("Other Preview Club", slug="other-preview")
         self.court = self.create_court(self.club, "Preview Court")
@@ -298,6 +290,9 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         grant_owner_club(self.owner, self.club)
         grant_staff_court(self.staff, self.court)
         grant_staff_court(self.other_staff, self.other_court)
+        grant_staff_court(self.inactive_staff, self.court)
+        self.inactive_staff.profile.is_enabled = False
+        self.inactive_staff.profile.save(update_fields=["is_enabled"])
         self.booking = self.create_booking(self.court, customer_phone="+201000000010")
         self.second_booking = self.create_booking(
             self.court,
@@ -322,28 +317,28 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             amount=Decimal("50.00"),
             created=self.time_at(11),
             payment_reference="PREVIEW-1",
-            created_by=self.staff,
+            created_by=self.staff.profile,
         )
         self.second_transaction = self.create_transaction(
             self.second_booking,
             amount=Decimal("75.00"),
             created=self.time_at(12),
             payment_reference="PREVIEW-2",
-            created_by=self.staff,
+            created_by=self.staff.profile,
         )
         self.other_court_transaction = self.create_transaction(
             self.other_court_booking,
             amount=Decimal("25.00"),
             created=self.time_at(12),
             payment_reference="PREVIEW-OTHER-COURT",
-            created_by=self.staff,
+            created_by=self.staff.profile,
         )
         self.other_club_transaction = self.create_transaction(
             self.other_club_booking,
             amount=Decimal("90.00"),
             created=self.time_at(12),
             payment_reference="PREVIEW-OTHER-CLUB",
-            created_by=self.other_staff,
+            created_by=self.other_staff.profile,
         )
         self.owner_booking = self.create_booking(
             self.court,
@@ -380,21 +375,21 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             amount=Decimal("80.00"),
             created=self.time_at(13),
             payment_reference="PREVIEW-OWNER-SELF",
-            created_by=self.owner,
+            created_by=self.owner.profile,
         )
         self.owner_second_transaction = self.create_transaction(
             self.owner_second_booking,
             amount=Decimal("90.00"),
             created=self.time_at(14),
             payment_reference="PREVIEW-OWNER-SELF-2",
-            created_by=self.owner,
+            created_by=self.owner.profile,
         )
         self.owner_settled_transaction = self.create_transaction(
             self.owner_settled_booking,
             amount=Decimal("100.00"),
             created=self.time_at(15),
             payment_reference="PREVIEW-OWNER-SETTLED",
-            created_by=self.owner,
+            created_by=self.owner.profile,
         )
         self.owner_cancelled_transaction = self.create_transaction(
             self.owner_cancelled_booking,
@@ -402,24 +397,24 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             created=self.time_at(16),
             payment_reference="PREVIEW-OWNER-CANCELLED",
             is_cancelled=True,
-            cancelled_by=self.platform_admin,
+            cancelled_by=self.platform_admin.profile,
             cancelled_at=timezone.now(),
             cancellation_reason="Owner correction",
-            created_by=self.owner,
+            created_by=self.owner.profile,
         )
         self.platform_admin_transaction = self.create_transaction(
             self.platform_admin_booking,
             amount=Decimal("120.00"),
             created=self.time_at(17),
             payment_reference="PREVIEW-ADMIN-SELF",
-            created_by=self.platform_admin,
+            created_by=self.platform_admin.profile,
         )
         self.already_settled = self.create_transaction(
             self.booking,
             amount=Decimal("30.00"),
             created=self.time_at(13),
             payment_reference="PREVIEW-SETTLED",
-            created_by=self.staff,
+            created_by=self.staff.profile,
         )
         self.cancelled_transaction = self.create_transaction(
             self.booking,
@@ -427,15 +422,15 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             created=self.time_at(12),
             payment_reference="PREVIEW-CANCELED",
             is_cancelled=True,
-            cancelled_by=self.platform_admin,
+            cancelled_by=self.platform_admin.profile,
             cancelled_at=timezone.now(),
             cancellation_reason="Wrong settlement amount",
-            created_by=self.staff,
+            created_by=self.staff.profile,
         )
         settlement = self.create_settlement(
             self.club,
             court=self.court,
-            collected_by=self.staff,
+            settled_by=self.staff.profile,
             total_amount=self.already_settled.amount,
         )
         SettlementTransaction.objects.create(
@@ -446,7 +441,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         owner_settlement = self.create_settlement(
             self.club,
             court=self.court,
-            collected_by=self.owner,
+            settled_by=self.owner.profile,
             total_amount=self.owner_settled_transaction.amount,
         )
         SettlementTransaction.objects.create(
@@ -459,13 +454,13 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
     def test_preview_returns_correct_count_and_total(self):
         response = self.client.get(
             self.settlement_preview_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["transaction_count"], 3)
         self.assertEqual(response.data["total_amount"], "150.00")
-        self.assertEqual(response.data["user"], self.staff.id)
-        self.assertEqual(response.data["user_name"], "Ahmed Ali")
+        self.assertEqual(response.data["collected_by"], self.staff.profile.id)
+        self.assertEqual(response.data["collected_by_name"], "Ahmed Ali")
         self.assertFalse(response.data["is_self_preview"])
         self.assertTrue(response.data["can_approve"])
         self.assertFalse(response.data["approval_required"])
@@ -499,19 +494,20 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
     def test_preview_without_collected_by_defaults_to_request_user(self):
         response = self.client.get(self.settlement_preview_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["user"], self.platform_admin.id)
+        self.assertEqual(response.data["collected_by"], self.platform_admin.profile.id)
         self.assertTrue(response.data["is_self_preview"])
 
     def test_preview_does_not_require_period_start_or_period_end(self):
         response = self.client.get(
-            self.settlement_preview_url(self.club), {"collected_by": self.staff.id}
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff.profile.id},
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_preview_excludes_cancelled_transactions(self):
         response = self.client.get(
             self.settlement_preview_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         transaction_ids = {item["id"] for item in response.data["transactions"]}
@@ -520,7 +516,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
     def test_preview_excludes_already_settled_transactions(self):
         response = self.client.get(
             self.settlement_preview_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         transaction_ids = {item["id"] for item in response.data["transactions"]}
@@ -530,7 +526,8 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         response = self.client.get(
             self.settlement_preview_url(self.club),
             self.settlement_payload(
-                collected_by=self.staff.id, court=self.same_club_other_court.id
+                collected_by=self.staff.profile.id,
+                court=self.same_club_other_court.id,
             ),
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -559,7 +556,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         )
         response = self.client.get(
             self.settlement_preview_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(Settlement.objects.count(), before_settlements)
@@ -575,7 +572,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
     def test_preview_excludes_transactions_created_by_other_users(self):
         response = self.client.get(
             self.settlement_preview_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         transaction_ids = {item["id"] for item in response.data["transactions"]}
@@ -584,7 +581,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
     def test_preview_respects_selected_club_scope(self):
         response = self.client.get(
             self.settlement_preview_url(self.other_club),
-            self.settlement_payload(collected_by=self.other_staff.id),
+            self.settlement_payload(collected_by=self.other_staff.profile.id),
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["transaction_count"], 1)
@@ -593,18 +590,18 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
     def test_preview_rejects_user_from_another_club(self):
         response = self.client.get(
             self.settlement_preview_url(self.club),
-            {"user": self.other_staff.id},
+            {"collected_by": self.other_staff.profile.id},
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assert_field_error(response, "user")
+        self.assert_field_error(response, "collected_by")
 
     def test_preview_rejects_user_without_club_profile_scope(self):
         response = self.client.get(
             self.settlement_preview_url(self.club),
-            {"user": self.inactive_staff.id},
+            {"collected_by": self.inactive_staff.profile.id},
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assert_field_error(response, "user")
+        self.assert_field_error(response, "collected_by")
 
     def test_staff_can_preview_himself_without_user_param(self):
         before_settlements = Settlement.objects.count()
@@ -612,7 +609,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.client.force_authenticate(user=self.staff)
         response = self.client.get(self.settlement_preview_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["user"], self.staff.id)
+        self.assertEqual(response.data["collected_by"], self.staff.profile.id)
         self.assertTrue(response.data["is_self_preview"])
         self.assertFalse(response.data["can_approve"])
         self.assertTrue(response.data["approval_required"])
@@ -628,7 +625,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             amount=Decimal("-25.00"),
             created=self.time_at(13),
             payment_reference="PREVIEW-REFUND",
-            created_by=self.staff,
+            created_by=self.staff.profile,
         )
         self.client.force_authenticate(user=self.staff)
         response = self.client.get(self.settlement_preview_url(self.club))
@@ -646,7 +643,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.client.force_authenticate(user=self.staff)
         response = self.client.get(
             self.settlement_preview_url(self.club),
-            {"user": self.owner.id},
+            {"collected_by": self.owner.profile.id},
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -654,10 +651,10 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.client.force_authenticate(user=self.owner)
         response = self.client.get(
             self.settlement_preview_url(self.club),
-            {"user": self.staff.id},
+            {"collected_by": self.staff.profile.id},
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["user"], self.staff.id)
+        self.assertEqual(response.data["collected_by"], self.staff.profile.id)
         self.assertFalse(response.data["is_self_preview"])
         self.assertTrue(response.data["can_approve"])
         self.assertFalse(response.data["approval_required"])
@@ -666,26 +663,26 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         response = self.client.post(
             self.settlement_list_url(self.club),
             self.settlement_payload(
-                user=self.staff.id, notes="Collected cash from Ahmed"
+                collected_by=self.staff.profile.id, notes="Collected cash from Ahmed"
             ),
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         settlement = Settlement.objects.get(id=response.data["id"])
         self.assertIsNone(settlement.court)
-        self.assertEqual(settlement.settled_by, self.platform_admin)
+        self.assertEqual(settlement.settled_by, self.platform_admin.profile)
         self.assertEqual(settlement.period_start, self.first_transaction.created)
         self.assertLessEqual(settlement.period_end, timezone.now())
         self.assertEqual(settlement.total_amount, Decimal("150.00"))
         self.assertEqual(settlement.transaction_count, 3)
         self.assertEqual(settlement.notes, "Collected cash from Ahmed")
         self.assertEqual(settlement.lines.count(), 3)
-        self.assertEqual(response.data["settled_by"], self.platform_admin.id)
+        self.assertEqual(response.data["settled_by"], self.platform_admin.profile.id)
 
     def test_create_excludes_already_settled_transactions(self):
         response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(user=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -703,7 +700,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         before_audits = AuditLog.objects.count()
         response = self.client.get(self.settlement_preview_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["user"], self.platform_admin.id)
+        self.assertEqual(response.data["collected_by"], self.platform_admin.profile.id)
         self.assertEqual(Settlement.objects.count(), before_settlements)
         self.assertEqual(SettlementTransaction.objects.count(), before_lines)
         self.assertEqual(AuditLog.objects.count(), before_audits)
@@ -711,17 +708,20 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
     def test_create_settled_by_is_not_client_controlled(self):
         response = self.client.post(
             self.settlement_list_url(self.club),
-            {"user": self.staff.id, "settled_by": self.other_staff.id},
+            {
+                "collected_by": self.staff.profile.id,
+                "settled_by": self.other_staff.profile.id,
+            },
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         settlement = Settlement.objects.get(id=response.data["id"])
-        self.assertEqual(settlement.settled_by, self.platform_admin)
+        self.assertEqual(settlement.settled_by, self.platform_admin.profile)
 
     def test_create_does_not_require_period_start_or_period_end(self):
         response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -735,7 +735,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             SettlementTransaction.objects.create(
                 settlement=self.create_settlement(
                     self.club,
-                    collected_by=self.staff,
+                    settled_by=self.staff.profile,
                     period_start=self.time_at(15),
                     period_end=self.time_at(16),
                     total_amount=transaction_obj.amount,
@@ -745,7 +745,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
             )
         response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
@@ -756,7 +756,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.client.force_authenticate(user=self.owner)
         response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -765,10 +765,10 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.client.force_authenticate(user=self.owner)
         response = self.client.get(
             self.settlement_preview_url(self.club),
-            {"user": self.owner.id},
+            {"collected_by": self.owner.profile.id},
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["user"], self.owner.id)
+        self.assertEqual(response.data["collected_by"], self.owner.profile.id)
         self.assertEqual(response.data["transaction_count"], 2)
         self.assertEqual(response.data["total_amount"], "170.00")
         self.assertTrue(response.data["is_self_preview"])
@@ -791,12 +791,14 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.client.force_authenticate(user=self.owner)
         response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(user=self.owner.id, notes="Owner self-settlement"),
+            self.settlement_payload(
+                collected_by=self.owner.profile.id, notes="Owner self-settlement"
+            ),
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         settlement = Settlement.objects.get(id=response.data["id"])
-        self.assertEqual(settlement.settled_by, self.owner)
+        self.assertEqual(settlement.settled_by, self.owner.profile)
         self.assertEqual(settlement.total_amount, Decimal("170.00"))
         self.assertEqual(settlement.transaction_count, 2)
         self.assertEqual(settlement.notes, "Owner self-settlement")
@@ -816,10 +818,10 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
     def test_platform_admin_can_preview_settlement_for_himself(self):
         response = self.client.get(
             self.settlement_preview_url(self.club),
-            self.settlement_payload(user=self.platform_admin.id),
+            self.settlement_payload(collected_by=self.platform_admin.profile.id),
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["user"], self.platform_admin.id)
+        self.assertEqual(response.data["collected_by"], self.platform_admin.profile.id)
         self.assertEqual(response.data["transaction_count"], 1)
         self.assertEqual(response.data["total_amount"], "120.00")
         self.assertEqual(
@@ -830,12 +832,12 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
     def test_platform_admin_can_create_settlement_for_himself(self):
         response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(user=self.platform_admin.id),
+            self.settlement_payload(collected_by=self.platform_admin.profile.id),
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         settlement = Settlement.objects.get(id=response.data["id"])
-        self.assertEqual(settlement.settled_by, self.platform_admin)
+        self.assertEqual(settlement.settled_by, self.platform_admin.profile)
         self.assertEqual(
             set(settlement.lines.values_list("transaction_id", flat=True)),
             {self.platform_admin_transaction.id},
@@ -845,7 +847,7 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.client.force_authenticate(user=self.staff)
         response = self.client.post(
             self.settlement_list_url(self.club),
-            {"user": self.owner.id},
+            {"collected_by": self.owner.profile.id},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -854,18 +856,18 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
         self.client.force_authenticate(user=self.staff)
         response = self.client.get(self.settlement_preview_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["user"], self.staff.id)
+        self.assertEqual(response.data["collected_by"], self.staff.profile.id)
         self.assertFalse(response.data["can_approve"])
 
     def test_settled_transactions_cannot_be_included_again(self):
         first_response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
             format="json",
         )
         second_response = self.client.post(
             self.settlement_list_url(self.club),
-            self.settlement_payload(collected_by=self.staff.id),
+            self.settlement_payload(collected_by=self.staff.profile.id),
             format="json",
         )
         self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
@@ -877,10 +879,8 @@ class SettlementPreviewCreateTests(SettlementAPITestCase):
 class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
 
     def setUp(self):
-        self.owner = self.create_user("custody-owner")
-        self.staff = self.create_user(
-            "custody-mohamed", first_name="Mohamed", last_name="Ahmed"
-        )
+        self.owner = self.create_user()
+        self.staff = self.create_user(first_name="Mohamed", last_name="Ahmed")
         self.club = self.create_club("Custody Club", slug="custody-contract")
         self.court = self.create_court(
             self.club, "Custody Court", cancellation_refund_notice_days=0
@@ -894,7 +894,7 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
             amount=Decimal("500.00"),
             payment_method=Transaction.PaymentMethod.CASH,
             created=timezone.now() - timedelta(days=10),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             payment_reference="CUSTODY-OLD",
         )
         self.recent_payment = self.create_transaction(
@@ -902,7 +902,7 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
             amount=Decimal("900.00"),
             payment_method=Transaction.PaymentMethod.DIGITAL_WALLET,
             created=timezone.now(),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             payment_reference="CUSTODY-RECENT",
         )
         self.recent_refund = self.create_transaction(
@@ -911,7 +911,7 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
             amount=Decimal("-150.00"),
             payment_method=Transaction.PaymentMethod.BANK_TRANSFER,
             created=timezone.now(),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             payment_reference="CUSTODY-REFUND",
         )
         self.cancelled_payment = self.create_transaction(
@@ -919,10 +919,10 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
             amount=Decimal("300.00"),
             payment_method=Transaction.PaymentMethod.OTHER,
             created=timezone.now(),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             payment_reference="CUSTODY-CANCELLED",
             is_cancelled=True,
-            cancelled_by=self.owner,
+            cancelled_by=self.owner.profile,
             cancelled_at=timezone.now(),
             cancellation_reason="Correction",
         )
@@ -930,13 +930,13 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
             booking,
             amount=Decimal("400.00"),
             created=timezone.now(),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             payment_reference="CUSTODY-SETTLED",
         )
         settlement = self.create_settlement(
             self.club,
             total_amount=self.settled_payment.amount,
-            settled_by=self.owner,
+            settled_by=self.owner.profile,
         )
         SettlementTransaction.objects.create(
             settlement=settlement,
@@ -953,7 +953,8 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
         for user in (self.staff, self.owner):
             self.client.force_authenticate(user=user)
             preview = self.client.get(
-                self.settlement_preview_url(self.club), {"user": self.staff.id}
+                self.settlement_preview_url(self.club),
+                {"collected_by": self.staff.profile.id},
             )
             self.assertEqual(preview.status_code, status.HTTP_200_OK)
             self.assertEqual(
@@ -966,7 +967,7 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
             self.client.force_authenticate(user=user)
             summary = self.client.get(
                 self.settlement_unsettled_summary_url(self.club),
-                {"user": self.staff.id},
+                {"collected_by": self.staff.profile.id},
             )
             self.assertEqual(summary.status_code, status.HTTP_200_OK)
             self.assertEqual(summary.data["results"][0]["transaction_count"], 3)
@@ -974,7 +975,7 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
         self.client.force_authenticate(user=self.owner)
         created = self.client.post(
             self.settlement_list_url(self.club),
-            {"user": self.staff.id},
+            {"collected_by": self.staff.profile.id},
             format="json",
         )
         self.assertEqual(created.status_code, status.HTTP_201_CREATED)
@@ -996,16 +997,17 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
         other_court_transaction = self.create_transaction(
             other_booking,
             amount=Decimal("75.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             payment_reference="CUSTODY-OTHER-COURT",
         )
         self.client.force_authenticate(user=self.owner)
         all_courts = self.client.get(
-            self.settlement_preview_url(self.club), {"user": self.staff.id}
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff.profile.id},
         )
         selected_court = self.client.get(
             self.settlement_preview_url(self.club),
-            {"user": self.staff.id, "court": self.court.id},
+            {"collected_by": self.staff.profile.id, "court": self.court.id},
         )
         self.assertEqual(all_courts.status_code, status.HTTP_200_OK)
         self.assertEqual(selected_court.status_code, status.HTTP_200_OK)
@@ -1029,19 +1031,19 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
 
         self.assertEqual(
             set(inspect.signature(preview).parameters),
-            {"club", "user", "court"},
+            {"club", "collected_by", "court"},
         )
         self.assertEqual(
             set(inspect.signature(create).parameters),
-            {"club", "user", "court", "settled_by", "notes"},
+            {"club", "collected_by", "court", "settled_by", "notes"},
         )
 
 
 class SettlementNegativeCustodyFlowTests(SettlementAPITestCase):
 
     def setUp(self):
-        self.owner = self.create_user("negative-custody-owner")
-        self.staff = self.create_user("negative-custody-staff")
+        self.owner = self.create_user()
+        self.staff = self.create_user()
         self.club = self.create_club("Negative Custody Club", slug="negative-custody")
         self.court = self.create_court(
             self.club,
@@ -1064,13 +1066,13 @@ class SettlementNegativeCustodyFlowTests(SettlementAPITestCase):
         payment = self.create_transaction(
             booking,
             amount=Decimal("500.00"),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             payment_reference="NEGATIVE-CUSTODY-PAYMENT",
         )
         self.client.force_authenticate(user=self.owner)
         settlement_response = self.client.post(
             self.settlement_list_url(self.club),
-            {"collected_by": self.staff.id},
+            {"collected_by": self.staff.profile.id},
             format="json",
         )
         self.assertEqual(settlement_response.status_code, status.HTTP_201_CREATED)
@@ -1091,7 +1093,7 @@ class SettlementNegativeCustodyFlowTests(SettlementAPITestCase):
             booking=booking, transaction_type=Transaction.Type.REFUND
         )
         self.assertEqual(refund.amount, Decimal("-500.00"))
-        self.assertEqual(refund.created_by, self.staff)
+        self.assertEqual(refund.created_by, self.staff.profile)
         self.assertFalse(hasattr(refund, "settlement_line"))
         preview = self.client.get(self.settlement_preview_url(self.club))
         self.assertEqual(preview.status_code, status.HTTP_200_OK)
@@ -1105,25 +1107,29 @@ class SettlementNegativeCustodyFlowTests(SettlementAPITestCase):
 class SettlementImmutabilityFilterPatternTests(SettlementAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("filter-admin")
-        self.staff = self.create_user("filter-staff")
-        self.creator = self.create_user("filter-creator")
-        self.settler = self.create_user("filter-settler")
+        self.platform_admin = self.create_platform_admin()
+        self.staff = self.create_user()
+        self.creator = self.create_user()
+        self.settler = self.create_user()
+        self.other_settler = self.create_user()
         self.club = self.create_club("Filter Club", slug="settlement-filter")
         self.other_club = self.create_club("Other Filter Club", slug="other-filter")
         self.court = self.create_court(self.club, "Filter Court")
         self.same_club_other_court = self.create_court(self.club, "Filter Other Court")
         self.other_court = self.create_court(self.other_club, "Other Filter Court")
         grant_staff_court(self.staff, self.court)
+        grant_staff_court(self.creator, self.same_club_other_court)
+        grant_staff_court(self.settler, self.same_club_other_court)
+        grant_staff_court(self.other_settler, self.other_court)
         self.first_settlement = self.create_settlement(
             self.club,
             court=self.court,
-            settled_by=self.creator,
+            settled_by=self.creator.profile,
         )
         self.t1 = self.create_transaction(
             self.create_booking(self.court),
             created=self.time_at(10),
-            created_by=self.staff,
+            created_by=self.staff.profile,
         )
         SettlementTransaction.objects.create(
             settlement=self.first_settlement,
@@ -1134,12 +1140,12 @@ class SettlementImmutabilityFilterPatternTests(SettlementAPITestCase):
         self.second_settlement = self.create_settlement(
             self.club,
             court=self.same_club_other_court,
-            settled_by=self.settler,
+            settled_by=self.settler.profile,
         )
         self.t2 = self.create_transaction(
             self.create_booking(self.same_club_other_court),
             created=self.time_at(16),
-            created_by=self.creator,
+            created_by=self.creator.profile,
         )
         SettlementTransaction.objects.create(
             settlement=self.second_settlement,
@@ -1150,7 +1156,7 @@ class SettlementImmutabilityFilterPatternTests(SettlementAPITestCase):
         self.other_settlement = self.create_settlement(
             self.other_club,
             court=self.other_court,
-            settled_by=self.settler,
+            settled_by=self.other_settler.profile,
         )
         self.client.force_authenticate(user=self.platform_admin)
 
@@ -1187,20 +1193,87 @@ class SettlementImmutabilityFilterPatternTests(SettlementAPITestCase):
 
     def test_filter_by_settled_by(self):
         creator_response = self.client.get(
-            self.settlement_list_url(self.club), {"settled_by": self.creator.id}
+            self.settlement_list_url(self.club),
+            {"settled_by": self.creator.profile.id},
         )
         settler_response = self.client.get(
-            self.settlement_list_url(self.club), {"settled_by": self.settler.id}
+            self.settlement_list_url(self.club),
+            {"settled_by": self.settler.profile.id},
         )
         self.assertEqual(self.list_ids(creator_response), {self.first_settlement.id})
         self.assertEqual(self.list_ids(settler_response), {self.second_settlement.id})
 
-    def test_filter_by_user(self):
+    def test_settled_by_filter_uses_profile_id(self):
+        from apps.profiles.models import Profile
+
+        for index in range(Profile.objects.count() + 1):
+            self.create_user()
+        actor_user = self.create_user()
+        actor_profile = grant_staff_court(actor_user, self.court)
+        settlement = self.create_settlement(
+            self.club,
+            court=self.court,
+            settled_by=actor_profile,
+        )
+        self.assertNotEqual(actor_profile.id, actor_user.id)
+
+        profile_response = self.client.get(
+            self.settlement_list_url(self.club), {"settled_by": actor_profile.id}
+        )
+        account_only_user_id = self.create_user_id_without_profile(
+            "settlement-settled-by-account-only"
+        )
+        user_id_response = self.client.get(
+            self.settlement_list_url(self.club), {"settled_by": account_only_user_id}
+        )
+        self.assertEqual(self.list_ids(profile_response), {settlement.id})
+        self.assertEqual(self.list_ids(user_id_response), set())
+
+    def test_collected_by_filter_uses_transaction_creator_profile_id(self):
+        from apps.profiles.models import Profile
+
+        for index in range(Profile.objects.count() + 1):
+            self.create_user()
+        collector_user = self.create_user()
+        collector_profile = grant_staff_court(collector_user, self.court)
+        transaction_obj = self.create_transaction(
+            self.create_booking(self.court),
+            created_by=collector_profile,
+        )
+        settlement = self.create_settlement(
+            self.club,
+            court=self.court,
+            settled_by=self.creator.profile,
+        )
+        SettlementTransaction.objects.create(
+            settlement=settlement,
+            transaction=transaction_obj,
+            amount=transaction_obj.amount,
+        )
+        self.assertNotEqual(collector_profile.id, collector_user.id)
+
+        profile_id_response = self.client.get(
+            self.settlement_list_url(self.club),
+            {"collected_by": collector_profile.id},
+        )
+        account_only_user_id = self.create_user_id_without_profile(
+            "settlement-collected-by-account-only"
+        )
+        user_id_response = self.client.get(
+            self.settlement_list_url(self.club),
+            {"collected_by": account_only_user_id},
+        )
+        self.assertEqual(self.list_ids(profile_id_response), {settlement.id})
+        self.assertEqual(self.list_ids(user_id_response), set())
+
+    def test_filter_by_collected_by(self):
         staff_response = self.client.get(
-            self.settlement_list_url(self.club), {"user": self.staff.id}
+            self.settlement_list_url(self.club),
+            {"collected_by": self.staff.profile.id},
         )
         creator_response = self.client.get(
-            self.settlement_list_url(self.club), {"user": self.creator.id}
+            self.settlement_list_url(self.club),
+            {"collected_by": self.creator.profile.id},
         )
         self.assertEqual(self.list_ids(staff_response), {self.first_settlement.id})
         self.assertEqual(self.list_ids(creator_response), {self.second_settlement.id})
@@ -1210,16 +1283,19 @@ class SettlementImmutabilityFilterPatternTests(SettlementAPITestCase):
             self.settlement_detail_url(self.club, self.first_settlement)
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["settled_by"], self.creator.id)
-        self.assertEqual(response.data["settled_by_name"], self.creator.username)
+        self.assertEqual(response.data["settled_by"], self.creator.profile.id)
+        self.assertEqual(
+            response.data["settled_by_name"], self.creator.get_display_name()
+        )
         self.assertEqual(response.data["court_name"], self.court.name)
 
-    def test_settled_by_name_uses_full_name_then_username(self):
+    def test_settled_by_name_uses_full_name_then_phone(self):
         self.settler.first_name = "Mohamed"
         self.settler.last_name = "Ahmed"
         self.settler.save(update_fields=["first_name", "last_name"])
         list_response = self.client.get(
-            self.settlement_list_url(self.club), {"settled_by": self.settler.id}
+            self.settlement_list_url(self.club),
+            {"settled_by": self.settler.profile.id},
         )
         detail_response = self.client.get(
             self.settlement_detail_url(self.club, self.second_settlement)
@@ -1233,11 +1309,12 @@ class SettlementImmutabilityFilterPatternTests(SettlementAPITestCase):
         self.settler.first_name = ""
         self.settler.last_name = ""
         self.settler.save(update_fields=["first_name", "last_name"])
-        username_response = self.client.get(
+        phone_response = self.client.get(
             self.settlement_detail_url(self.club, self.second_settlement)
         )
         self.assertEqual(
-            username_response.data["settled_by_name"], self.settler.username
+            phone_response.data["settled_by_name"],
+            self.settler.get_display_name(),
         )
 
     def test_filters_respect_club_access_and_ignore_club_query_param(self):
@@ -1350,7 +1427,7 @@ class SettlementSeedSchemaTests(SettlementAPITestCase):
 class SettlementQueryScalingTests(SettlementAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("settlement-query-admin")
+        self.platform_admin = self.create_platform_admin()
         self.club = self.create_club("Settlement Query Club", slug="settlement-query")
         self.court = self.create_court(self.club, "Settlement Query Court")
         self.client.force_authenticate(user=self.platform_admin)
@@ -1365,7 +1442,7 @@ class SettlementQueryScalingTests(SettlementAPITestCase):
         )
         return self.create_transaction(
             booking,
-            created_by=self.platform_admin,
+            created_by=self.platform_admin.profile,
             payment_reference=f"PREVIEW-Q-{index}",
         )
 
@@ -1388,14 +1465,14 @@ class SettlementQueryScalingTests(SettlementAPITestCase):
         with CaptureQueriesContext(connection) as first:
             first_response = self.client.get(
                 self.settlement_preview_url(self.club),
-                {"user": self.platform_admin.id},
+                {"collected_by": self.platform_admin.profile.id},
             )
         for index in range(1, 30):
             self.add_preview_candidate(index)
         with CaptureQueriesContext(connection) as second:
             second_response = self.client.get(
                 self.settlement_preview_url(self.club),
-                {"user": self.platform_admin.id},
+                {"collected_by": self.platform_admin.profile.id},
             )
         self.assertEqual(first_response.status_code, status.HTTP_200_OK)
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
@@ -1411,13 +1488,13 @@ class SettlementQueryScalingTests(SettlementAPITestCase):
         )
         first_transaction = self.create_transaction(
             first_booking,
-            created_by=self.platform_admin,
+            created_by=self.platform_admin.profile,
             payment_reference="DETAIL-Q-1",
         )
         first_settlement = self.create_settlement(
             self.club,
             court=self.court,
-            settled_by=self.platform_admin,
+            settled_by=self.platform_admin.profile,
         )
         SettlementTransaction.objects.create(
             settlement=first_settlement,
@@ -1431,7 +1508,7 @@ class SettlementQueryScalingTests(SettlementAPITestCase):
         many_settlement = self.create_settlement(
             self.club,
             court=self.court,
-            settled_by=self.platform_admin,
+            settled_by=self.platform_admin.profile,
             notes="many-lines",
         )
         for index in range(12):
@@ -1444,7 +1521,7 @@ class SettlementQueryScalingTests(SettlementAPITestCase):
             )
             transaction_obj = self.create_transaction(
                 booking,
-                created_by=self.platform_admin,
+                created_by=self.platform_admin.profile,
                 payment_reference=f"DETAIL-Q-M-{index}",
             )
             SettlementTransaction.objects.create(
@@ -1469,16 +1546,10 @@ class SettlementQueryScalingTests(SettlementAPITestCase):
 class SettlementUnsettledSummaryTests(SettlementAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("summary-admin")
-        self.owner = self.create_user(
-            "summary-owner", first_name="Owner", last_name="One"
-        )
-        self.staff = self.create_user(
-            "summary-staff", first_name="Mohamed", last_name="Ahmed"
-        )
-        self.other_staff = self.create_user(
-            "summary-staff-two", first_name="Ahmed", last_name="Ali"
-        )
+        self.platform_admin = self.create_platform_admin()
+        self.owner = self.create_user(first_name="Owner", last_name="One")
+        self.staff = self.create_user(first_name="Mohamed", last_name="Ahmed")
+        self.other_staff = self.create_user(first_name="Ahmed", last_name="Ali")
         self.club = self.create_club("Summary Club", slug="unsettled-summary")
         self.other_club = self.create_club("Other Summary Club", slug="other-unsettled")
         self.court = self.create_court(self.club, "Summary Court")
@@ -1494,7 +1565,7 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
             amount=Decimal("800.00"),
             payment_method=Transaction.PaymentMethod.CASH,
             created=self.time_at(11),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             payment_reference="SUM-CASH",
         )
         self.staff_wallet = self.create_transaction(
@@ -1502,7 +1573,7 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
             amount=Decimal("450.00"),
             payment_method=Transaction.PaymentMethod.DIGITAL_WALLET,
             created=self.time_at(12),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             payment_reference="SUM-WALLET",
         )
         self.staff_refund = self.create_transaction(
@@ -1510,21 +1581,21 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
             amount=Decimal("-100.00"),
             transaction_type=Transaction.Type.REFUND,
             created=self.time_at(13),
-            created_by=self.staff,
+            created_by=self.staff.profile,
             payment_reference="SUM-REFUND",
         )
         self.other_staff_tx = self.create_transaction(
             self.booking,
             amount=Decimal("200.00"),
             created=self.time_at(14),
-            created_by=self.other_staff,
+            created_by=self.other_staff.profile,
             payment_reference="SUM-OTHER-STAFF",
         )
         self.owner_tx = self.create_transaction(
             self.booking,
             amount=Decimal("500.00"),
             created=self.time_at(15),
-            created_by=self.owner,
+            created_by=self.owner.profile,
             payment_reference="SUM-OWNER",
         )
         other_booking = self.create_booking(
@@ -1533,7 +1604,7 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
         self.create_transaction(
             other_booking,
             amount=Decimal("999.00"),
-            created_by=self.owner,
+            created_by=self.owner.profile,
             payment_reference="SUM-OTHER-CLUB",
         )
 
@@ -1541,12 +1612,13 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
         self.client.force_authenticate(user=self.owner)
         response = self.client.get(self.settlement_unsettled_summary_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        by_id = {row["user"]: row for row in response.data["results"]}
+        by_id = {row["collected_by"]: row for row in response.data["results"]}
         self.assertEqual(
-            set(by_id), {self.staff.id, self.other_staff.id, self.owner.id}
+            set(by_id),
+            {self.staff.profile.id, self.other_staff.profile.id, self.owner.profile.id},
         )
-        staff_row = by_id[self.staff.id]
-        self.assertEqual(staff_row["user_name"], "Mohamed Ahmed")
+        staff_row = by_id[self.staff.profile.id]
+        self.assertEqual(staff_row["collected_by_name"], "Mohamed Ahmed")
         self.assertEqual(staff_row["transaction_count"], 3)
         self.assertEqual(staff_row["booking_payments"], "1250.00")
         self.assertEqual(staff_row["booking_refunds"], "-100.00")
@@ -1563,7 +1635,7 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
         if isinstance(period_start, str):
             period_start = parse_datetime(period_start)
         self.assertEqual(period_start, self.staff_cash.created)
-        owner_row = by_id[self.owner.id]
+        owner_row = by_id[self.owner.profile.id]
         self.assertTrue(owner_row["is_self"])
         self.assertTrue(owner_row["can_approve"])
 
@@ -1575,7 +1647,11 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
         response = self.client.get(self.settlement_unsettled_summary_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         staff_row = next(
-            (row for row in response.data["results"] if row["user"] == self.staff.id)
+            (
+                row
+                for row in response.data["results"]
+                if row["collected_by"] == self.staff.profile.id
+            )
         )
         self.assertEqual(staff_row["total_amount"], "1150.00")
         self.assertEqual(staff_row["transaction_count"], 3)
@@ -1583,15 +1659,15 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
     def test_zero_net_collector_remains_visible_but_zero_candidate_collector_does_not(
         self,
     ):
-        zero_net_collector = self.create_user("summary-zero-net")
-        no_candidates_collector = self.create_user("summary-zero-candidates")
+        zero_net_collector = self.create_user()
+        no_candidates_collector = self.create_user()
         for collector in (zero_net_collector, no_candidates_collector):
             grant_staff_court(collector, self.court)
         self.create_transaction(
             self.booking,
             amount=Decimal("100.00"),
             payment_method=Transaction.PaymentMethod.CASH,
-            created_by=zero_net_collector,
+            created_by=zero_net_collector.profile,
             payment_reference="SUM-ZERO-PAYMENT",
         )
         self.create_transaction(
@@ -1599,45 +1675,50 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
             transaction_type=Transaction.Type.REFUND,
             amount=Decimal("-100.00"),
             payment_method=Transaction.PaymentMethod.DIGITAL_WALLET,
-            created_by=zero_net_collector,
+            created_by=zero_net_collector.profile,
             payment_reference="SUM-ZERO-REFUND",
         )
         self.client.force_authenticate(user=self.owner)
         response = self.client.get(self.settlement_unsettled_summary_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        by_id = {row["user"]: row for row in response.data["results"]}
-        self.assertIn(zero_net_collector.id, by_id)
-        self.assertEqual(by_id[zero_net_collector.id]["transaction_count"], 2)
-        self.assertEqual(by_id[zero_net_collector.id]["net_amount"], "0.00")
+        by_id = {row["collected_by"]: row for row in response.data["results"]}
+        self.assertIn(zero_net_collector.profile.id, by_id)
+        self.assertEqual(by_id[zero_net_collector.profile.id]["transaction_count"], 2)
+        self.assertEqual(by_id[zero_net_collector.profile.id]["net_amount"], "0.00")
         self.assertEqual(
-            by_id[zero_net_collector.id]["totals_by_payment_method"]["CASH"], "100.00"
+            by_id[zero_net_collector.profile.id]["totals_by_payment_method"]["CASH"],
+            "100.00",
         )
         self.assertEqual(
-            by_id[zero_net_collector.id]["totals_by_payment_method"]["DIGITAL_WALLET"],
+            by_id[zero_net_collector.profile.id]["totals_by_payment_method"][
+                "DIGITAL_WALLET"
+            ],
             "-100.00",
         )
-        self.assertNotIn(no_candidates_collector.id, by_id)
+        self.assertNotIn(no_candidates_collector.profile.id, by_id)
 
     def test_user_filter_validates_access_and_club(self):
         self.client.force_authenticate(user=self.owner)
         filtered = self.client.get(
             self.settlement_unsettled_summary_url(self.club),
-            {"user": self.staff.id},
+            {"collected_by": self.staff.profile.id},
         )
         self.assertEqual(filtered.status_code, status.HTTP_200_OK)
         self.assertEqual(len(filtered.data["results"]), 1)
-        self.assertEqual(filtered.data["results"][0]["user"], self.staff.id)
-        outsider = self.create_user("summary-outsider")
+        self.assertEqual(
+            filtered.data["results"][0]["collected_by"], self.staff.profile.id
+        )
+        outsider = self.create_user()
         grant_staff_court(outsider, self.other_court)
         other_club = self.client.get(
             self.settlement_unsettled_summary_url(self.club),
-            {"user": outsider.id},
+            {"collected_by": outsider.profile.id},
         )
         self.assertEqual(other_club.status_code, status.HTTP_400_BAD_REQUEST)
         self.client.force_authenticate(user=self.staff)
         owner_money = self.client.get(
             self.settlement_unsettled_summary_url(self.club),
-            {"user": self.owner.id},
+            {"collected_by": self.owner.profile.id},
         )
         self.assertEqual(owner_money.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -1657,16 +1738,14 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
 class SettlementUnsettledSummaryQueryScalingTests(SettlementAPITestCase):
 
     def setUp(self):
-        self.platform_admin = self.create_platform_admin("summary-query-admin")
+        self.platform_admin = self.create_platform_admin()
         self.club = self.create_club("Summary Query Club", slug="summary-query")
         self.court = self.create_court(self.club, "Summary Query Court")
         self.client.force_authenticate(user=self.platform_admin)
 
     def add_collector(self, index):
-        user = self.create_user(
-            f"summary-collector-{index}", first_name="Collector", last_name=str(index)
-        )
-        grant_staff_court(user, self.court)
+        user = self.create_user(first_name="Collector", last_name=str(index))
+        collector_profile = grant_staff_court(user, self.court)
         booking = self.create_booking(
             self.court,
             customer_phone=f"+2010000081{index:02d}",
@@ -1674,9 +1753,11 @@ class SettlementUnsettledSummaryQueryScalingTests(SettlementAPITestCase):
             end_time=self.time_at(9 + index % 10),
         )
         self.create_transaction(
-            booking, created_by=user, payment_reference=f"SUM-SCALE-{index}"
+            booking,
+            created_by=collector_profile,
+            payment_reference=f"SUM-SCALE-{index}",
         )
-        return user
+        return collector_profile
 
     def test_query_count_does_not_grow_per_collector(self):
         self.add_collector(0)
@@ -1713,10 +1794,10 @@ class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
         self.court_b = self.create_court(self.club, "Court B")
         self.court_c = self.create_court(self.club, "Court C")
         self.other_club_court = self.create_court(self.other_club, "Other Club Court")
-        self.owner = self.create_user("spine-owner")
-        self.staff_a = self.create_user("spine-staff-a")
-        self.staff_b = self.create_user("spine-staff-b")
-        self.other_club_staff = self.create_user("spine-other-staff")
+        self.owner = self.create_user()
+        self.staff_a = self.create_user()
+        self.staff_b = self.create_user()
+        self.other_club_staff = self.create_user()
         grant_owner_club(self.owner, self.club)
         grant_staff_court(self.staff_a, self.court_a)
         grant_staff_court(self.staff_b, self.court_b)
@@ -1736,31 +1817,31 @@ class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
         self.t1 = self.create_transaction(
             self.booking_a,
             amount=Decimal("100.00"),
-            created_by=self.staff_a,
+            created_by=self.staff_a.profile,
             payment_reference="SPINE-T1",
         )
         self.t2 = self.create_transaction(
             self.booking_b,
             amount=Decimal("150.00"),
-            created_by=self.staff_a,
+            created_by=self.staff_a.profile,
             payment_reference="SPINE-T2",
         )
         self.t3 = self.create_transaction(
             self.booking_c,
             amount=Decimal("200.00"),
-            created_by=self.staff_a,
+            created_by=self.staff_a.profile,
             payment_reference="SPINE-T3",
         )
         self.t_staff_b = self.create_transaction(
             self.booking_b,
             amount=Decimal("300.00"),
-            created_by=self.staff_b,
+            created_by=self.staff_b.profile,
             payment_reference="SPINE-STAFF-B",
         )
         self.t_other_club = self.create_transaction(
             self.other_club_booking,
             amount=Decimal("500.00"),
-            created_by=self.other_club_staff,
+            created_by=self.other_club_staff.profile,
             payment_reference="SPINE-OTHER-CLUB",
         )
 
@@ -1787,7 +1868,8 @@ class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
         staff_preview = self.client.get(self.settlement_preview_url(self.club))
         self.client.force_authenticate(user=self.owner)
         owner_preview = self.client.get(
-            self.settlement_preview_url(self.club), {"user": self.staff_a.id}
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff_a.profile.id},
         )
         self.assertEqual(staff_preview.status_code, status.HTTP_200_OK)
         self.assertEqual(owner_preview.status_code, status.HTTP_200_OK)
@@ -1820,25 +1902,26 @@ class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
         """Transactions from another Club must never appear in Current Custody."""
         self.client.force_authenticate(user=self.owner)
         preview = self.client.get(
-            self.settlement_preview_url(self.club), {"user": self.staff_a.id}
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff_a.profile.id},
         )
         self.assertEqual(preview.status_code, status.HTTP_200_OK)
         ids = {tx["id"] for tx in preview.data["transactions"]}
         self.assertNotIn(self.t_other_club.id, ids)
         from apps.settlements import services
 
-        club_calc = services.preview(club=self.club)
+        club_calc = services.preview(club=self.club, collected_by=None)
         club_txs = {t["id"] for t in club_calc["transactions"]}
         self.assertNotIn(self.t_other_club.id, club_txs)
 
     def test_6_no_collector_includes_all_eligible_unsettled_transactions_in_club(self):
         """
-        user=None must include all eligible unsettled transactions in the
+        collected_by=None must include all eligible unsettled transactions in the
         scoped Club across all courts.
         """
         from apps.settlements import services
 
-        club_calc = services.preview(club=self.club, user=None)
+        club_calc = services.preview(club=self.club, collected_by=None)
         all_club_unsettled = {t["id"] for t in club_calc["transactions"]}
         self.assertEqual(
             all_club_unsettled, {self.t1.id, self.t2.id, self.t3.id, self.t_staff_b.id}
@@ -1853,13 +1936,14 @@ class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
         """
         self.client.force_authenticate(user=self.owner)
         preview = self.client.get(
-            self.settlement_preview_url(self.club), {"user": self.staff_a.id}
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff_a.profile.id},
         )
         preview_ids = {tx["id"] for tx in preview.data["transactions"]}
         self.assertEqual(preview_ids, {self.t1.id, self.t2.id, self.t3.id})
         create_response = self.client.post(
             self.settlement_list_url(self.club),
-            {"user": self.staff_a.id},
+            {"collected_by": self.staff_a.profile.id},
             format="json",
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
@@ -1887,13 +1971,13 @@ class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
 
     def test_9_no_court_restriction_in_custody(self):
         """
-        Current custody for a user contains transactions across multiple
+        Current custody for a collector contains transactions across multiple
         courts even if court is provided.
         """
         self.client.force_authenticate(user=self.owner)
         preview = self.client.get(
             self.settlement_preview_url(self.club),
-            {"user": self.staff_a.id, "court": self.court_a.id},
+            {"collected_by": self.staff_a.profile.id, "court": self.court_a.id},
         )
         self.assertEqual(preview.status_code, status.HTTP_200_OK)
         tx_ids = {tx["id"] for tx in preview.data["transactions"]}
@@ -1930,10 +2014,12 @@ class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
         """
         self.client.force_authenticate(user=self.owner)
         preview_1 = self.client.get(
-            self.settlement_preview_url(self.club), {"user": self.staff_a.id}
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff_a.profile.id},
         )
         preview_2 = self.client.get(
-            self.settlement_preview_url(self.club), {"user": self.staff_a.id}
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff_a.profile.id},
         )
         self.assertEqual(preview_1.status_code, status.HTTP_200_OK)
         self.assertEqual(preview_2.status_code, status.HTTP_200_OK)
@@ -1945,3 +2031,85 @@ class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
             {tx["id"] for tx in preview_1.data["transactions"]},
             {tx["id"] for tx in preview_2.data["transactions"]},
         )
+
+
+class SettlementProfileFirstContractTests(SettlementAPITestCase):
+    """
+    Contract tests verifying Profile-first settlement custody and simplification:
+    - Transaction.created_by = staff.profile
+    - Settlement.settled_by = owner.profile
+    - AuditLog.actor = owner.profile
+    - Preview / create parity
+    - RequestAccessContext has no user property
+    - RequestAccessContext exposes the resolved Profile as its business identity
+    """
+
+    def setUp(self):
+        self.owner = self.create_user()
+        self.staff = self.create_user()
+        self.club = self.create_club("Contract Club", slug="contract-club")
+        self.court = self.create_court(self.club, "Contract Court")
+        grant_owner_club(self.owner, self.club)
+        grant_staff_court(self.staff, self.court)
+        self.booking = self.create_booking(
+            self.court, customer_name="Profile Contract Customer"
+        )
+        self.tx1 = self.create_transaction(
+            self.booking,
+            amount=Decimal("200.00"),
+            payment_method=Transaction.PaymentMethod.CASH,
+            created_by=self.staff.profile,
+            payment_reference="CONTRACT-TX-1",
+        )
+        self.tx2 = self.create_transaction(
+            self.booking,
+            amount=Decimal("150.00"),
+            payment_method=Transaction.PaymentMethod.DIGITAL_WALLET,
+            created_by=self.staff.profile,
+            payment_reference="CONTRACT-TX-2",
+        )
+
+    def test_staff_collected_and_owner_settled_profile_custody_and_audit(self):
+        self.assertEqual(self.tx1.created_by, self.staff.profile)
+        self.assertEqual(self.tx2.created_by, self.staff.profile)
+
+        self.client.force_authenticate(user=self.owner)
+        preview_res = self.client.get(
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff.profile.id},
+        )
+        self.assertEqual(preview_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(preview_res.data["collected_by"], self.staff.profile.id)
+        self.assertEqual(preview_res.data["transaction_count"], 2)
+        self.assertEqual(preview_res.data["total_amount"], "350.00")
+        self.assertEqual(preview_res.data["net_amount"], "350.00")
+        preview_tx_ids = {t["id"] for t in preview_res.data["transactions"]}
+        self.assertEqual(preview_tx_ids, {self.tx1.id, self.tx2.id})
+
+        create_res = self.client.post(
+            self.settlement_list_url(self.club),
+            {"collected_by": self.staff.profile.id, "notes": "Contract settlement"},
+            format="json",
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_res.data["settled_by"], self.owner.profile.id)
+        self.assertEqual(create_res.data["total_amount"], "350.00")
+        self.assertEqual(create_res.data["transaction_count"], 2)
+
+        settlement = Settlement.objects.get(pk=create_res.data["id"])
+        self.assertEqual(settlement.settled_by, self.owner.profile)
+        settled_tx_ids = set(settlement.lines.values_list("transaction_id", flat=True))
+        self.assertEqual(settled_tx_ids, preview_tx_ids)
+
+        audit_log = AuditLog.objects.filter(
+            action=AuditLog.Action.SETTLEMENT_CREATED,
+            entity_type="Settlement",
+            entity_id=settlement.id,
+        ).first()
+        self.assertIsNotNone(audit_log)
+        self.assertEqual(audit_log.actor, self.owner.profile)
+
+    def test_request_access_context_has_no_user_property(self):
+        from apps.common.authorization.context import RequestAccessContext
+
+        self.assertFalse(hasattr(RequestAccessContext, "user"))

@@ -25,12 +25,11 @@ from tests.booking_factories import persist_booking
 class BookingAttemptModelTests(TestCase):
     password = "test-pass-123"
 
-    def create_user(self, username: str, **extra_fields) -> User:
-        return User.objects.create_user(
-            username=username,
-            password=self.password,
-            **extra_fields,
-        )
+    def create_user(self, phone_number=None, **extra_fields) -> User:
+        extra_fields.setdefault("password", getattr(self, "password", "test-pass-123"))
+        from tests.profile_factories import create_user as factory_create_user
+
+        return factory_create_user(phone_number=phone_number, **extra_fields)
 
     def create_club(self, name: str, slug: str) -> Club:
         return Club.objects.create(
@@ -65,7 +64,9 @@ class BookingAttemptModelTests(TestCase):
         extra_fields.setdefault("customer_phone", "+201000000001")
         return persist_booking(court, **extra_fields)
 
-    def create_rejected_attempt(self, court: Court, attempted_by: User, **extra_fields):
+    def create_rejected_attempt(
+        self, court: Court, attempted_by: Profile, **extra_fields
+    ):
         data = {
             "club": court.club,
             "court": court,
@@ -90,8 +91,8 @@ class BookingAttemptModelTests(TestCase):
         self.other_club = self.create_club("Other Attempt Club", "other-attempt")
         self.court = self.create_court(self.club, "Attempt Court")
         self.other_court = self.create_court(self.other_club, "Other Court")
-        self.staff = self.create_user("attempt-staff")
-        self.create_user("other-staff")
+        self.staff = self.create_user()
+        self.create_user()
         self.staff_profile = StaffProfile.objects.create(
             user=self.staff, role=Profile.Role.STAFF, club=self.club
         )
@@ -103,7 +104,7 @@ class BookingAttemptModelTests(TestCase):
         client_request_id = uuid.uuid4()
         attempt = self.create_rejected_attempt(
             self.court,
-            self.staff,
+            self.staff_profile,
             client_request_id=client_request_id,
             customer_name="Ahmed Hassan",
             customer_phone="+201012345678",
@@ -116,7 +117,7 @@ class BookingAttemptModelTests(TestCase):
         attempt.refresh_from_db()
         self.assertEqual(attempt.club, self.club)
         self.assertEqual(attempt.court, self.court)
-        self.assertEqual(attempt.attempted_by, self.staff)
+        self.assertEqual(attempt.attempted_by, self.staff.profile)
         self.assertEqual(attempt.client_request_id, client_request_id)
         self.assertEqual(attempt.customer_name, "Ahmed Hassan")
         self.assertEqual(str(attempt.customer_phone), "+201012345678")
@@ -131,17 +132,16 @@ class BookingAttemptModelTests(TestCase):
         self.assertEqual(attempt.failure_details, {"conflict_type": "BOOKING"})
         self.assertEqual(attempt.resolution, BookingAttempt.Resolution.UNRESOLVED)
         self.assertIsNotNone(attempt.created)
-        self.assertIsNotNone(attempt.modified)
         self.assertEqual(self.staff_profile.club, attempt.club)
         self.assertEqual(self.court, attempt.court)
-        self.assertEqual(self.staff_profile.user, attempt.attempted_by)
+        self.assertEqual(self.staff.profile, attempt.attempted_by)
 
     def test_successful_attempt_can_reference_resulting_booking(self):
-        booking = self.create_booking(self.court, created_by=self.staff)
+        booking = self.create_booking(self.court, created_by=self.staff_profile)
         attempt = BookingAttempt.objects.create(
             club=self.club,
             court=self.court,
-            attempted_by=self.staff,
+            attempted_by=self.staff_profile,
             booking=booking,
             client_request_id=uuid.uuid4(),
             customer_name=booking_customer_display_name(booking),
@@ -163,7 +163,7 @@ class BookingAttemptModelTests(TestCase):
     def test_rejected_attempt_does_not_create_fake_booking_or_financial_rows(self):
         self.assertEqual(Booking.objects.count(), 0)
 
-        attempt = self.create_rejected_attempt(self.court, self.staff)
+        attempt = self.create_rejected_attempt(self.court, self.staff_profile)
 
         self.assertEqual(attempt.outcome, BookingAttempt.Outcome.REJECTED)
         self.assertEqual(Booking.objects.count(), 0)
@@ -179,11 +179,11 @@ class BookingAttemptModelTests(TestCase):
         self.assertEqual(Settlement.objects.count(), 0)
 
     def test_attempt_preserves_original_values_when_booking_changes_later(self):
-        booking = self.create_booking(self.court, created_by=self.staff)
+        booking = self.create_booking(self.court, created_by=self.staff_profile)
         attempt = BookingAttempt.objects.create(
             club=self.club,
             court=self.court,
-            attempted_by=self.staff,
+            attempted_by=self.staff_profile,
             booking=booking,
             client_request_id=uuid.uuid4(),
             customer_name="Original Customer",
@@ -217,7 +217,7 @@ class BookingAttemptModelTests(TestCase):
             BookingAttempt(
                 club=self.club,
                 court=self.other_court,
-                attempted_by=self.staff,
+                attempted_by=self.staff_profile,
                 client_request_id=uuid.uuid4(),
                 customer_name="Cross Club Customer",
                 customer_phone="+201000000004",
@@ -233,7 +233,7 @@ class BookingAttemptModelTests(TestCase):
             BookingAttempt(
                 club=self.club,
                 court=self.court,
-                attempted_by=self.staff,
+                attempted_by=self.staff_profile,
                 booking=other_booking,
                 client_request_id=uuid.uuid4(),
                 customer_name="Cross Booking Customer",
@@ -248,14 +248,15 @@ class BookingAttemptModelTests(TestCase):
     def test_full_clean_rejects_accepted_attempt_source_mismatch(self):
         booking = self.create_booking(
             self.court,
-            source=Booking.Source.ADMIN_CORRECTION,
+            source=Booking.Source.RECURRING,
+            recurrence_status=Booking.RecurrenceStatus.ACTIVE,
         )
 
         with self.assertRaises(ValidationError) as error:
             BookingAttempt(
                 club=self.club,
                 court=self.court,
-                attempted_by=self.staff,
+                attempted_by=self.staff_profile,
                 booking=booking,
                 client_request_id=uuid.uuid4(),
                 customer_name="Source Customer",
@@ -273,7 +274,7 @@ class BookingAttemptModelTests(TestCase):
         client_request_id = uuid.uuid4()
         self.create_rejected_attempt(
             self.court,
-            self.staff,
+            self.staff_profile,
             client_request_id=client_request_id,
         )
 
@@ -281,14 +282,17 @@ class BookingAttemptModelTests(TestCase):
             with transaction.atomic():
                 self.create_rejected_attempt(
                     self.court,
-                    self.staff,
+                    self.staff_profile,
                     client_request_id=client_request_id,
                 )
 
-        other_staff = self.create_user("other-attempt-staff")
+        other_staff = self.create_user()
+        other_staff_profile = StaffProfile.objects.create(
+            user=other_staff, role=Profile.Role.STAFF, club=self.other_club
+        )
         other_attempt = self.create_rejected_attempt(
             self.other_court,
-            other_staff,
+            other_staff_profile,
             client_request_id=client_request_id,
         )
         self.assertEqual(other_attempt.club, self.other_club)
@@ -296,14 +300,14 @@ class BookingAttemptModelTests(TestCase):
     def test_attempts_without_client_request_id_are_allowed(self):
         first = self.create_rejected_attempt(
             self.court,
-            self.staff,
+            self.staff_profile,
             client_request_id=None,
             requested_start=self.time_at(20),
             requested_end=self.time_at(21),
         )
         second = self.create_rejected_attempt(
             self.court,
-            self.staff,
+            self.staff_profile,
             client_request_id=None,
             requested_start=self.time_at(21),
             requested_end=self.time_at(22),
@@ -317,7 +321,7 @@ class BookingAttemptModelTests(TestCase):
         valid_payload = {
             "club": self.club,
             "court": self.court,
-            "attempted_by": self.staff,
+            "attempted_by": self.staff_profile,
             "client_request_id": uuid.uuid4(),
             "customer_name": "Constraint Customer",
             "customer_phone": "+201000000006",
@@ -344,7 +348,7 @@ class BookingAttemptModelTests(TestCase):
                     outcome=BookingAttempt.Outcome.REJECTED,
                 )
 
-        booking = self.create_booking(self.court)
+        booking = self.create_booking(self.court, created_by=self.staff_profile)
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
                 payload = {
@@ -376,7 +380,7 @@ class BookingAttemptModelTests(TestCase):
             with transaction.atomic():
                 self.create_rejected_attempt(
                     self.court,
-                    self.staff,
+                    self.staff_profile,
                     requested_source=Booking.Source.RECURRING,
                     requested_recurring=False,
                 )
@@ -385,7 +389,7 @@ class BookingAttemptModelTests(TestCase):
             with transaction.atomic():
                 self.create_rejected_attempt(
                     self.court,
-                    self.staff,
+                    self.staff_profile,
                     requested_source=Booking.Source.MANUAL,
                     requested_recurring=True,
                 )
@@ -395,7 +399,7 @@ class BookingAttemptModelTests(TestCase):
             with transaction.atomic():
                 self.create_rejected_attempt(
                     self.court,
-                    self.staff,
+                    self.staff_profile,
                     requested_start=self.time_at(21),
                     requested_end=self.time_at(20),
                 )

@@ -5,7 +5,6 @@ from rest_framework import serializers, viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.test import APIRequestFactory, APITestCase, force_authenticate
 
-from apps.accounts.models import User
 from apps.clubs.models import Club
 from apps.common.authorization.contracts import load_authorization_config
 from apps.common.authorization.mixins import SlotyScopedResourceMixin
@@ -14,6 +13,7 @@ from apps.common.authorization.resolver import resolve_club_scope
 from apps.common.authorization.scopes import ResourceScope
 from apps.courts.models import Court
 from apps.profiles.models import OwnerProfile, Profile, StaffCourtAccess, StaffProfile
+from tests.profile_factories import create_user
 
 
 class CourtSerializer(serializers.ModelSerializer):
@@ -53,16 +53,12 @@ class AuthorizationSpineV2TestCase(APITestCase):
         self.court_b = Court.objects.create(
             club=self.club_b, name="Court B", default_price="200.00"
         )
-        self.owner = User.objects.create_user(
-            username="scope-owner", password="password"
-        )
+        self.owner = create_user(password="password")
         owner_profile = OwnerProfile.objects.create(
             user=self.owner, role=Profile.Role.OWNER
         )
         owner_profile.clubs.add(self.club_a)
-        self.staff = User.objects.create_user(
-            username="scope-staff", password="password"
-        )
+        self.staff = create_user(password="password")
         staff = StaffProfile.objects.create(
             user=self.staff, role=Profile.Role.STAFF, club=self.club_a
         )

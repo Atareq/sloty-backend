@@ -15,19 +15,18 @@ from apps.audit.services import (
     record_audit_log,
     transaction_audit_snapshot,
 )
-from apps.bookings.filters import (
-    annotate_booking_hold_expires_at,
-    compute_booking_hold_expires_at,
-)
+from apps.bookings.filters import exclude_logically_expired_holds
 from apps.bookings.identity import (
     booking_customer_display_name,
     booking_customer_display_phone,
+    resolve_club_player,
 )
 from apps.bookings.models import Booking, BookingAttempt
 from apps.common.authorization.querysets import scoped_queryset
 from apps.common.authorization.roles import Role
 from apps.common.authorization.scopes import ResourceScope
 from apps.common.exceptions import SlotyAPIException
+from apps.common.weekdays import to_sloty_weekday
 from apps.courts.models import Court
 from apps.courts.pricing import (
     BOOKING_MULTIDAY_NOT_SUPPORTED_MESSAGE,
@@ -36,14 +35,8 @@ from apps.courts.pricing import (
     BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID_MESSAGE,
     calculate_booking_price_from_schedule,
     datetime_for_local_date,
-    operational_end_date,
     slot_price_from_schedule,
     working_hour_bounds,
-)
-from apps.players.models import ClubPlayer
-from apps.players.services import (
-    find_or_create_player_profile,
-    get_or_create_club_player,
 )
 from apps.profiles.models import Profile
 from apps.transactions.models import Transaction
@@ -84,7 +77,6 @@ BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT_MESSAGE = _(
 PREVIOUS_BOOKING_ATTEMPT_REJECTED_MESSAGE = _(
     "This booking request was previously rejected."
 )
-COURT_CLOSED_ON_THIS_DAY_MESSAGE = _("The court is closed on this day.")
 PRICING_NOT_CONFIGURED_LABEL = _("Pricing not configured")
 BOOKING_NOT_IN_CLUB_MESSAGE = _("Booking must belong to the selected club.")
 BOOKING_CLUB_PLAYER_MISMATCH_MESSAGE = _(
@@ -94,6 +86,7 @@ BOOKING_CLUB_PLAYER_PHONE_MISMATCH_MESSAGE = _(
     "Selected ClubPlayer does not belong to the player identified by "
     "this booking's phone number."
 )
+
 BOOKING_CLUB_PLAYER_NOT_FOUND_MESSAGE = _("Selected ClubPlayer was not found.")
 BOOKING_ALREADY_CANCELLED_MESSAGE = _("This booking is already cancelled.")
 INVALID_BOOKING_STATUS_TRANSITION_MESSAGE = _(
@@ -139,6 +132,12 @@ BOOKING_ATTEMPT_FAILURE_MESSAGES = {
 }
 
 
+def hold_expiry_deadline(court, *, from_time=None):
+    """Snapshot the court's current HOLD duration from the given aware time."""
+    from_time = from_time or timezone.now()
+    return from_time + timedelta(hours=court.internal_hold_expiry_hours)
+
+
 def calculate_booking_price(court, start_time, end_time) -> Decimal:
     return calculate_booking_price_from_schedule(
         court=court,
@@ -170,16 +169,20 @@ def validate_booking_duration(court, start_time, end_time):
         )
 
 
-def blocking_booking_queryset(court, start_time, end_time, *, exclude_booking=None):
-    queryset = Booking.objects.filter(
-        court=court,
-        status__in=Booking.BLOCKING_STATUSES,
-        start_time__lt=end_time,
-        end_time__gt=start_time,
-    )
+def blocking_booking_queryset(
+    court, start_time, end_time=None, *, exclude_booking=None
+):
+    filters = {
+        "court": court,
+        "status__in": Booking.BLOCKING_STATUSES,
+        "end_time__gt": start_time,
+    }
+    if end_time is not None:
+        filters["start_time__lt"] = end_time
+    queryset = Booking.objects.filter(**filters)
     if exclude_booking is not None:
         queryset = queryset.exclude(pk=exclude_booking.pk)
-    return queryset
+    return exclude_logically_expired_holds(queryset)
 
 
 def validate_no_booking_overlap(court, start_time, end_time, *, exclude_booking=None):
@@ -232,7 +235,11 @@ def active_recurring_anchor_queryset(court, *, exclude_booking=None):
         court=court,
         source=Booking.Source.RECURRING,
         recurrence_status=Booking.RecurrenceStatus.ACTIVE,
-    ).select_related("club", "court", "club_player__player_profile")
+        status__in=(Booking.Status.CONFIRMED, Booking.Status.HOLD),
+    )
+    queryset = exclude_logically_expired_holds(queryset).select_related(
+        "club", "court", "club_player__player_profile"
+    )
     if exclude_booking is not None:
         queryset = queryset.exclude(pk=exclude_booking.pk)
     return queryset.order_by("start_time", "id")
@@ -621,7 +628,7 @@ def record_rejected_booking_attempt(
         ).first()
 
 
-def dismiss_booking_attempt(*, access, attempt, actor):
+def dismiss_booking_attempt(*, access, attempt, actor: Profile):
     with transaction.atomic():
         locked_attempt = (
             BookingAttempt.objects.select_for_update(of=("self",))
@@ -645,7 +652,7 @@ def dismiss_booking_attempt(*, access, attempt, actor):
             )
 
         locked_attempt.resolution = BookingAttempt.Resolution.DISMISSED
-        locked_attempt.save(update_fields=["resolution", "modified"])
+        locked_attempt.save(update_fields=["resolution"])
         return locked_attempt
 
 
@@ -741,12 +748,11 @@ def find_new_recurrence_conflict(
     blockers = future_blockers
     if blockers is None:
         blockers = list(
-            Booking.objects.filter(
-                court=court,
-                status__in=Booking.BLOCKING_STATUSES,
-                end_time__gt=start_time,
+            blocking_booking_queryset(
+                court,
+                start_time,
+                exclude_booking=exclude_booking,
             )
-            .exclude(pk=exclude_booking.pk if exclude_booking is not None else None)
             .select_related("club", "court")
             .order_by("start_time", "id")
         )
@@ -834,6 +840,9 @@ def booking_slot_payload(booking):
         "total_booking_value": f"{booking.total_price:.2f}",
         "total_paid_amount": f"{paid_amount:.2f}",
         "remaining_amount": f"{remaining_amount:.2f}",
+        "hold_expires_at": (
+            booking.hold_expires_at if booking.status == Booking.Status.HOLD else None
+        ),
         "source": booking.source,
         "is_recurring": booking.source == Booking.Source.RECURRING,
         "recurrence_status": booking.recurrence_status,
@@ -853,69 +862,43 @@ def booking_overlaps_slot(booking, slot_start, slot_end):
     return booking.start_time < slot_end and booking.end_time > slot_start
 
 
-def index_bookings_by_local_date(bookings):
-    index = defaultdict(list)
-    for booking in bookings:
-        start_local = timezone.localtime(booking.start_time)
-        end_local = timezone.localtime(booking.end_time)
-        current = start_local.date()
-        last = operational_end_date(end_local)
-        if last < current:
-            last = current
-        while current <= last:
-            index[current].append(booking)
-            current += timedelta(days=1)
-    return index
-
-
 def index_bookings_by_local_weekday(bookings):
     index = defaultdict(list)
     for booking in bookings:
-        index[timezone.localtime(booking.start_time).weekday()].append(booking)
+        local_start = timezone.localtime(booking.start_time)
+        index[to_sloty_weekday(local_start.weekday())].append(booking)
     return index
 
 
-def generate_booking_slots(*, access, court, date_from, date_to):
-    if court.club_id != access.club.id:
-        raise serializers.ValidationError(
-            {"court": "Court must belong to the selected club."}
-        )
-    if not court.is_active:
-        raise serializers.ValidationError({"court": "Court is inactive."})
+def timeline_booking_queryset(court, start_time, end_time):
+    queryset = Booking.objects.filter(
+        court=court,
+        status__in=Booking.TIMELINE_STATUSES,
+        start_time__lt=end_time,
+        end_time__gt=start_time,
+    )
+    return (
+        exclude_logically_expired_holds(queryset)
+        .select_related("club", "court", "club_player__player_profile")
+        .order_by("start_time", "id")
+    )
 
-    range_start = local_datetime_for_date(date_from, time.min)
-    range_end = local_datetime_for_date(date_to + timedelta(days=1), time.min)
+
+def generate_open_booking_slots(*, court, date_from, date_to):
+    """Generate candidate slots from court configuration only."""
     if "working_hours" not in getattr(court, "_prefetched_objects_cache", {}):
         prefetch_related_objects([court], "working_hours__pricing_periods")
     working_hours = list(court.working_hours.all())
     working_hours_by_weekday = {row.weekday: row for row in working_hours}
-    future_blockers = list(
-        annotate_booking_paid_amount(
-            Booking.objects.filter(
-                club=access.club,
-                court=court,
-                status__in=Booking.BLOCKING_STATUSES,
-                end_time__gt=range_start,
-            ).select_related("club_player__player_profile")
-        ).order_by("start_time", "id")
-    )
-    blocking_bookings = [
-        booking for booking in future_blockers if booking.start_time < range_end
-    ]
-    active_recurring_anchors = list(active_recurring_anchor_queryset(court))
-    blocking_by_date = index_bookings_by_local_date(blocking_bookings)
-    anchors_by_weekday = index_bookings_by_local_weekday(active_recurring_anchors)
-    blockers_by_weekday = index_bookings_by_local_weekday(future_blockers)
     slot_price_cache = {}
 
     slots = []
     current_date = date_from
-    has_closed_day = False
     while current_date <= date_to:
-        working_hour = working_hours_by_weekday.get(current_date.weekday())
+        sloty_wd = to_sloty_weekday(current_date.weekday())
+        working_hour = working_hours_by_weekday.get(sloty_wd)
         bounds = working_hour_bounds(working_hour) if working_hour is not None else None
         if bounds is None:
-            has_closed_day = True
             current_date += timedelta(days=1)
             continue
 
@@ -924,20 +907,9 @@ def generate_booking_slots(*, access, court, date_from, date_to):
         day_close = local_datetime_for_date(current_date, closes_at, is_end=True)
         slot_delta = timedelta(minutes=court.slot_duration_minutes)
         slot_start = day_open
-        weekday = current_date.weekday()
-        day_bookings = blocking_by_date.get(current_date, ())
-        day_anchors = anchors_by_weekday.get(weekday, ())
-        day_blockers = blockers_by_weekday.get(weekday, ())
+        weekday = sloty_wd
         while slot_start + slot_delta <= day_close:
             slot_end = slot_start + slot_delta
-            booking = next(
-                (
-                    candidate
-                    for candidate in day_bookings
-                    if booking_overlaps_slot(candidate, slot_start, slot_end)
-                ),
-                None,
-            )
             price_key = (weekday, slot_start.time(), slot_end.time())
             if price_key in slot_price_cache:
                 slot_price = slot_price_cache[price_key]
@@ -949,58 +921,10 @@ def generate_booking_slots(*, access, court, date_from, date_to):
                     working_hours=working_hours,
                 )
                 slot_price_cache[price_key] = slot_price
-            recurring_context = None
-            if booking is not None:
-                slot_status = booking.status
-                is_available = False
-                recurring_anchor_booking_id = None
-                can_start_recurring = None
-                recurring_blocked_reason = None
-                first_recurring_conflict_start = None
-            elif slot_price is None:
-                slot_status = UNAVAILABLE_SLOT_STATUS
-                is_available = False
-                recurring_anchor_booking_id = None
-                can_start_recurring = None
-                recurring_blocked_reason = None
-                first_recurring_conflict_start = None
-            elif (
-                recurring_anchor := find_active_recurrence_conflict(
-                    court=court,
-                    start_time=slot_start,
-                    end_time=slot_end,
-                    anchors=day_anchors,
-                )
-            ) is not None:
-                slot_status = RECURRING_RESERVED_SLOT_STATUS
-                is_available = False
-                recurring_anchor_booking_id = recurring_anchor.id
-                recurring_context = recurring_slot_context_payload(recurring_anchor)
-                can_start_recurring = None
-                recurring_blocked_reason = None
-                first_recurring_conflict_start = None
-            else:
-                slot_status = FREE_SLOT_STATUS
-                is_available = True
-                recurrence_conflict = find_new_recurrence_conflict(
-                    court=court,
-                    start_time=slot_start,
-                    end_time=slot_end,
-                    active_anchors=day_anchors,
-                    future_blockers=day_blockers,
-                )
-                can_start_recurring = recurrence_conflict is None
-                recurring_blocked_reason = (
-                    None
-                    if recurrence_conflict is None
-                    else recurrence_conflict["blocked_reason"]
-                )
-                first_recurring_conflict_start = (
-                    None
-                    if recurrence_conflict is None
-                    else recurrence_conflict["first_conflict_start"]
-                )
-                recurring_anchor_booking_id = None
+            slot_status = (
+                FREE_SLOT_STATUS if slot_price is not None else UNAVAILABLE_SLOT_STATUS
+            )
+            is_available = slot_price is not None
             slots.append(
                 {
                     "date": current_date.isoformat(),
@@ -1011,32 +935,174 @@ def generate_booking_slots(*, access, court, date_from, date_to):
                     ),
                     "slot_status": slot_status,
                     "is_available": is_available,
-                    "booking": (
-                        booking_slot_payload(booking) if booking is not None else None
-                    ),
-                    "recurring_anchor_booking_id": recurring_anchor_booking_id,
-                    "recurring_context": recurring_context,
-                    "can_start_recurring": can_start_recurring,
-                    "recurring_blocked_reason": recurring_blocked_reason,
-                    "first_recurring_conflict_start": first_recurring_conflict_start,
+                    "available": is_available,
+                    "booking": None,
+                    "recurring_anchor_booking_id": None,
+                    "recurring_context": None,
+                    "can_start_recurring": None,
+                    "recurring_blocked_reason": None,
+                    "first_recurring_conflict_start": None,
                     "label": format_slot_label(slot_status),
+                    "slot_type": "GENERATED",
                 }
             )
             slot_start = slot_end
 
         current_date += timedelta(days=1)
+    return slots
 
-    response = {
-        "court": court.id,
-        "court_name": court.name,
-        "date_from": date_from.isoformat(),
-        "date_to": date_to.isoformat(),
-        "slot_duration_minutes": court.slot_duration_minutes,
-        "slots": slots,
+
+def retrieve_booking_timeline(*, court, date_from, date_to):
+    range_start = local_datetime_for_date(date_from, time.min)
+    range_end = local_datetime_for_date(date_to + timedelta(days=1), time.min)
+    return list(
+        annotate_booking_paid_amount(
+            timeline_booking_queryset(court, range_start, range_end)
+        )
+    )
+
+
+def merge_booking_timeline(
+    *, court, generated_slots, bookings, active_recurring_anchors, future_blockers
+):
+    """Merge generated availability and visible booking records into one timeline."""
+    anchors_by_weekday = index_bookings_by_local_weekday(active_recurring_anchors)
+    blockers_by_weekday = index_bookings_by_local_weekday(future_blockers)
+    matched_booking_ids = set()
+
+    for slot in generated_slots:
+        slot_start = slot["start_time"]
+        slot_end = slot["end_time"]
+        overlapping_bookings = [
+            booking
+            for booking in bookings
+            if booking_overlaps_slot(booking, slot_start, slot_end)
+        ]
+        blocking_booking = next(
+            (
+                booking
+                for booking in overlapping_bookings
+                if booking.status in Booking.BLOCKING_STATUSES
+            ),
+            None,
+        )
+        timeline_booking = blocking_booking or next(iter(overlapping_bookings), None)
+        if timeline_booking is not None:
+            matched_booking_ids.update(booking.id for booking in overlapping_bookings)
+            slot["booking"] = booking_slot_payload(timeline_booking)
+
+        if slot["slot_status"] == UNAVAILABLE_SLOT_STATUS:
+            continue
+
+        if blocking_booking is not None:
+            slot["slot_status"] = blocking_booking.status
+            slot["is_available"] = False
+            slot["available"] = False
+            slot["label"] = format_slot_label(blocking_booking.status)
+            continue
+
+        weekday = to_sloty_weekday(timezone.localtime(slot_start).weekday())
+        day_anchors = anchors_by_weekday.get(weekday, ())
+        if (
+            recurring_anchor := find_active_recurrence_conflict(
+                court=court,
+                start_time=slot_start,
+                end_time=slot_end,
+                anchors=day_anchors,
+            )
+        ) is not None:
+            slot["slot_status"] = RECURRING_RESERVED_SLOT_STATUS
+            slot["is_available"] = False
+            slot["available"] = False
+            slot["recurring_anchor_booking_id"] = recurring_anchor.id
+            slot["recurring_context"] = recurring_slot_context_payload(recurring_anchor)
+            slot["can_start_recurring"] = None
+            slot["label"] = format_slot_label(RECURRING_RESERVED_SLOT_STATUS)
+            continue
+
+        recurrence_conflict = find_new_recurrence_conflict(
+            court=court,
+            start_time=slot_start,
+            end_time=slot_end,
+            active_anchors=day_anchors,
+            future_blockers=blockers_by_weekday.get(weekday, ()),
+        )
+        slot["can_start_recurring"] = recurrence_conflict is None
+        slot["recurring_blocked_reason"] = (
+            None
+            if recurrence_conflict is None
+            else recurrence_conflict["blocked_reason"]
+        )
+        slot["first_recurring_conflict_start"] = (
+            None
+            if recurrence_conflict is None
+            else recurrence_conflict["first_conflict_start"]
+        )
+        if not slot["is_available"]:
+            slot["can_start_recurring"] = False
+
+    booking_only_slots = []
+    for booking in bookings:
+        if booking.id in matched_booking_ids:
+            continue
+        local_start = timezone.localtime(booking.start_time)
+        booking_only_slots.append(
+            {
+                "date": local_start.date().isoformat(),
+                "start_time": local_start,
+                "end_time": timezone.localtime(booking.end_time),
+                "slot_price": None,
+                "slot_status": booking.status,
+                "is_available": False,
+                "available": False,
+                "booking": booking_slot_payload(booking),
+                "recurring_anchor_booking_id": None,
+                "recurring_context": None,
+                "can_start_recurring": None,
+                "recurring_blocked_reason": None,
+                "first_recurring_conflict_start": None,
+                "label": format_slot_label(booking.status),
+                "slot_type": "BOOKING_ONLY",
+            }
+        )
+
+    timeline = [*generated_slots, *booking_only_slots]
+    timeline.sort(key=lambda item: (item["start_time"], item["end_time"]))
+    return timeline
+
+
+def generate_booking_slots(*, access, court, date_from, date_to):
+    if court.club_id != access.club.id:
+        raise serializers.ValidationError(
+            {"court": "Court must belong to the selected club."}
+        )
+    if not court.is_active:
+        raise serializers.ValidationError({"court": "Court is inactive."})
+
+    range_start = local_datetime_for_date(date_from, time.min)
+    generated_slots = generate_open_booking_slots(
+        court=court, date_from=date_from, date_to=date_to
+    )
+    bookings = retrieve_booking_timeline(
+        court=court, date_from=date_from, date_to=date_to
+    )
+    future_blockers = list(
+        annotate_booking_paid_amount(
+            blocking_booking_queryset(court, range_start).select_related(
+                "club_player__player_profile"
+            )
+        ).order_by("start_time", "id")
+    )
+    active_recurring_anchors = list(active_recurring_anchor_queryset(court))
+    return {
+        "slots": merge_booking_timeline(
+            court=court,
+            generated_slots=generated_slots,
+            bookings=bookings,
+            active_recurring_anchors=active_recurring_anchors,
+            future_blockers=future_blockers,
+        )
     }
-    if not slots and has_closed_day:
-        response["message"] = str(COURT_CLOSED_ON_THIS_DAY_MESSAGE)
-    return response
 
 
 def validate_booking_club_player(*, club, club_player):
@@ -1064,53 +1130,19 @@ def resolve_booking_club_player(
     """
     Resolve the ClubPlayer identity for a booking.
 
-    Normal flow (frontend sends only customer_name / customer_phone):
-        phone -> PlayerProfile -> current ClubPlayer -> Booking
-
-    Optional selection: if club_player_id is supplied, that exact
-    ClubPlayer is used provided it belongs to this club and to the
-    PlayerProfile identified by customer_phone. Normal booking creation
-    does not send this id.
-
-    get_or_create_club_player() returns the current ClubPlayer when one exists
-    and creates one when the club has never labeled this player.
+    Delegates to the canonical resolver in apps.bookings.identity.
     """
-    player_profile, _ = find_or_create_player_profile(
-        phone_number=customer_phone,
-        full_name=customer_name or "",
-    )
-    if club_player_id is not None:
-        try:
-            club_player = ClubPlayer.objects.select_related(
-                "club", "player_profile"
-            ).get(pk=club_player_id)
-        except ClubPlayer.DoesNotExist as exc:
-            raise SlotyAPIException(
-                status_code=status.HTTP_409_CONFLICT,
-                code="BOOKING_CLUB_PLAYER_NOT_FOUND",
-                message=BOOKING_CLUB_PLAYER_NOT_FOUND_MESSAGE,
-            ) from exc
-        validate_booking_club_player(club=club, club_player=club_player)
-        if club_player.player_profile_id != player_profile.id:
-            raise SlotyAPIException(
-                status_code=status.HTTP_409_CONFLICT,
-                code="BOOKING_CLUB_PLAYER_PHONE_MISMATCH",
-                message=BOOKING_CLUB_PLAYER_PHONE_MISMATCH_MESSAGE,
-            )
-        return club_player
-
-    club_player, _ = get_or_create_club_player(
+    return resolve_club_player(
         club=club,
-        player_profile=player_profile,
-        display_name=customer_name or "",
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        club_player_id=club_player_id,
     )
-    validate_booking_club_player(club=club, club_player=club_player)
-    return club_player
 
 
 def create_booking(
     *,
-    created_by,
+    created_by: Profile | None = None,
     court,
     start_time,
     end_time,
@@ -1198,10 +1230,14 @@ def create_booking(
                 created_by=created_by,
                 last_status_changed_by=created_by,
                 last_status_changed_by_type=(
-                    Booking.LastStatusActorType.INTERNAL_USER if created_by else None
+                    Booking.LastStatusActorType.PROFILE if created_by else None
                 ),
                 **persisted_fields,
             )
+            created_booking.hold_expires_at = hold_expiry_deadline(
+                locked_court, from_time=created_booking.created
+            )
+            created_booking.save(update_fields=["hold_expires_at"])
             created_booking._sloty_idempotency_reused = False
             create_success_booking_attempt(
                 booking=created_booking,
@@ -1211,15 +1247,10 @@ def create_booking(
                 requested_at=requested_at,
                 booking_data=booking_data,
             )
-            audit_actor = (
-                created_by.profile
-                if created_by is not None and hasattr(created_by, "profile")
-                else (created_by if isinstance(created_by, Profile) else None)
-            )
             record_audit_log(
                 club=created_booking.club,
                 court=created_booking.court,
-                actor=audit_actor,
+                actor=created_by,
                 action=AuditLog.Action.BOOKING_CREATED,
                 entity_type="Booking",
                 entity_id=created_booking.id,
@@ -1237,6 +1268,66 @@ def create_booking(
             exc=exc,
         )
         raise
+
+
+def update_booking(*, booking, updated_by=None, **validated_data):
+    """Update editable booking fields, including ClubPlayer identity."""
+    with transaction.atomic():
+        locked_booking = (
+            Booking.objects.select_for_update()
+            .select_related("club", "court", "club_player__player_profile")
+            .get(pk=booking.pk)
+        )
+        if locked_booking.status in Booking.LOCKED_STATUSES:
+            raise serializers.ValidationError(
+                "This booking status cannot be edited in Sprint 3."
+            )
+
+        identity_fields = {"customer_name", "customer_phone"}
+        identity_requested = bool(identity_fields.intersection(validated_data))
+        identity_changed = False
+        if identity_requested:
+            customer_name = validated_data.pop(
+                "customer_name", booking_customer_display_name(locked_booking)
+            )
+            customer_phone = validated_data.pop(
+                "customer_phone", booking_customer_display_phone(locked_booking)
+            )
+            resolved_club_player = resolve_club_player(
+                club=locked_booking.club,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+            )
+            identity_changed = resolved_club_player.pk != locked_booking.club_player_id
+            locked_booking.club_player = resolved_club_player
+
+        changed = (
+            any(
+                getattr(locked_booking, field) != value
+                for field, value in validated_data.items()
+            )
+            or identity_changed
+        )
+        before_data = booking_audit_snapshot(locked_booking) if changed else {}
+
+        for field, value in validated_data.items():
+            setattr(locked_booking, field, value)
+
+        if changed:
+            actor = updated_by
+            locked_booking.save()
+            record_audit_log(
+                club=locked_booking.club,
+                court=locked_booking.court,
+                actor=actor,
+                action=AuditLog.Action.BOOKING_UPDATED,
+                entity_type="Booking",
+                entity_id=locked_booking.id,
+                before_data=before_data,
+                after_data=booking_audit_snapshot(locked_booking),
+            )
+
+        return locked_booking
 
 
 def validate_booking_for_lifecycle_action(*, access, booking):
@@ -1360,7 +1451,7 @@ def create_booking_refund_transaction(
     payment_method,
     payment_reference,
     notes,
-    actor,
+    actor: Profile,
 ):
     if refund_amount <= 0:
         return None
@@ -1389,15 +1480,10 @@ def create_booking_refund_transaction(
         notes=notes,
         created_by=actor,
     )
-    refund_actor = (
-        actor.profile
-        if actor is not None and hasattr(actor, "profile")
-        else (actor if isinstance(actor, Profile) else None)
-    )
     record_audit_log(
         club=refund_transaction.club,
         court=refund_transaction.court,
-        actor=refund_actor,
+        actor=actor,
         action=AuditLog.Action.TRANSACTION_CREATED,
         entity_type="Transaction",
         entity_id=refund_transaction.id,
@@ -1425,15 +1511,10 @@ def create_lifecycle_audit_log(
     after_data,
     metadata=None,
 ):
-    audit_actor = (
-        actor.profile
-        if actor is not None and hasattr(actor, "profile")
-        else (actor if isinstance(actor, Profile) else None)
-    )
     return record_audit_log(
         club=booking.club,
         court=booking.court,
-        actor=audit_actor,
+        actor=actor,
         action=action,
         entity_type="Booking",
         entity_id=booking.id,
@@ -1447,7 +1528,7 @@ def cancel_booking(
     *,
     access,
     booking,
-    actor,
+    actor: Profile,
     reason="",
     refund_payment_method=None,
     refund_reference="",
@@ -1486,16 +1567,14 @@ def cancel_booking(
         before_data = booking_audit_snapshot(locked_booking)
         locked_booking.status = Booking.Status.CANCELLED
         locked_booking.cancelled_at = now
-        locked_booking.cancellation_reason = reason
+        locked_booking.termination_reason = reason
         locked_booking.last_status_changed_by = actor
-        locked_booking.last_status_changed_by_type = (
-            Booking.LastStatusActorType.INTERNAL_USER if actor else None
-        )
+        locked_booking.last_status_changed_by_type = Booking.LastStatusActorType.PROFILE
         recurrence_ended = end_active_recurrence(locked_booking=locked_booking)
         update_fields = [
             "status",
             "cancelled_at",
-            "cancellation_reason",
+            "termination_reason",
             "last_status_changed_by",
             "last_status_changed_by_type",
             "modified",
@@ -1511,7 +1590,7 @@ def cancel_booking(
             after_data=booking_audit_snapshot(locked_booking)
             | {
                 "cancelled_at": locked_booking.cancelled_at.isoformat(),
-                "cancellation_reason": locked_booking.cancellation_reason,
+                "termination_reason": locked_booking.termination_reason,
             },
             metadata={
                 "reason": reason,
@@ -1533,7 +1612,7 @@ def cancel_booking(
         return locked_booking
 
 
-def no_show_booking(*, access, booking, actor, reason=""):
+def no_show_booking(*, access, booking, actor: Profile, reason=""):
     with transaction.atomic():
         locked_booking = (
             Booking.objects.select_for_update()
@@ -1550,17 +1629,14 @@ def no_show_booking(*, access, booking, actor, reason=""):
         before_data = booking_audit_snapshot(locked_booking)
         locked_booking.status = Booking.Status.NO_SHOW
         locked_booking.no_show_at = timezone.now()
-        locked_booking.no_show_reason = (reason or "").strip()
+        locked_booking.termination_reason = (reason or "").strip()
         locked_booking.last_status_changed_by = actor
-        locked_booking.last_status_changed_by_type = (
-            Booking.LastStatusActorType.INTERNAL_USER if actor else None
-        )
+        locked_booking.last_status_changed_by_type = Booking.LastStatusActorType.PROFILE
         recurrence_ended = end_active_recurrence(locked_booking=locked_booking)
-        update_fields = ["status", "no_show_at", "no_show_reason", "modified"]
         update_fields = [
             "status",
             "no_show_at",
-            "no_show_reason",
+            "termination_reason",
             "last_status_changed_by",
             "last_status_changed_by_type",
             "modified",
@@ -1576,12 +1652,12 @@ def no_show_booking(*, access, booking, actor, reason=""):
             after_data=booking_audit_snapshot(locked_booking)
             | {
                 "no_show_at": locked_booking.no_show_at.isoformat(),
-                "no_show_reason": locked_booking.no_show_reason,
+                "termination_reason": locked_booking.termination_reason,
             },
             metadata={
                 **(
-                    {"reason": locked_booking.no_show_reason}
-                    if locked_booking.no_show_reason
+                    {"reason": locked_booking.termination_reason}
+                    if locked_booking.termination_reason
                     else {}
                 ),
                 "recurrence_ended": recurrence_ended,
@@ -1594,7 +1670,7 @@ def reschedule_booking(
     *,
     access,
     booking,
-    actor,
+    actor: Profile,
     court,
     start_time,
     end_time,
@@ -1654,14 +1730,14 @@ def reschedule_booking(
         locked_booking.end_time = end_time
         if new_price > locked_booking.total_price:
             locked_booking.total_price = new_price
-        locked_booking.reschedule_reason = (reason or "").strip()
+        locked_booking.termination_reason = (reason or "").strip()
         locked_booking.save(
             update_fields=[
                 "court",
                 "start_time",
                 "end_time",
                 "total_price",
-                "reschedule_reason",
+                "termination_reason",
                 "modified",
             ]
         )
@@ -1671,10 +1747,10 @@ def reschedule_booking(
             action=AuditLog.Action.BOOKING_RESCHEDULED,
             before_data=before_data,
             after_data=booking_audit_snapshot(locked_booking)
-            | {"reschedule_reason": locked_booking.reschedule_reason},
+            | {"termination_reason": locked_booking.termination_reason},
             metadata=(
-                {"reason": locked_booking.reschedule_reason}
-                if locked_booking.reschedule_reason
+                {"reason": locked_booking.termination_reason}
+                if locked_booking.termination_reason
                 else {}
             ),
         )
@@ -1805,7 +1881,7 @@ def complete_booking(
     *,
     access,
     booking,
-    actor,
+    actor: Profile,
     confirm_collect_remaining_cash=False,
     continue_recurring=None,
     next_deposit_payment_method=None,
@@ -1881,10 +1957,12 @@ def complete_booking(
                 previous_recurring_booking=locked_booking,
                 created_by=actor,
                 last_status_changed_by=actor,
-                last_status_changed_by_type=(
-                    Booking.LastStatusActorType.INTERNAL_USER if actor else None
-                ),
+                last_status_changed_by_type=Booking.LastStatusActorType.PROFILE,
             )
+            next_booking.hold_expires_at = hold_expiry_deadline(
+                locked_court, from_time=next_booking.created
+            )
+            next_booking.save(update_fields=["hold_expires_at"])
             required_next_deposit = next_plan["next_required_deposit"]
             if required_next_deposit > 0:
                 if not next_deposit_payment_method:
@@ -1930,10 +2008,9 @@ def complete_booking(
                     created_by=actor,
                 )
                 next_booking.status = Booking.Status.CONFIRMED
-                next_booking.save(update_fields=["status", "modified"])
                 next_booking.last_status_changed_by = actor
                 next_booking.last_status_changed_by_type = (
-                    Booking.LastStatusActorType.INTERNAL_USER if actor else None
+                    Booking.LastStatusActorType.PROFILE
                 )
                 next_booking.save(
                     update_fields=[
@@ -1943,15 +2020,10 @@ def complete_booking(
                         "modified",
                     ]
                 )
-                audit_actor = (
-                    actor.profile
-                    if actor is not None and hasattr(actor, "profile")
-                    else (actor if isinstance(actor, Profile) else None)
-                )
                 record_audit_log(
                     club=next_payment.club,
                     court=next_payment.court,
-                    actor=audit_actor,
+                    actor=actor,
                     action=AuditLog.Action.TRANSACTION_CREATED,
                     entity_type="Transaction",
                     entity_id=next_payment.id,
@@ -1960,10 +2032,9 @@ def complete_booking(
                 )
             else:
                 next_booking.status = Booking.Status.CONFIRMED
-                next_booking.save(update_fields=["status", "modified"])
                 next_booking.last_status_changed_by = actor
                 next_booking.last_status_changed_by_type = (
-                    Booking.LastStatusActorType.INTERNAL_USER if actor else None
+                    Booking.LastStatusActorType.PROFILE
                 )
                 next_booking.save(
                     update_fields=[
@@ -1973,15 +2044,10 @@ def complete_booking(
                         "modified",
                     ]
                 )
-                audit_actor = (
-                    actor.profile
-                    if actor is not None and hasattr(actor, "profile")
-                    else (actor if isinstance(actor, Profile) else None)
-                )
             record_audit_log(
                 club=next_booking.club,
                 court=next_booking.court,
-                actor=audit_actor,
+                actor=actor,
                 action=AuditLog.Action.BOOKING_CREATED,
                 entity_type="Booking",
                 entity_id=next_booking.id,
@@ -1991,11 +2057,8 @@ def complete_booking(
 
         locked_booking.status = Booking.Status.COMPLETED
         locked_booking.completed_at = timezone.now()
-        update_fields = ["status", "completed_at", "modified"]
         locked_booking.last_status_changed_by = actor
-        locked_booking.last_status_changed_by_type = (
-            Booking.LastStatusActorType.INTERNAL_USER if actor else None
-        )
+        locked_booking.last_status_changed_by_type = Booking.LastStatusActorType.PROFILE
         update_fields = [
             "status",
             "completed_at",
@@ -2035,7 +2098,7 @@ def complete_booking(
         return locked_booking
 
 
-def expire_booking(*, access, booking, actor):
+def expire_booking(*, access, booking, actor: Profile):
     with transaction.atomic():
         locked_booking = (
             Booking.objects.select_for_update()
@@ -2051,15 +2114,15 @@ def expire_booking(*, access, booking, actor):
         return expire_locked_booking(locked_booking=locked_booking, actor=actor)
 
 
-def expire_locked_booking(*, locked_booking, actor, metadata=None):
+def expire_locked_booking(
+    *, locked_booking, actor: Profile | None = None, metadata=None
+):
     before_data = booking_audit_snapshot(locked_booking)
     locked_booking.status = Booking.Status.EXPIRED
     locked_booking.expired_at = timezone.now()
     if actor is not None:
         locked_booking.last_status_changed_by = actor
-        locked_booking.last_status_changed_by_type = (
-            Booking.LastStatusActorType.INTERNAL_USER
-        )
+        locked_booking.last_status_changed_by_type = Booking.LastStatusActorType.PROFILE
     else:
         locked_booking.last_status_changed_by = None
         locked_booking.last_status_changed_by_type = Booking.LastStatusActorType.SYSTEM
@@ -2087,7 +2150,7 @@ def expire_locked_booking(*, locked_booking, actor, metadata=None):
     return locked_booking
 
 
-def end_booking_recurrence(*, access, booking, actor, reason=""):
+def end_booking_recurrence(*, access, booking, actor: Profile, reason=""):
     with transaction.atomic():
         locked_booking = (
             Booking.objects.select_for_update()
@@ -2125,10 +2188,10 @@ def end_booking_recurrence(*, access, booking, actor, reason=""):
 
 def due_hold_booking_candidate_ids(*, now):
     return list(
-        annotate_booking_hold_expires_at(
-            Booking.objects.filter(status=Booking.Status.HOLD)
+        Booking.objects.filter(
+            status=Booking.Status.HOLD,
+            hold_expires_at__lte=now,
         )
-        .filter(hold_expires_at__lte=now)
         .order_by("id")
         .values_list("id", flat=True)
     )
@@ -2144,7 +2207,10 @@ def expire_locked_due_hold_bookings(*, due_ids, now):
             .order_by("id")
         )
         for locked_booking in locked_bookings:
-            if compute_booking_hold_expires_at(locked_booking) > now:
+            if (
+                locked_booking.hold_expires_at is None
+                or locked_booking.hold_expires_at > now
+            ):
                 continue
             expired_bookings.append(
                 expire_locked_booking(

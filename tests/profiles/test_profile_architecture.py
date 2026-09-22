@@ -21,6 +21,7 @@ from apps.profiles.models import (
     StaffCourtAccess,
     StaffProfile,
 )
+from tests.profile_factories import create_user
 
 pytestmark = pytest.mark.django_db
 
@@ -54,7 +55,7 @@ def courts(club, other_club):
 
 @pytest.fixture
 def user():
-    return User.objects.create_user(username="omar", password="test-pass-123")
+    return create_user(password="test-pass-123")
 
 
 def request_for(user):
@@ -97,7 +98,7 @@ def test_children_have_real_parent_link_and_shared_identity(
 
 
 def test_profile_created_by_tracks_profile_creator(user, club):
-    admin_user = User.objects.create_user(username="profile-creator")
+    admin_user = create_user()
     admin = AdminProfile.objects.create(user=admin_user, role=Profile.Role.ADMIN)
     owner = OwnerProfile.objects.create(
         user=user,
@@ -228,9 +229,7 @@ def test_shared_save_calls_validation_and_preserves_parent_values(user, club):
 def test_owners_support_multiple_clubs_and_shared_ownership(user, club, other_club):
     owner = OwnerProfile.objects.create(user=user, role=Profile.Role.OWNER)
     owner.clubs.set([club, other_club])
-    peer = OwnerProfile.objects.create(
-        user=User.objects.create_user(username="peer"), role=Profile.Role.OWNER
-    )
+    peer = OwnerProfile.objects.create(user=create_user(), role=Profile.Role.OWNER)
     peer.clubs.add(club)
     assert set(owner.clubs.all()) == {club, other_club}
     assert club.owner_profiles.count() == 2

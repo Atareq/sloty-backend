@@ -2,7 +2,6 @@ from django.http import Http404
 from rest_framework.exceptions import NotAuthenticated
 from rest_framework.test import APIRequestFactory, APITestCase
 
-from apps.accounts.models import User
 from apps.clubs.models import Club
 from apps.common.authorization.context import RequestAccessContext
 from apps.common.authorization.resolver import resolve_club_scope, resolve_global_scope
@@ -16,6 +15,7 @@ from apps.profiles.models import (
     StaffCourtAccess,
     StaffProfile,
 )
+from tests.profile_factories import create_user
 
 
 class ScopeResolverTestCase(APITestCase):
@@ -39,19 +39,13 @@ class ScopeResolverTestCase(APITestCase):
         self.court_b = Court.objects.create(
             club=self.club_b, name="Court B", default_price="250.00"
         )
-        self.owner = self.create_profile_user(
-            "owner-user", Profile.Role.OWNER, club=self.club_a
-        )
-        self.staff = self.create_profile_user(
-            "staff-user", Profile.Role.STAFF, court=self.court_a
-        )
-        self.admin = self.create_profile_user("platform-admin", Profile.Role.ADMIN)
-        self.unscoped_user = User.objects.create_user(
-            username="unscoped", password="password"
-        )
+        self.owner = self.create_profile_user(Profile.Role.OWNER, club=self.club_a)
+        self.staff = self.create_profile_user(Profile.Role.STAFF, court=self.court_a)
+        self.admin = self.create_profile_user(Profile.Role.ADMIN)
+        self.unscoped_user = create_user(password="password")
 
-    def create_profile_user(self, username, role, *, club=None, court=None):
-        user = User.objects.create_user(username=username, password="password")
+    def create_profile_user(self, role, *, club=None, court=None):
+        user = create_user(password="password")
         if role == Profile.Role.ADMIN:
             profile = AdminProfile.objects.create(user=user, role=role)
         elif role == Profile.Role.OWNER:

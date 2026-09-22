@@ -59,7 +59,10 @@ class TransactionFilter(django_filters.FilterSet):
     date = django_filters.DateFilter(method="filter_date")
     date_from = django_filters.CharFilter(method="filter_date_from")
     date_to = django_filters.CharFilter(method="filter_date_to")
-    created_by = django_filters.NumberFilter(field_name="created_by_id")
+    created_by = django_filters.NumberFilter(
+        field_name="created_by_id",
+        help_text="Filter by the Transaction collector Profile ID.",
+    )
     is_cancelled = django_filters.BooleanFilter(field_name="is_cancelled")
     settlement_status = django_filters.CharFilter(method="filter_settlement_status")
     settlement = django_filters.NumberFilter(
@@ -157,7 +160,10 @@ class TransactionAttemptFilter(django_filters.FilterSet):
 
     booking = django_filters.NumberFilter(field_name="booking_id")
     court = django_filters.NumberFilter(field_name="court_id")
-    attempted_by = django_filters.NumberFilter(field_name="attempted_by_id")
+    attempted_by = django_filters.NumberFilter(
+        field_name="attempted_by_id",
+        help_text="Filter by the TransactionAttempt actor Profile ID.",
+    )
     payment_method = django_filters.ChoiceFilter(
         choices=Transaction.PaymentMethod.choices
     )

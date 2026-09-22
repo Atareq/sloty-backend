@@ -10,6 +10,7 @@ from apps.common.egypt_locations import (
     is_valid_city_for_governorate,
     is_valid_governorate,
 )
+from apps.common.models import SlotyTimeStampedModel
 
 
 def generate_unique_club_slug(name: str, *, exclude_pk=None) -> str:
@@ -25,19 +26,15 @@ def generate_unique_club_slug(name: str, *, exclude_pk=None) -> str:
     return slug
 
 
-class Club(models.Model):
-    name = models.CharField(max_length=255, db_index=True)
-    slug = models.SlugField(max_length=120, unique=True, db_index=True)
-    governorate = models.CharField(
-        max_length=64, choices=get_governorate_choices(), db_index=True
-    )
-    city = models.CharField(
-        max_length=120, choices=get_all_city_choices(), db_index=True
-    )
+class Club(SlotyTimeStampedModel):
+    name = models.CharField(max_length=255)
+    slug = models.SlugField(max_length=120, unique=True)
+    governorate = models.CharField(max_length=64, choices=get_governorate_choices())
+    city = models.CharField(max_length=120, choices=get_all_city_choices())
     address = models.TextField(blank=True)
     phone_number = PhoneNumberField(blank=True, null=True)
     notes = models.TextField(blank=True)
-    is_active = models.BooleanField(default=True, db_index=True)
+    is_active = models.BooleanField(default=True)
     created_by = models.ForeignKey(
         "profiles.Profile",
         blank=True,
@@ -45,15 +42,6 @@ class Club(models.Model):
         on_delete=models.SET_NULL,
         related_name="created_clubs",
     )
-    created = models.DateTimeField(auto_now_add=True)
-    modified = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["name"]),
-            models.Index(fields=["city"]),
-            models.Index(fields=["is_active"]),
-        ]
 
     authorization_config = {
         "scopes": {"club": {"path": "self"}},

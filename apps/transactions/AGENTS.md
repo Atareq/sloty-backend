@@ -33,10 +33,14 @@
 
 - [`Transaction`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/transactions/models.py):
   - `club`, `court`, `booking`, `amount`, `transaction_type`, `payment_method`, `payment_reference`.
-  - `is_cancelled`, `cancelled_by`, `cancelled_at`, `cancellation_reason`.
-  - `occurred_at`, `created`.
+  - `created_by` (collector Profile), `cancelled_by` (actor Profile), `is_cancelled`, `cancelled_at`, `cancellation_reason`.
+  - `occurred_at`, `created` (`SlotyCreatedModel`; ledger rows have no `modified`).
 - [`TransactionAttempt`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/transactions/models.py):
-  - Tracks requested transaction intent, `outcome` (`SUCCESS`/`REJECTED`), `failure_code`, `failure_details`, and `resolution`.
+  - Tracks requested transaction intent, `attempted_by` (actor Profile), `outcome` (`SUCCESS`/`REJECTED`), `failure_code`, `failure_details`, and `resolution`.
+
+Transaction `created_by` / `cancelled_by` and attempt `attempted_by` response
+fields expose Profile IDs. The `created_by` and `attempted_by` filters also take
+Profile IDs; display names use the linked account full name or phone number.
 
 ## Service Layer
 
@@ -58,10 +62,10 @@
 
 - **ViewSets:** `SlotyScopedResourceMixin` + `SlotyBasePermission`. Models declare `authorization_config` (`default_scope="court"`). The secured queryset is built before filters, pagination, and serializers.
 - **Operational boundary:** Club + Court. Settlement / Current Custody is separately Spine v2 club-scoped with collector narrowing — Club + optional Collector, **never** Court.
-- **Staff list/retrieve:** assigned court(s) **and** `created_by=request.user` (collector self-scope). This is not applied to Bookings.
+- **Staff list/retrieve:** assigned court(s) **and** `created_by=context.profile` (collector self-scope). This is not applied to Bookings.
 - **Staff create:** any booking on an assigned court (not creator-scoped).
 - **Cancel:** Platform Admin may cancel any in-scope transaction. Owner and Staff may cancel only their own collections. Out-of-scope rows are HTTP 404; in-scope rows the actor may not cancel are HTTP 403.
-- **TransactionAttempt:** Club + Court, then Staff `attempted_by=request.user`. Dismiss is attempter-only for every role.
+- **TransactionAttempt:** Club + Court, then Staff `attempted_by=context.profile`. Dismiss is attempter-only for every role.
 - Transaction ViewSets use the Spine only. They do not use a second club-access abstraction.
 
 ## Cross-App Dependencies

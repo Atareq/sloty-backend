@@ -5,11 +5,12 @@ from apps.bookings.services import expire_due_hold_bookings
 
 class Command(BaseCommand):
     help = (
-        "Expire due HOLD bookings using each court's effective hold deadline: "
-        "min(created + internal_hold_expiry_hours, booking.start_time). "
-        "This command does not run by itself. Production and staging must "
-        "schedule it (cron or equivalent), typically every 5 minutes, or HOLD "
-        "bookings will not expire automatically."
+        "Persist EXPIRED for HOLD bookings whose stored hold_expires_at "
+        "deadline has passed. "
+        "Overlap and availability already treat those HOLDs as free in real "
+        "time. This command only cleans persisted rows. Production runs it "
+        "from sloty-hold-expiry.timer every 5 minutes; the timer is not "
+        "required for slot availability correctness."
     )
 
     def handle(self, *args, **options):

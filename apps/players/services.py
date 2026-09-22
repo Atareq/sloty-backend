@@ -6,8 +6,10 @@ lives in ViewSets and the authorization matrix. Services own transactions,
 multi-model writes, and data integrity invariants.
 """
 
-from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.db.models import OuterRef, Subquery
+from phonenumber_field.phonenumber import to_python
 
 from apps.common.exceptions import SlotyAPIException
 from apps.players.models import ClubPlayer, PlayerProfile
@@ -31,21 +33,33 @@ def find_or_create_player_profile(
     Returns:
         (PlayerProfile, created: bool)
     """
-    with transaction.atomic():
-        profile, created = PlayerProfile.objects.get_or_create(
-            phone_number=phone_number,
-            defaults={"full_name": full_name, "role": Profile.Role.PLAYER},
-        )
-    return profile, created
+    phone_obj = to_python(phone_number)
+    if phone_obj and phone_obj.is_valid():
+        normalized_phone = phone_obj.as_e164
+    else:
+        normalized_phone = str(phone_number or "").strip()
+
+    try:
+        with transaction.atomic():
+            profile, created = PlayerProfile.objects.get_or_create(
+                phone_number=normalized_phone,
+                defaults={"full_name": full_name, "role": Profile.Role.PLAYER},
+            )
+        return profile, created
+    except (IntegrityError, ValidationError):
+        try:
+            return PlayerProfile.objects.get(phone_number=normalized_phone), False
+        except PlayerProfile.DoesNotExist:
+            raise
 
 
 def get_current_club_player(club, player_profile) -> ClubPlayer | None:
     """
-    Return the current ClubPlayer identity for (club, player_profile).
+    Return the last-used ClubPlayer for (club, player_profile).
 
-    The latest Booking.club_player relationship is the source of truth.
-    If no booking exists for that player in that club, falls back to the
-    latest ClubPlayer record for that player/club (or single record).
+    Recency is the latest Booking.club_player. If no booking exists,
+    falls back to the latest ClubPlayer row for that club/profile.
+    This is recommendation, not identity equality.
     """
     from apps.bookings.models import Booking
 
@@ -109,7 +123,7 @@ def last_used_at_subquery(club):
 
 def get_last_used_club_player(club, player_profile) -> ClubPlayer | None:
     """
-    Return the ClubPlayer version last attached to a Booking for this
+    Return the ClubPlayer last attached to a Booking for this
     (club, player_profile).
 
     Latest booking is ordered by Booking.created, then id. The booking's
@@ -137,38 +151,42 @@ def get_last_used_club_player(club, player_profile) -> ClubPlayer | None:
 def get_or_create_club_player(
     club,
     player_profile: PlayerProfile,
-    display_name: str = "",
+    display_name: str,
     player_number: int | None = None,
 ) -> tuple[ClubPlayer, bool]:
     """
-    Return the current ClubPlayer for (club, player_profile), or create one.
+    Return the ClubPlayer for the exact identity triple, or create it.
 
-    If a current identity exists, it is returned unchanged.
-    If none exists, a new ClubPlayer is created with the given
-    display_name/player_number.
-
-    Returns:
-        (ClubPlayer, created: bool)
+    Identity is (club, player_profile, display_name) after strip. A different
+    exact name is a different ClubPlayer. Concurrent unique races reload the
+    existing row.
     """
-    current = get_current_club_player(club, player_profile)
-    if current is not None:
-        return current, False
-
-    with transaction.atomic():
-        if player_profile.pk:
-            PlayerProfile.objects.select_for_update().filter(
-                pk=player_profile.pk
-            ).first()
-        current = get_current_club_player(club, player_profile)
-        if current is not None:
-            return current, False
-        club_player = ClubPlayer.objects.create(
-            club=club,
-            player_profile=player_profile,
-            display_name=display_name,
-            player_number=player_number,
+    submitted_name = (display_name or "").strip()
+    existing = ClubPlayer.objects.filter(
+        club=club,
+        player_profile=player_profile,
+        display_name=submitted_name,
+    ).first()
+    if existing is not None:
+        return existing, False
+    try:
+        with transaction.atomic(savepoint=True):
+            club_player, created = ClubPlayer.objects.get_or_create(
+                club=club,
+                player_profile=player_profile,
+                display_name=submitted_name,
+                defaults={"player_number": player_number},
+            )
+        return club_player, created
+    except (IntegrityError, ValidationError):
+        return (
+            ClubPlayer.objects.get(
+                club=club,
+                player_profile=player_profile,
+                display_name=submitted_name,
+            ),
+            False,
         )
-    return club_player, True
 
 
 def get_preferred_club_player(club, player_profile) -> ClubPlayer | None:
@@ -216,5 +234,5 @@ def link_player_to_user(player_profile: PlayerProfile, user) -> PlayerProfile:
                 message="This user account is already linked to a profile.",
             )
         locked_profile.user = user
-        locked_profile.save(update_fields=["user", "updated_at", "modified"])
+        locked_profile.save(update_fields=["user", "modified"])
     return locked_profile

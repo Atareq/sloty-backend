@@ -1,3 +1,4 @@
+from rest_framework.generics import get_object_or_404
 from rest_framework.mixins import (
     CreateModelMixin,
     ListModelMixin,
@@ -67,6 +68,18 @@ class ClubViewSet(
             .select_related("created_by")
             .order_by("id")
         )
+
+    def get_object(self):
+        queryset = self.filter_queryset(self.get_queryset())
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        lookup_val = self.kwargs.get(lookup_url_kwarg)
+        if lookup_val is not None and str(lookup_val).isdigit():
+            filter_kwargs = {"pk": lookup_val}
+        else:
+            filter_kwargs = {"slug": lookup_val}
+        obj = get_object_or_404(queryset, **filter_kwargs)
+        self.check_object_permissions(self.request, obj)
+        return obj
 
     def get_serializer_class(self):
         return {

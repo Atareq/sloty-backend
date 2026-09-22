@@ -1,9 +1,11 @@
 from decimal import Decimal
+from typing import Optional
 
 from django.db import IntegrityError, transaction
 from django.utils.translation import gettext_lazy as _
 from rest_framework import status
 
+from apps.audit.models import AuditLog
 from apps.audit.services import record_audit_log, settlement_audit_snapshot
 from apps.bookings.identity import (
     booking_customer_display_name,
@@ -16,28 +18,32 @@ from apps.transactions.models import Transaction
 
 ZERO = Decimal("0.00")
 NO_UNSETTLED_TRANSACTIONS_MESSAGE = _(
-    "There are no unsettled transactions for this user."
+    "There are no unsettled transactions for this collector."
 )
 DOUBLE_SETTLEMENT_MESSAGE = _(
     "One or more transactions were already settled. Please retry."
 )
 
 
-def _user_display_name(user) -> str:
-    if user is None:
+def _profile_display_name(profile: Optional[Profile]) -> str:
+    if profile is None:
         return ""
-    full_name = user.get_full_name().strip()
-    return full_name or user.username
+    return profile.get_display_name()
 
 
-def _calculate(club, user=None, court=None, lock=False) -> dict:
+def _calculate(
+    club,
+    collected_by: Optional[Profile] = None,
+    court=None,
+    lock=False,
+) -> dict:
     queryset = Transaction.objects.filter(
         club=club,
         settlement_line__isnull=True,
         is_cancelled=False,
     )
-    if user is not None:
-        queryset = queryset.filter(created_by=user)
+    if collected_by is not None:
+        queryset = queryset.filter(created_by=collected_by)
     if lock:
         queryset = queryset.select_for_update(of=("self",))
 
@@ -47,6 +53,7 @@ def _calculate(club, user=None, court=None, lock=False) -> dict:
             "booking__club_player__player_profile",
             "court",
             "created_by",
+            "created_by__user",
         ).order_by("created", "id")
     )
     if not candidates:
@@ -98,17 +105,19 @@ def _calculate(club, user=None, court=None, lock=False) -> dict:
     club_id = club.id if hasattr(club, "id") else club
     court_id = court.id if court and hasattr(court, "id") else court
     court_name = court.name if court and hasattr(court, "name") else ""
-    user_id = user.id if user and hasattr(user, "id") else user
-    user_name = _user_display_name(user)
+    collected_by_id = (
+        collected_by.id
+        if collected_by and hasattr(collected_by, "id")
+        else collected_by
+    )
+    collected_by_name = _profile_display_name(collected_by)
 
     return {
         "club": club_id,
         "court": court_id,
         "court_name": court_name,
-        "collected_by": user_id,
-        "collected_by_name": user_name,
-        "user": user_id,
-        "user_name": user_name,
+        "collected_by": collected_by_id,
+        "collected_by_name": collected_by_name,
         "period_start": candidates[0].created,
         "period_end": candidates[-1].created,
         "transaction_count": len(candidates),
@@ -122,16 +131,27 @@ def _calculate(club, user=None, court=None, lock=False) -> dict:
     }
 
 
-def preview(club, user=None, court=None) -> dict:
-    calc = _calculate(club, user=user, court=court, lock=False)
+def preview(
+    club,
+    collected_by: Optional[Profile] = None,
+    court=None,
+) -> dict:
+    calc = _calculate(club, collected_by=collected_by, court=court, lock=False)
     calc.pop("_candidates", None)
     return calc
 
 
-def create(club, user=None, *, settled_by, notes="", court=None) -> Settlement:
+def create(
+    club,
+    collected_by: Optional[Profile] = None,
+    *,
+    settled_by: Profile,
+    notes="",
+    court=None,
+) -> Settlement:
     try:
         with transaction.atomic():
-            calc = _calculate(club, user=user, court=court, lock=True)
+            calc = _calculate(club, collected_by=collected_by, court=court, lock=True)
             settlement = Settlement.objects.create(
                 club=club,
                 court=court,
@@ -150,17 +170,10 @@ def create(club, user=None, *, settled_by, notes="", court=None) -> Settlement:
                 ]
             )
 
-            from apps.audit.models import AuditLog
-
-            audit_actor = (
-                settled_by.profile
-                if settled_by is not None and hasattr(settled_by, "profile")
-                else (settled_by if isinstance(settled_by, Profile) else None)
-            )
             record_audit_log(
                 club=settlement.club,
                 court=settlement.court,
-                actor=audit_actor,
+                actor=settled_by,
                 action=AuditLog.Action.SETTLEMENT_CREATED,
                 entity_type="Settlement",
                 entity_id=settlement.id,

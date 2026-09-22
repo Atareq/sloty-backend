@@ -128,7 +128,7 @@ Club + Court + attempted_by (for Staff)
 
 #### Invariant Separation:
 - `BookingAttempt` represents user-initiated operational synchronization actions (offline submissions, conflict logs, and rejected intents).
-- Staff members can only view and dismiss **their own** rejected attempts (`attempted_by = request.user`). Owners and managers have club-wide visibility.
+- Staff members can only view and dismiss **their own** rejected attempts (`attempted_by = resolved Profile actor`). Owners and managers have club-wide visibility.
 - **Rule:** Do not merge `Booking` and `BookingAttempt` authorization rules. They serve different operational purposes.
 
 ---
@@ -377,7 +377,7 @@ Sprint 3 addendum's "consumers are not migrated" line. Runtime operational reads
 - `Booking` and `BookingAttempt` declare Spine v2 `authorization_config` with `default_scope="court"`.
 - `BookingViewSet` and `BookingAttemptViewSet` compose `SlotyScopedResourceMixin` + `SlotyBasePermission`.
 - Booking security boundary is Club + Court and is **not** creator-scoped.
-- BookingAttempt keeps Staff `attempted_by=request.user` narrowing in `filter_scoped_queryset()`. Dismiss remains attempter-only for every role via `check_object_permission`.
+- BookingAttempt Staff scoping compares `attempted_by` with the resolved Profile actor. Dismiss remains attempter-only for every role via `check_object_permission`.
 - Matrix gained `cancellation_preview` and `partial_update` for Owner/Manager/Staff so existing PATCH and preview behavior is preserved.
 - Lifecycle actions load the booking through `self.get_object()` on the secured queryset. Out-of-scope bookings return HTTP 404 instead of HTTP 403 (existence-leak fix). Create/slots/reschedule **target court** denials remain HTTP 403.
 - `apps/bookings/authorization.py` was not created. Legacy `ClubAccessContext` remains for Club memberships.

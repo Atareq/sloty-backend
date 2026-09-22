@@ -15,15 +15,14 @@ from tests.profile_factories import grant_owner_club, grant_staff_court
 class CourtAPITestCase(APITestCase):
     password = "test-pass-123"
 
-    def create_user(self, username: str, **extra_fields) -> User:
-        return User.objects.create_user(
-            username=username,
-            password=self.password,
-            **extra_fields,
-        )
+    def create_user(self, phone_number=None, **extra_fields) -> User:
+        extra_fields.setdefault("password", getattr(self, "password", "test-pass-123"))
+        from tests.profile_factories import create_user as factory_create_user
 
-    def create_platform_admin(self, username="court-admin") -> User:
-        user = self.create_user(username=username)
+        return factory_create_user(phone_number=phone_number, **extra_fields)
+
+    def create_platform_admin(self, **extra_fields) -> User:
+        user = self.create_user(**extra_fields)
         AdminProfile.objects.create(user=user, role=Profile.Role.ADMIN)
         return user
 
@@ -92,9 +91,9 @@ class CourtAPITestCase(APITestCase):
 class CourtAPITests(CourtAPITestCase):
     def setUp(self):
         self.platform_admin = self.create_platform_admin()
-        self.owner = self.create_user("court-owner")
-        self.other_owner = self.create_user("other-court-owner")
-        self.staff = self.create_user("court-staff")
+        self.owner = self.create_user()
+        self.other_owner = self.create_user()
+        self.staff = self.create_user()
         self.club = self.create_club("Court Club", slug="court-club")
         self.other_club = self.create_club("Other Court Club", slug="other-court-club")
         grant_owner_club(self.owner, self.club)
@@ -301,9 +300,9 @@ class CourtAPITests(CourtAPITestCase):
 
 class CourtWorkingHourAPITests(CourtAPITestCase):
     def setUp(self):
-        self.owner = self.create_user("hours-owner")
-        self.other_owner = self.create_user("hours-other-owner")
-        self.staff = self.create_user("hours-staff")
+        self.owner = self.create_user()
+        self.other_owner = self.create_user()
+        self.staff = self.create_user()
         self.club = self.create_club("Hours Club", slug="hours-club")
         self.other_club = self.create_club("Other Hours Club", slug="other-hours-club")
         grant_owner_club(self.owner, self.club)
@@ -440,6 +439,10 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_staff_can_read_assigned_nested_working_hours_only(self):
+        CourtWorkingHour.objects.create(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.MONDAY,
+        )
         grant_staff_court(self.staff, self.court)
         self.client.force_authenticate(user=self.staff)
 
@@ -781,6 +784,123 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
             str(response.data),
         )
 
+    def test_nested_get_unconfigured_returns_seven_closed_days(self):
+        self.client.force_authenticate(user=self.owner)
+        self.assertEqual(self.court.working_hours.count(), 0)
+
+        response = self.client.get(self.nested_working_hour_url(self.club, self.court))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["working_hours"]), 7)
+        self.assertFalse(response.data["pricing_configured"])
+        for row in response.data["working_hours"]:
+            self.assertEqual(row["pricing_periods"], [])
+
+    def test_nested_get_configured_all_closed_returns_200(self):
+        self.client.force_authenticate(user=self.owner)
+        for weekday in CourtWorkingHour.Weekday.values:
+            CourtWorkingHour.objects.create(court=self.court, weekday=weekday)
+
+        response = self.client.get(self.nested_working_hour_url(self.club, self.court))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["pricing_configured"])
+        self.assertEqual(len(response.data["working_hours"]), 7)
+        for row in response.data["working_hours"]:
+            self.assertEqual(row["pricing_periods"], [])
+
+    def test_nested_put_replaces_existing_weekly_configuration(self):
+        self.client.force_authenticate(user=self.owner)
+        CourtWorkingHour.objects.create(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.MONDAY,
+        )
+        response_initial = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(self.open_row(CourtWorkingHour.Weekday.MONDAY)),
+            format="json",
+        )
+        self.assertEqual(response_initial.status_code, status.HTTP_200_OK)
+        monday_wh = CourtWorkingHour.objects.get(
+            court=self.court, weekday=CourtWorkingHour.Weekday.MONDAY
+        )
+        self.assertEqual(monday_wh.pricing_periods.count(), 2)
+
+        single_period_row = {
+            "weekday": CourtWorkingHour.Weekday.MONDAY,
+            "pricing_periods": [
+                {
+                    "starts_at": "12:00:00",
+                    "ends_at": "18:00:00",
+                    "price": "350.00",
+                }
+            ],
+        }
+        response_replaced = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(single_period_row),
+            format="json",
+        )
+        self.assertEqual(response_replaced.status_code, status.HTTP_200_OK)
+        monday_wh.refresh_from_db()
+        self.assertEqual(monday_wh.pricing_periods.count(), 1)
+        period = monday_wh.pricing_periods.first()
+        self.assertEqual(period.price, Decimal("350.00"))
+        self.assertEqual(period.starts_at, time(12, 0))
+        self.assertEqual(period.ends_at, time(18, 0))
+
+    def test_nested_put_closed_day_with_empty_pricing_periods(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            {
+                "working_hours": [
+                    {
+                        "weekday": CourtWorkingHour.Weekday.SATURDAY,
+                        "pricing_periods": [],
+                    },
+                    self.open_row(CourtWorkingHour.Weekday.SUNDAY),
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        sat_wh = CourtWorkingHour.objects.get(
+            court=self.court, weekday=CourtWorkingHour.Weekday.SATURDAY
+        )
+        self.assertEqual(sat_wh.pricing_periods.count(), 0)
+
+    def test_nested_working_hours_saturday_first_mapping_calendar_week(self):
+        from datetime import date
+
+        from apps.common.weekdays import to_python_weekday, to_sloty_weekday
+
+        calendar_week = [
+            (date(2026, 9, 19), 0, CourtWorkingHour.Weekday.SATURDAY),
+            (date(2026, 9, 20), 1, CourtWorkingHour.Weekday.SUNDAY),
+            (date(2026, 9, 21), 2, CourtWorkingHour.Weekday.MONDAY),
+            (date(2026, 9, 22), 3, CourtWorkingHour.Weekday.TUESDAY),
+            (date(2026, 9, 23), 4, CourtWorkingHour.Weekday.WEDNESDAY),
+            (date(2026, 9, 24), 5, CourtWorkingHour.Weekday.THURSDAY),
+            (date(2026, 9, 25), 6, CourtWorkingHour.Weekday.FRIDAY),
+        ]
+        for cal_date, expected_sloty_wd, enum_val in calendar_week:
+            sloty_wd = to_sloty_weekday(cal_date.weekday())
+            self.assertEqual(sloty_wd, expected_sloty_wd)
+            self.assertEqual(sloty_wd, enum_val)
+            self.assertEqual(to_python_weekday(sloty_wd), cal_date.weekday())
+
+    def test_staff_cannot_put_nested_working_hours(self):
+        grant_staff_court(self.staff, self.court)
+        self.client.force_authenticate(user=self.staff)
+
+        put_resp = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(self.open_row()),
+            format="json",
+        )
+        self.assertEqual(put_resp.status_code, status.HTTP_403_FORBIDDEN)
+
     def test_model_clean_accepts_midnight_end_boundary(self):
         working_hour = CourtWorkingHour.objects.create(
             court=self.court,
@@ -869,7 +989,7 @@ class CourtMinimumDepositPricingInvariantTests(CourtAPITestCase):
     """
 
     def setUp(self):
-        self.owner = self.create_user("deposit-owner")
+        self.owner = self.create_user()
         self.club = self.create_club("Deposit Club", slug="deposit-club")
         self.other_club = self.create_club("Other Deposit Club", slug="other-deposit")
         grant_owner_club(self.owner, self.club)

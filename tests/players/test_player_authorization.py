@@ -13,7 +13,6 @@ Validates:
 from django.test import TestCase
 from rest_framework.test import APIRequestFactory
 
-from apps.accounts.models import User
 from apps.clubs.models import Club
 from apps.common.authorization.contracts import load_authorization_config
 from apps.common.authorization.querysets import scoped_queryset
@@ -21,11 +20,11 @@ from apps.common.authorization.resolver import resolve_club_scope
 from apps.common.authorization.scopes import ResourceScope
 from apps.players.models import ClubPlayer, PlayerProfile
 from apps.profiles.models import Profile
-from tests.profile_factories import grant_owner_club
+from tests.profile_factories import create_user, grant_owner_club
 
 
-def make_user(username):
-    return User.objects.create_user(username=username, password="test-pass-123")
+def make_user(*_unused, **kwargs):
+    return create_user(**kwargs)
 
 
 def make_club(name, slug):

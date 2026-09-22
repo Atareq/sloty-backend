@@ -47,7 +47,7 @@ class TransactionAttemptViewSet(
 ):
     """
     Authorization: club+court via TransactionAttempt.authorization_config.
-    Staff are additionally restricted to attempted_by=request.user.
+    Staff are additionally restricted to attempted_by=context.profile.
     Dismiss remains attempter-only for every role.
     """
 
@@ -104,7 +104,7 @@ class TransactionAttemptViewSet(
         attempt = dismiss_transaction_attempt(
             access=access,
             attempt=attempt,
-            actor=request.user,
+            actor=access.profile,
         )
         return Response(
             TransactionAttemptDetailSerializer(
@@ -140,7 +140,7 @@ class TransactionViewSet(
 ):
     """
     Authorization: club+court via Transaction.authorization_config.
-    Staff are additionally restricted to created_by=request.user.
+    Staff are additionally restricted to created_by=context.profile.
     Cancel: Platform Admin any in-scope row; others only their own collections.
     """
 
@@ -212,7 +212,7 @@ class TransactionViewSet(
             access=access,
             transaction_obj=transaction_obj,
             reason=serializer.validated_data["reason"],
-            actor=request.user,
+            actor=access.profile,
         )
         return Response(
             TransactionDetailSerializer(
