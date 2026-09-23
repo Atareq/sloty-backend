@@ -92,6 +92,7 @@ class Transaction(SlotyCreatedModel):
             "created_by__user",
             "cancelled_by",
             "cancelled_by__user",
+            "settlement_line",
         ),
         "prefetch_related": (),
     }

@@ -31,11 +31,12 @@ def _profile_display_name(profile: Optional[Profile]) -> str:
     return profile.get_display_name()
 
 
-def _calculate(
+def calculate(
     club,
     collected_by: Optional[Profile] = None,
     court=None,
     lock=False,
+    allow_empty=False,
 ) -> dict:
     queryset = Transaction.objects.filter(
         club=club,
@@ -56,32 +57,55 @@ def _calculate(
             "created_by__user",
         ).order_by("created", "id")
     )
-    if not candidates:
+    if not candidates and not allow_empty:
         raise SlotyAPIException(
             status_code=status.HTTP_409_CONFLICT,
             code="NO_UNSETTLED_TRANSACTIONS",
             message=NO_UNSETTLED_TRANSACTIONS_MESSAGE,
         )
 
-    booking_payments = sum(
-        (
-            t.amount
-            for t in candidates
-            if t.transaction_type == Transaction.Type.PAYMENT
-        ),
-        ZERO,
-    )
-    booking_refunds = sum(
-        (t.amount for t in candidates if t.transaction_type == Transaction.Type.REFUND),
-        ZERO,
-    )
-    total_amount = booking_payments + booking_refunds
-
+    booking_payments = ZERO
+    booking_refunds = ZERO
     totals_by_method = {
         str(method): ZERO for method, _ in Transaction.PaymentMethod.choices
     }
+    collector_breakdown = {}
     for t in candidates:
+        if t.transaction_type == Transaction.Type.PAYMENT:
+            booking_payments += t.amount
+        else:
+            booking_refunds += t.amount
         totals_by_method[str(t.payment_method)] += t.amount
+
+        collector = t.created_by
+        collector_id = t.created_by_id
+        if collector_id not in collector_breakdown:
+            collector_breakdown[collector_id] = {
+                "collected_by": collector_id,
+                "collected_by_name": _profile_display_name(collector),
+                "period_start": t.created,
+                "period_end": t.created,
+                "transaction_count": 0,
+                "total_amount": ZERO,
+                "net_amount": ZERO,
+                "booking_payments": ZERO,
+                "booking_refunds": ZERO,
+                "totals_by_payment_method": {
+                    str(method): ZERO for method, _ in Transaction.PaymentMethod.choices
+                },
+            }
+        collector_row = collector_breakdown[collector_id]
+        collector_row["period_end"] = t.created
+        collector_row["transaction_count"] += 1
+        collector_row["total_amount"] += t.amount
+        collector_row["net_amount"] += t.amount
+        if t.transaction_type == Transaction.Type.PAYMENT:
+            collector_row["booking_payments"] += t.amount
+        else:
+            collector_row["booking_refunds"] += t.amount
+        collector_row["totals_by_payment_method"][str(t.payment_method)] += t.amount
+
+    total_amount = booking_payments + booking_refunds
 
     serialized_transactions = [
         {
@@ -118,8 +142,8 @@ def _calculate(
         "court_name": court_name,
         "collected_by": collected_by_id,
         "collected_by_name": collected_by_name,
-        "period_start": candidates[0].created,
-        "period_end": candidates[-1].created,
+        "period_start": candidates[0].created if candidates else None,
+        "period_end": candidates[-1].created if candidates else None,
         "transaction_count": len(candidates),
         "total_amount": total_amount,
         "net_amount": total_amount,
@@ -127,6 +151,7 @@ def _calculate(
         "booking_refunds": booking_refunds,
         "totals_by_payment_method": totals_by_method,
         "transactions": serialized_transactions,
+        "collector_breakdown": list(collector_breakdown.values()),
         "_candidates": candidates,
     }
 
@@ -136,7 +161,7 @@ def preview(
     collected_by: Optional[Profile] = None,
     court=None,
 ) -> dict:
-    calc = _calculate(club, collected_by=collected_by, court=court, lock=False)
+    calc = calculate(club, collected_by=collected_by, court=court, lock=False)
     calc.pop("_candidates", None)
     return calc
 
@@ -151,7 +176,12 @@ def create(
 ) -> Settlement:
     try:
         with transaction.atomic():
-            calc = _calculate(club, collected_by=collected_by, court=court, lock=True)
+            calc = calculate(
+                club,
+                collected_by=collected_by,
+                court=court,
+                lock=True,
+            )
             settlement = Settlement.objects.create(
                 club=club,
                 court=court,

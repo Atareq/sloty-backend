@@ -96,7 +96,7 @@ Frontend must never treat “JWT contains `club_id`” as proof of access.
   - `test_user_model.py`: Identity constraints and platform admin checks.
   - `test_account_api.py`: `/api/v1/me/` and `/api/v1/users/` permissions and serialization.
   - Profile architecture tests verify current role authority, Profile extension scope, retired-manager deactivation, and profile-backed seed data.
-  - `test_seed_demo_data.py`: Multi-club demo seed data creation.
+  - `test_seed_demo_data.py`: Single-club `testing` demo seed data creation.
 
 ## Concrete Profile identity
 
@@ -106,8 +106,9 @@ Create a concrete Profile child directly. User and profile creation is atomic,
 with creator provenance stored on `Profile.created_by` when applicable.
 Use `select_related("profile")`, not a plural profile prefetch.
 
-`seed_demo_data` keeps authentication accounts separate from business actors:
-the default hierarchy is `AdminProfile` → `OwnerProfile` → `StaffProfile`,
-with creator provenance on the Profile rows. Clubs, courts, bookings,
-transactions, settlements, and audit logs receive explicit Profile actors.
-The command remains idempotent across reruns.
+`seed_demo_data` keeps authentication accounts separate from business actors
+and creates only the local `testing` club. The default hierarchy is
+`AdminProfile` → `OwnerProfile` → `StaffProfile`, with creator provenance on
+the Profile rows. The testing club's courts, bookings, transactions,
+settlements, and audit logs receive explicit Profile actors. The command
+remains idempotent across reruns.

@@ -863,12 +863,12 @@ class AuditSeedSchemaTests(AuditAPITestCase):
         self.assertEqual(AuditLog.objects.count(), count)
         self.assertTrue(
             AuditLog.objects.filter(
-                club__slug="barcelona-fc", action=AuditLog.Action.BOOKING_CREATED
+                club__slug="testing", action=AuditLog.Action.BOOKING_CREATED
             ).exists()
         )
         self.assertTrue(
             AuditLog.objects.filter(
-                club__slug="barcelona-fc",
+                club__slug="testing",
                 action=AuditLog.Action.SETTLEMENT_MARKED_SETTLED,
             ).exists()
         )

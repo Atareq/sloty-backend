@@ -16,12 +16,12 @@
 
 - Unsettled custody consists of transactions in the selected club where `is_cancelled=false` and `settlement_line IS NULL`.
 - Custody includes signed refunds and is not limited by transaction age, booking status, or payment method.
-- Preview and settlement creation use the same club-wide candidate query across courts. Their optional `court` input is validated and recorded as metadata; it does not narrow those candidates.
-- The unsettled summary can narrow its displayed transaction rows when an authorized in-club `court` is supplied.
-- Preview and settlement creation use the same candidate calculation. Creation locks the candidates and links each transaction once through `SettlementTransaction.transaction`.
+- Preview, unsettled summary, and settlement creation use the same club-wide calculation across courts. Their optional `court` input is validated and treated as metadata; it never narrows custody candidates.
+- The calculation supports an optional collector Profile. With one, custody is limited to `Transaction.created_by=collector`; without one, it includes every eligible transaction in the club.
+- Preview returns the calculation without mutation. Creation runs that calculation with row locking inside `transaction.atomic()` and links each candidate once through `SettlementTransaction.transaction`.
 - A settlement is created with its final `settled_by` actor; the current model has no settlement status or pending/mark-settled lifecycle.
 - `Settlement` is append-only (`SlotyCreatedModel`). The insert timestamp is `created` (not `created_at`).
-- Transaction persistence time (`Transaction.created`) determines candidate ordering and derived settlement periods. `occurred_at` does not replace it.
+- Transaction persistence time (`Transaction.created`) determines candidate ordering and derived settlement periods. `period_start` and `period_end` are the earliest and latest eligible persistence times; `occurred_at` does not replace them.
 - Authorization remains in the Authorization Spine and `apps/settlements/authorization.py`. Preserve club scope and collector authority checks.
 
 ## API and OpenAPI contract

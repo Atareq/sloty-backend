@@ -5592,19 +5592,19 @@ class BookingMidnightWorkingHourAPITests(BookingAPITestCase):
         self.assertFalse(next_week_last_slot["is_available"])
 
 
-class SeededBarcelonaBookingCreationTests(BookingAPITestCase):
+class SeededTestingBookingCreationTests(BookingAPITestCase):
     def test_authorized_staff_creates_booking_with_customer_identity(self):
         call_command("seed_demo_data", verbosity=0)
-        club = Club.objects.get(slug="barcelona-fc")
-        court = Court.objects.get(club=club, name="Spotify Camp Nou")
-        staff = User.objects.get(email="staff_a@example.com")
+        club = Club.objects.get(slug="testing")
+        court = Court.objects.get(club=club, name="Testing Main Court")
+        staff = User.objects.get(email="staff@example.com")
         booking_date = timezone.localdate() + timedelta(days=9)
         start_time = timezone.make_aware(
             timezone.datetime.combine(booking_date, time(8, 0)),
             timezone.get_current_timezone(),
         )
         end_time = start_time + timedelta(hours=1)
-        customer_name = "Barcelona Walk-in Customer"
+        customer_name = "Testing Walk-in Customer"
         customer_phone = "+201012345678"
         self.client.force_authenticate(user=staff)
 

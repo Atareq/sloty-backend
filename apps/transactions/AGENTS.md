@@ -19,6 +19,7 @@
 - **Transaction Cancellation & Corrections**:
   - Corrections use a logged cancel of the original row via `POST .../transactions/{id}/cancel/` with a required non-empty reason, followed by normal transaction creation.
   - Settled transactions (`settlement_line` exists) and already cancelled transactions cannot be cancelled.
+  - Transactions created within the last 15 minutes may be cancelled without applying `Court.cancellation_refund_notice_days`. Older transactions may be cancelled directly only while the linked booking is still in its full-refund cancellation window; otherwise the API returns `PAYMENT_CANCELLATION_REQUIRES_BOOKING_CANCELLATION` and the client must use booking cancellation so retention/refund policy is applied.
   - Cancelled rows remain visible (`is_cancelled=True`), but are excluded from paid amount, remaining amount, settlements, and dashboard revenue.
   - If cancelling a transaction leaves a `CONFIRMED` booking with zero remaining valid payments, the booking is reverted `CONFIRMED -> HOLD` in the same atomic transaction.
   - `REFUND` transactions cannot be cancelled via the normal cancellation endpoint.
@@ -46,14 +47,17 @@ Profile IDs; display names use the linked account full name or phone number.
 
 - [`apps/transactions/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/transactions/services.py):
   - `create_transaction()`: Enforces court deposit rules, digital references, updates booking `HOLD -> CONFIRMED`, and audits.
-  - `cancel_transaction()`: Enforces unsettled status, marks cancelled, recalculates booking status (`CONFIRMED -> HOLD` if unbacked), and audits.
+  - `cancel_transaction()`: Enforces unsettled status and the 15-minute/direct-correction versus booking-cancellation policy, marks cancelled, recalculates booking status (`CONFIRMED -> HOLD` if unbacked), and audits.
   - `annotate_booking_paid_amount()`: Authoritative aggregation of non-cancelled payment rows minus refunds.
 
 ## API Boundaries & Key Invariants
 
 - `/api/v1/clubs/{club_slug}/transactions/`: List and create transactions.
 - `/api/v1/clubs/{club_slug}/transactions/{id}/`: Retrieve transaction detail.
+- Transaction list/detail/create responses expose read-only `is_settled`, derived from whether the immutable transaction has a `settlement_line`; it is not stored as a duplicate flag.
+- `GET .../transactions/?search=<value>` searches related ClubPlayer customer name, related PlayerProfile phone, related collector account name, and payment reference after authorization and club/court scoping.
 - `POST .../transactions/{id}/cancel/`: Transaction correction endpoint requiring `cancellation_reason`.
+  - A late direct-cancellation rejection is HTTP 409 with `code=PAYMENT_CANCELLATION_REQUIRES_BOOKING_CANCELLATION` and message `This payment can no longer be cancelled directly. Cancel the booking instead.` Frontends should handle the stable code and display the message.
 - `/api/v1/clubs/{club_slug}/transaction-attempts/`: Traceability list/detail and dismissal for rejected attempts.
 
 ## Authorization & Scoping (Authorization Spine v2)

@@ -352,6 +352,7 @@ class TransactionResponseContextTests(TransactionAPITestCase):
         self.assertEqual(payload["court"], self.court.id)
         self.assertEqual(payload["created_by"], self.platform_admin.profile.id)
         self.assertEqual(payload["id"], transaction_obj.id)
+        self.assertFalse(payload["is_settled"])
         self.assertEqual(
             payload["booking_customer_name"], self.booking.club_player.display_name
         )
@@ -381,6 +382,28 @@ class TransactionResponseContextTests(TransactionAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIsNone(response.data["created_by"])
         self.assertEqual(response.data["created_by_name"], "")
+
+    def test_list_and_detail_report_settlement_link(self):
+        settlement = Settlement.objects.create(
+            club=self.club,
+            court=self.court,
+            total_amount=self.transaction_obj.amount,
+            settled_by=self.platform_admin.profile,
+        )
+        SettlementTransaction.objects.create(
+            settlement=settlement,
+            transaction=self.transaction_obj,
+            amount=self.transaction_obj.amount,
+        )
+
+        list_response = self.client.get(self.transaction_list_url(self.club))
+        detail_response = self.client.get(
+            self.transaction_detail_url(self.club, self.transaction_obj)
+        )
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(list_response.data["results"][0]["is_settled"])
+        self.assertTrue(detail_response.data["is_settled"])
 
 
 class TransactionClubPlayerIdentityTests(TransactionAPITestCase):
@@ -447,6 +470,7 @@ class TransactionCreateTests(TransactionAPITestCase):
         self.client.force_authenticate(user=self.platform_admin)
         response = self.post_transaction(self.club, self.booking)
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(response.data["is_settled"])
         transaction_obj = Transaction.objects.get(id=response.data["id"])
         self.assertEqual(transaction_obj.created_by, self.platform_admin.profile)
 
@@ -1586,6 +1610,50 @@ class TransactionFilterTests(TransactionAPITestCase):
         self.assertNotIn(other_club.id, self.list_ids(name_response))
         self.assertNotIn(other_club.id, self.list_ids(reference_response))
 
+    def test_search_matches_payment_reference(self):
+        matching = self.create_transaction(
+            self.booking,
+            created_by=self.platform_admin.profile,
+            payment_reference="A-PENDING-SETTLEMENT-001",
+        )
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"search": "A-PENDING-SETTLEMENT-001"},
+        )
+        self.assertIn(matching.id, self.list_ids(response))
+
+    def test_search_matches_collector_name(self):
+        collector = self.create_user(first_name="Ahmed", last_name="Hassan")
+        collector_profile = grant_owner_club(collector, self.club)
+        matching = self.create_transaction(
+            self.booking,
+            created_by=collector_profile,
+            payment_reference="COLLECTOR-NAME-SEARCH",
+        )
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"search": "Ahmed"},
+        )
+        self.assertEqual(self.list_ids(response), {matching.id})
+
+    def test_search_matches_customer_phone(self):
+        matching = self.create_transaction(
+            self.create_booking(
+                self.court,
+                customer_name="Phone Search Customer",
+                customer_phone="+201099988877",
+                start_time=self.time_at(13),
+                end_time=self.time_at(14),
+            ),
+            created_by=self.platform_admin.profile,
+            payment_reference="CUSTOMER-PHONE-SEARCH",
+        )
+        response = self.client.get(
+            self.transaction_list_url(self.club),
+            {"search": "+201099988877"},
+        )
+        self.assertEqual(self.list_ids(response), {matching.id})
+
     def test_search_respects_staff_self_only_scope(self):
         visible = self.create_transaction(
             self.booking,
@@ -1726,6 +1794,7 @@ class TransactionCentralizedAccessTests(TransactionAPITestCase):
         self.assertIn("booking_customer_phone", schema)
         self.assertIn("booking_start_time", schema)
         self.assertIn("booking_end_time", schema)
+        self.assertIn("is_settled", schema)
         self.assertIn("settlement", schema)
 
 

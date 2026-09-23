@@ -133,12 +133,12 @@ class SettlementViewSet(
         responses=SettlementUnsettledSummaryResponseSerializer,
         description=(
             "Read-only current unsettled transaction custody grouped by "
-            "collector. Without a court filter, candidates match settlement "
-            "preview: selected club, is_cancelled=false, no settlement line, "
-            "and collector=Transaction.created_by. period_start is the "
-            "earliest unsettled transaction for that collector; period_end "
-            "is request time. "
-            "An explicit in-club court narrows this summary. "
+            "collector, using the same calculation as settlement preview and "
+            "creation: selected club, is_cancelled=false, no settlement line, "
+            "and optional collector=Transaction.created_by. period_start and "
+            "period_end are the earliest and latest eligible transaction "
+            "persistence times for that collector. Court input is metadata "
+            "only and never narrows custody. "
             "Transaction dates and payment methods do not limit current "
             "custody. Signed zero and negative totals remain visible. This is "
             "not persisted Settlement history."

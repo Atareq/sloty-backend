@@ -981,62 +981,37 @@ Create richer local/demo data for Swagger or Postman testing:
 python manage.py seed_demo_data
 ```
 
-The command is idempotent and local/dev only. All demo users use password
-`test-pass-123`.
+The command is idempotent and local/dev only. It creates one club with slug
+`testing`; all demo users use password `123`.
 
 Main users:
 
 - `platform_admin`
-- `owner_a`, `manager_a`, `staff_a`
-- `owner_b`, `manager_b`, `staff_b`
-- `owner_c`, `manager_c`, `staff_c`
-- `owner_a`, `staff_a`
-- `owner_b`, `staff_b`
-- `owner_c`, `staff_c`
+- `owner`
+- `staff`
 
-Main clubs:
+Main club:
 
-- `demo-football-club`: happy-path testing; managers can settle and change
-  pricing.
-- `demo-restricted-club`: restricted manager settlement and pricing flags.
-- `demo-football-club`: happy-path multi-court club.
-- `demo-restricted-club`: single-court club.
-- `demo-other-club`: cross-club scoping checks.
+- `testing` (`Testing`): one local testing club with two courts, bookings,
+  transactions, settlements, and audit examples.
 
 Token examples:
 
 ```json
-{"phone_number": "+201033333331", "password": "test-pass-123"}
+{"phone_number": "+201033333331", "password": "123"}
 ```
 
 ```json
 {
   "phone_number": "+201033333331",
-  "password": "test-pass-123",
-  "club_slug": "barcelona-fc"
+  "password": "123",
+  "club_slug": "testing"
 }
 ```
 
-Create the scoped Albaladya frontend/local testing scenario:
-
-```bash
-python manage.py seed_demo_data --scenario albaladya-test
-```
-
-This creates or repairs one club (`albaladya-test`), one court, all seven
-working-hour rows, and these development/test-only users. Never use these
-credentials in production:
-
-- `+201011111111` / `test-pass-123` (`platform_admin`)
-- `+201022222221` / `test-pass-123` (`owner_a`)
-- `+201033333331` / `test-pass-123` (`staff_a`)
-
-The seed command includes role-specific memberships, two courts per club,
-working hours, bookings across all statuses, transactions, pending and settled
+The seed command includes role-specific memberships, two courts, working
+hours, bookings across all statuses, related transactions, pending and settled
 settlements, unsettled transactions for preview testing, and audit log examples.
-It supports Sprint 8 manual testing for blocked/free availability slots,
-calendar scoping, dashboard summaries, revenue, utilization, and staff financial
-dashboard denial.
 
 Run tests:
 

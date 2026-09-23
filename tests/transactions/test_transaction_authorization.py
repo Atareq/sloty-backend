@@ -85,6 +85,7 @@ class TransactionAuthorizationConfigTests(TransactionAPITestCase):
         self.assertEqual(config.scopes[ResourceScope.CLUB.value].path, "club")
         self.assertEqual(config.scopes[ResourceScope.COURT.value].path, "court")
         self.assertIn("booking__club_player__player_profile", config.select_related)
+        self.assertIn("settlement_line", config.select_related)
 
     def test_transaction_attempt_config_declares_club_and_court_scope(self):
         config = load_authorization_config(TransactionAttempt)

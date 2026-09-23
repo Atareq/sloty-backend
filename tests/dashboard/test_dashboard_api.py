@@ -1326,7 +1326,7 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
         platform_admin = User.objects.get(email="platform_admin@example.com")
         booking = (
             Booking.objects.filter(
-                club__slug="barcelona-fc", status__in=Booking.BLOCKING_STATUSES
+                club__slug="testing", status__in=Booking.BLOCKING_STATUSES
             )
             .select_related("club", "court")
             .first()
@@ -1343,10 +1343,10 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertTrue(any((slot["is_available"] for slot in response.data["slots"])))
         self.assertTrue(
             Transaction.objects.filter(
-                club__slug="barcelona-fc", settlement_line__isnull=True
+                club__slug="testing", settlement_line__isnull=True
             ).exists()
         )
-        self.assertTrue(AuditLog.objects.filter(club__slug="barcelona-fc").exists())
+        self.assertTrue(AuditLog.objects.filter(club__slug="testing").exists())
 
 
 class DashboardQueryScalingTests(DashboardDataMixin, DashboardAPITestCase):
