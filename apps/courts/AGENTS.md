@@ -16,12 +16,12 @@
   - If the court has no working-hour prices yet, the invariant is not enforceable and existing create/configure behavior is preserved.
   - Other courts' prices never affect this court.
 - **Contiguous Operating Hours**:
-  - Every open weekday must have contiguous, non-overlapping pricing periods aligned with `Court.slot_duration_minutes`.
+  - Every open weekday must have contiguous, non-overlapping half-open `[start, end)` pricing periods aligned with `Court.slot_duration_minutes`; adjacent end/start boundaries are valid.
   - A weekday with no pricing periods represents a closed day.
 - **Midnight & Time Semantics** (`apps/courts/pricing.py`):
-  - `time(0, 0)` as an end time represents `24:00` / next-day midnight (`MIDNIGHT_END_MINUTES = 1440`).
-  - `is_valid_period_bounds(starts_at, ends_at)`: Validates that start time is strictly before end time using the 24:00 semantic for midnight end.
-  - **Single Operational Day**: Intervals ending at `00:00` on `date + 1` belong to the operational date of start. Crossing *past* next-day midnight is disallowed (no general overnight scheduling).
+  - `time(0, 0)` as an end time represents `24:00` / next-day midnight (`MIDNIGHT_END_MINUTES = 1440`); an end earlier than its start is resolved on the following local date.
+  - `normalized_pricing_periods()` and `working_hour_datetime_bounds()` are the canonical schedule conversion path for validation, pricing, slot generation, availability, and reporting.
+  - Runtime intervals are timezone-aware local datetimes, including genuine cross-midnight periods such as `23:00–01:00`.
   - Boundaries and durations must strictly align with `slot_duration_minutes`.
 - **Weekly Working Hours Replacement**:
   - Working hours and pricing are managed atomically across the week. Direct single-period or single-weekday mutations via the legacy endpoint are rejected with `WORKING_HOURS_USE_WEEKLY_ENDPOINT` (409 Conflict).
@@ -39,7 +39,7 @@
   - One record per court per weekday (`0` = Saturday to `6` = Friday). Convert Python `date.weekday()` (Monday=0) with `apps.common.weekdays`.
   - Its unique `(court, weekday)` constraint supplies the lookup index; do not add a duplicate non-unique index for the same fields.
 - [`CourtWorkingHourPricePeriod`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/models.py):
-  - Child periods defining `starts_at`, `ends_at`, and `price`. Ordered by `starts_at`.
+  - Child periods defining `starts_at`, `ends_at`, and `price`. Stored in clock-time order; consumers normalize them into operational order so a cross-midnight schedule remains contiguous.
 
 ## Service Layer
 

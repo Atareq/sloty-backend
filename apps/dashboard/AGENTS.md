@@ -26,6 +26,7 @@
   - It must **never** leak customer information, booking IDs, internal statuses, transactions, prices, notes, or recurrence details.
   - Availability uses the stored HOLD deadline as booking overlap does: a HOLD blocks a slot only while `hold_expires_at > now`.
   - Calendar items and court-utilization occupancy use the same helper (`exclude_logically_expired_holds`). Dashboard summary `hold_bookings` still counts persisted `HOLD` rows, including those not yet cleaned up.
+- **Schedule boundaries**: Availability and court-utilization resolve working hours through `apps.courts.pricing.working_hour_datetime_bounds()`, using timezone-aware half-open `[start, end)` intervals. Adjacent pricing periods do not duplicate a slot; cross-midnight periods retain their next-day end.
 
 ## Service Layer
 

@@ -277,11 +277,28 @@ class TransactionAccessTests(TransactionAPITestCase):
             },
         )
 
-    def test_staff_can_list_transactions_for_assigned_court_only(self):
+    def test_staff_can_list_and_retrieve_own_transactions_across_selected_club(self):
+        unassigned_court_transaction = self.create_transaction(
+            self.same_club_other_booking,
+            created_by=self.staff.profile,
+            payment_reference="STAFF-OTHER-COURT",
+        )
         self.client.force_authenticate(user=self.staff)
         response = self.client.get(self.transaction_list_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(self.list_ids(response), {self.transaction_obj.id})
+        self.assertEqual(
+            self.list_ids(response),
+            {self.transaction_obj.id, unassigned_court_transaction.id},
+        )
+        for transaction_obj in (
+            self.transaction_obj,
+            unassigned_court_transaction,
+        ):
+            with self.subTest(transaction=transaction_obj.pk):
+                detail_response = self.client.get(
+                    self.transaction_detail_url(self.club, transaction_obj)
+                )
+                self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertNotIn(self.same_club_other_transaction.id, self.list_ids(response))
         self.assertNotIn(
             self.same_court_other_collector_transaction.id, self.list_ids(response)
@@ -310,7 +327,7 @@ class TransactionAccessTests(TransactionAPITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_staff_cannot_retrieve_transaction_for_another_court(self):
+    def test_staff_cannot_retrieve_another_collector_for_another_court(self):
         self.client.force_authenticate(user=self.staff)
         response = self.client.get(
             self.transaction_detail_url(self.club, self.same_club_other_transaction)

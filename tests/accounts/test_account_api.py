@@ -661,6 +661,26 @@ class PasswordChangeAPITests(AccountAPITestCase):
         self.assertEqual(owner_profile.role, Profile.Role.OWNER)
         self.assertEqual(player_profile.user_id, player_user.id)
 
+    def test_staff_can_change_own_password(self):
+        club = self.create_club("Staff Password Club", "staff-password-club")
+        court = self.create_court(club, "Staff Password Court")
+        staff_user = self.create_staff(court)
+        staff_profile = staff_user.profile
+        self.client.force_authenticate(user=staff_user)
+
+        response = self.client.post(
+            self.password_change_url(),
+            self.password_change_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        staff_user.refresh_from_db()
+        staff_profile.refresh_from_db()
+        self.assertTrue(staff_user.check_password(self.new_password))
+        self.assertEqual(staff_profile.role, Profile.Role.STAFF)
+        self.assertEqual(staff_profile.club_id, club.id)
+
     def test_wrong_current_password_returns_validation_error(self):
         self.authenticate_user()
 
@@ -1104,7 +1124,7 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
         )
         self.assertEqual(resp_owner_c.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_owner_cannot_create_or_patch_users(self):
+    def test_owner_cannot_create_or_patch_identity_fields(self):
         self.client.force_authenticate(user=self.owner)
         create_resp = self.client.post(
             reverse("user-list"),
@@ -1122,7 +1142,34 @@ class OwnerUserScopingAPITests(AccountAPITestCase):
             {"first_name": "Hacked"},
             format="json",
         )
-        self.assertEqual(patch_resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(patch_resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.staff_a1.refresh_from_db()
+        self.assertNotEqual(self.staff_a1.first_name, "Hacked")
+
+    def test_owner_can_deactivate_in_scope_staff_with_is_active_only(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.patch(
+            reverse("user-detail", kwargs={"pk": self.staff_a1.pk}),
+            {"is_active": False},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.staff_a1.refresh_from_db()
+        self.assertFalse(self.staff_a1.is_active)
+        self.assertFalse(response.data["is_active"])
+
+    def test_owner_cannot_patch_staff_outside_owned_clubs(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.patch(
+            reverse("user-detail", kwargs={"pk": self.staff_c.pk}),
+            {"is_active": False},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.staff_c.refresh_from_db()
+        self.assertTrue(self.staff_c.is_active)
 
     def test_staff_cannot_access_users_endpoint(self):
         self.client.force_authenticate(user=self.staff_a1)

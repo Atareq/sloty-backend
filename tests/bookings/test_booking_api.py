@@ -2311,6 +2311,39 @@ class BookingOverlapTests(BookingAPITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
+    def test_adjacent_booking_at_half_open_end_is_allowed_but_overlap_is_rejected(self):
+        working_hour = CourtWorkingHour.objects.get(
+            court=self.court, weekday=CourtWorkingHour.Weekday.WEDNESDAY
+        )
+        self.set_price_periods(
+            working_hour,
+            (time(1), time(5), Decimal("200.00")),
+            (time(5), time(9), Decimal("300.00")),
+        )
+        existing = self.create_booking(
+            self.court,
+            start_time=self.time_at(1),
+            end_time=self.time_at(5),
+        )
+
+        adjacent = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(5).isoformat(),
+            end_time=self.time_at(6).isoformat(),
+        )
+        overlapping = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(4).isoformat(),
+            end_time=self.time_at(6).isoformat(),
+        )
+
+        self.assertEqual(adjacent.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(overlapping.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(overlapping, "BOOKING_SLOT_UNAVAILABLE")
+        self.assertEqual(existing.end_time, self.time_at(5))
+
     def test_can_create_overlapping_booking_on_different_court(self):
         self.create_existing_booking(Booking.Status.HOLD)
         response = self.post_booking(
@@ -5518,7 +5551,7 @@ class BookingMidnightWorkingHourAPITests(BookingAPITestCase):
         self.assertEqual(response.data["total_price"], "300.00")
         self.assertEqual(response.data["status"], Booking.Status.HOLD)
 
-    def test_booking_creation_crossing_past_midnight_rejected(self):
+    def test_booking_creation_past_midnight_is_rejected_outside_working_hours(self):
         self.client.force_authenticate(user=self.owner)
         response = self.post_booking(
             self.club,
@@ -5527,7 +5560,7 @@ class BookingMidnightWorkingHourAPITests(BookingAPITestCase):
             end_time=(self.time_at(23) + timedelta(hours=2)).isoformat(),
         )
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-        self.assertEqual(response.data["code"], "BOOKING_MULTIDAY_NOT_SUPPORTED")
+        self.assertEqual(response.data["code"], "BOOKING_OUTSIDE_WORKING_HOURS")
 
     def test_booking_conflict_at_midnight_boundary(self):
         self.client.force_authenticate(user=self.owner)
@@ -5590,6 +5623,71 @@ class BookingMidnightWorkingHourAPITests(BookingAPITestCase):
         next_week_last_slot = slots_response.data["slots"][-1]
         self.assertEqual(next_week_last_slot["slot_status"], "RECURRING_RESERVED")
         self.assertFalse(next_week_last_slot["is_available"])
+
+
+class BookingOvernightWorkingHourAPITests(BookingAPITestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.owner = self.create_user()
+        self.club = self.create_club("Overnight Club", slug="overnight-club")
+        self.court = self.create_court(self.club, "Overnight Court")
+        grant_owner_club(self.owner, self.club)
+        working_hour = self.create_working_hours(
+            self.court,
+            weekday=CourtWorkingHour.Weekday.WEDNESDAY,
+            opens_at=time(23),
+            closes_at=time(1),
+        )
+        self.set_price_periods(
+            working_hour,
+            (time(23), time(1), Decimal("200.00")),
+            (time(1), time(5), Decimal("300.00")),
+        )
+
+    def test_overnight_slots_are_unique_and_use_the_boundary_price(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {"court": self.court.id, "date": "2026-05-20"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slots = response.data["slots"]
+        self.assertEqual(
+            [slot["start_time"] for slot in slots],
+            [self.time_at(23) + timedelta(hours=index) for index in range(6)],
+        )
+        self.assertEqual(len({slot["start_time"] for slot in slots}), len(slots))
+        self.assertEqual(slots[2]["slot_price"], "300.00")
+
+    def test_booking_across_midnight_is_priced_and_overlap_checked_as_half_open(self):
+        from apps.bookings.services import validate_no_booking_overlap
+        from apps.common.exceptions import SlotyAPIException
+
+        self.client.force_authenticate(user=self.owner)
+        response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(23).isoformat(),
+            end_time=(self.time_at(23) + timedelta(hours=2)).isoformat(),
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["total_price"], "400.00")
+
+        validate_no_booking_overlap(
+            self.court,
+            self.time_at(23) + timedelta(hours=2),
+            self.time_at(23) + timedelta(hours=3),
+        )
+
+        with self.assertRaises(SlotyAPIException) as raised:
+            validate_no_booking_overlap(
+                self.court,
+                self.time_at(23) + timedelta(hours=1),
+                self.time_at(23) + timedelta(hours=2),
+            )
+        self.assertEqual(raised.exception.api_code, "BOOKING_SLOT_UNAVAILABLE")
 
 
 class SeededTestingBookingCreationTests(BookingAPITestCase):

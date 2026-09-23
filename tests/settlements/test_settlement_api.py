@@ -2021,10 +2021,12 @@ class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
         self.assertEqual(settled_ids, preview_ids)
         self.assertEqual(settlement_obj.total_amount, Decimal("450.00"))
 
-    def test_8_operational_transaction_authorization_remains_court_restricted(self):
+    def test_8_transaction_listing_is_club_scoped_for_staff(self):
         """
-        Staff A cannot access cross-court transactions via operational
-        Transaction APIs.
+        Staff A can list their transactions across the club's courts.
+
+        The staff collector restriction remains in place, so another staff
+        member's transaction is not exposed.
         """
         self.client.force_authenticate(user=self.staff_a)
         transactions_url = reverse(
@@ -2034,8 +2036,8 @@ class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         accessible_tx_ids = {row["id"] for row in response.data["results"]}
         self.assertIn(self.t1.id, accessible_tx_ids)
-        self.assertNotIn(self.t2.id, accessible_tx_ids)
-        self.assertNotIn(self.t3.id, accessible_tx_ids)
+        self.assertIn(self.t2.id, accessible_tx_ids)
+        self.assertIn(self.t3.id, accessible_tx_ids)
         self.assertNotIn(self.t_staff_b.id, accessible_tx_ids)
 
     def test_9_no_court_restriction_in_custody(self):

@@ -17,6 +17,7 @@
     - `CANCELLED` and `EXPIRED` bookings are strictly excluded from usage analysis.
 - **Occupancy Clipping**:
     - Bookings overlapping report period boundaries have their occupied minutes clipped to the selected window (e.g. daytime vs evening).
+    - Working-hour availability uses the shared timezone-aware half-open interval conversion, so contiguous cross-midnight pricing periods contribute one continuous window.
 - **Financial Authority**:
     - Financial values use historical `Booking.total_price` snapshots, **not** current court pricing periods.
     - Financial totals sum non-cancelled attached transactions.

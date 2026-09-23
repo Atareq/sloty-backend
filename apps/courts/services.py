@@ -4,12 +4,7 @@ from rest_framework import serializers, status
 
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
-from apps.courts.pricing import (
-    compare_adjacent_period_bounds,
-    is_aligned_to_slot_grid,
-    is_valid_period_bounds,
-    time_to_minutes,
-)
+from apps.courts.pricing import is_valid_period_bounds, normalized_pricing_periods
 
 
 def format_time(value):
@@ -65,20 +60,15 @@ def serialize_weekly_working_hours(court):
 
 
 def validate_pricing_periods_for_row(*, court, row):
-    pricing_periods = sorted(
-        row.get("pricing_periods", []),
-        key=lambda period: (
-            time_to_minutes(period["starts_at"], is_end=False),
-            time_to_minutes(period["ends_at"], is_end=True),
-        ),
-    )
+    pricing_periods = row.get("pricing_periods", [])
 
     if not pricing_periods:
         return
 
-    day_start = pricing_periods[0]["starts_at"]
+    normalized_periods = normalized_pricing_periods(pricing_periods)
+    day_start = normalized_periods[0][1]
     previous_end = day_start
-    for period in pricing_periods:
+    for period, start, end in normalized_periods:
         starts_at = period["starts_at"]
         ends_at = period["ends_at"]
         price = period["price"]
@@ -94,39 +84,27 @@ def validate_pricing_periods_for_row(*, court, row):
                 _("Price must be greater than or equal to zero."),
                 "INVALID_WORKING_HOUR_PRICE",
             )
-        if not (
-            is_aligned_to_slot_grid(
-                boundary=starts_at,
-                opens_at=day_start,
-                slot_duration_minutes=court.slot_duration_minutes,
-                is_end=False,
-            )
-            and is_aligned_to_slot_grid(
-                boundary=ends_at,
-                opens_at=day_start,
-                slot_duration_minutes=court.slot_duration_minutes,
-                is_end=True,
-            )
-        ):
+        if (start - day_start) % court.slot_duration_minutes or (
+            end - day_start
+        ) % court.slot_duration_minutes:
             raise coded_error(
                 "pricing_periods",
                 _("Pricing-period boundaries must align with the court slot duration."),
                 "PRICING_PERIOD_NOT_ALIGNED_WITH_SLOT_DURATION",
             )
-        boundary_gap = compare_adjacent_period_bounds(starts_at, previous_end)
-        if boundary_gap < 0:
+        if start < previous_end:
             raise coded_error(
                 "pricing_periods",
                 _("Pricing periods must not overlap."),
                 "WORKING_HOUR_PRICING_OVERLAP",
             )
-        if boundary_gap != 0:
+        if start != previous_end:
             raise coded_error(
                 "pricing_periods",
                 _("Pricing periods must cover the full working period without gaps."),
                 "WORKING_HOUR_PRICING_INCOMPLETE",
             )
-        previous_end = ends_at
+        previous_end = end
 
 
 def validate_weekly_working_hours_payload(*, court, working_hours):
@@ -257,22 +235,12 @@ def validate_slot_duration_against_pricing(court, slot_duration_minutes):
         periods = list(working_hour.pricing_periods.all())
         if not periods:
             continue
-        opens_at = periods[0].starts_at
-        for period in periods:
-            if not (
-                is_aligned_to_slot_grid(
-                    boundary=period.starts_at,
-                    opens_at=opens_at,
-                    slot_duration_minutes=slot_duration_minutes,
-                    is_end=False,
-                )
-                and is_aligned_to_slot_grid(
-                    boundary=period.ends_at,
-                    opens_at=opens_at,
-                    slot_duration_minutes=slot_duration_minutes,
-                    is_end=True,
-                )
-            ):
+        normalized_periods = normalized_pricing_periods(periods)
+        day_start = normalized_periods[0][1]
+        for _period, start, end in normalized_periods:
+            if (start - day_start) % slot_duration_minutes or (
+                end - day_start
+            ) % slot_duration_minutes:
                 raise coded_error(
                     "slot_duration_minutes",
                     _(

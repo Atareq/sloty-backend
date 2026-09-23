@@ -592,3 +592,51 @@ class CourtUsageReportTests(CourtUsageReportAPITestCase):
         self.assertEqual(court_data["utilization_percentage"], "16.67")
         self.assertEqual(court_data["booking_count"], 1)
         self.assertEqual(court_data["financial"]["total_paid_amount"], "300.00")
+
+    def test_cross_midnight_periods_use_one_contiguous_aware_window(self):
+        self.client.force_authenticate(user=self.owner)
+        overnight_court = self.create_court(self.club, "Overnight Court")
+        working_hour = CourtWorkingHour.objects.create(
+            court=overnight_court,
+            weekday=CourtWorkingHour.Weekday.MONDAY,
+        )
+        CourtWorkingHourPricePeriod.objects.bulk_create(
+            [
+                CourtWorkingHourPricePeriod(
+                    working_hour=working_hour,
+                    starts_at=time(23),
+                    ends_at=time(1),
+                    price=Decimal("200.00"),
+                ),
+                CourtWorkingHourPricePeriod(
+                    working_hour=working_hour,
+                    starts_at=time(1),
+                    ends_at=time(5),
+                    price=Decimal("300.00"),
+                ),
+            ]
+        )
+        booking = self.create_booking(
+            overnight_court,
+            status=Booking.Status.CONFIRMED,
+            start_time=self.time_at(23),
+            end_time=self.time_at(1, day=7),
+            total_price=Decimal("400.00"),
+        )
+        self.create_transaction(booking, amount=Decimal("400.00"))
+
+        response = self.client.get(
+            self.url(),
+            self.params(
+                court=overnight_court.id,
+                date_from="2026-07-06",
+                date_to="2026-07-07",
+            ),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        court_data = response.data["usage_by_court"][0]
+        self.assertEqual(court_data["available_minutes"], 360)
+        self.assertEqual(court_data["occupied_minutes"], 120)
+        self.assertEqual(court_data["utilization_percentage"], "33.33")
+        self.assertEqual(court_data["booking_count"], 1)

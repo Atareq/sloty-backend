@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from django.core.exceptions import ImproperlyConfigured
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIRequestFactory
 
@@ -148,6 +149,15 @@ class TransactionViewSetSpineCompositionTests(TransactionAPITestCase):
         self.assertEqual(
             TransactionAttemptViewSet.permission_classes, (SlotyBasePermission,)
         )
+
+    def test_transaction_reads_use_club_scope_while_cancel_keeps_court_scope(self):
+        view = TransactionViewSet()
+        view.action = "list"
+        self.assertEqual(view.get_resource_scope(), ResourceScope.CLUB)
+        view.action = "retrieve"
+        self.assertEqual(view.get_resource_scope(), ResourceScope.CLUB)
+        view.action = "cancel"
+        self.assertEqual(view.get_resource_scope(), ResourceScope.COURT)
 
     def test_matrix_allows_every_migrated_transaction_action_for_club_roles(self):
         for role in (Role.ADMIN, Role.OWNER, Role.STAFF):
@@ -296,6 +306,123 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
         )
         self.assertEqual(cancel_res.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_owner_court_filter_only_narrows_club_authorized_transactions(self):
+        court_c = self.create_court(self.club, "Court C")
+        booking_c = self.create_booking(
+            court_c,
+            customer_name="Booking Court C",
+            customer_phone="+201000000303",
+            status=Booking.Status.CONFIRMED,
+        )
+        tx_court_c = self.create_transaction(
+            booking_c,
+            amount=Decimal("80.00"),
+            created_by=self.owner.profile,
+        )
+
+        self.client.force_authenticate(user=self.owner)
+        all_courts = self.client.get(self.transaction_list_url(self.club))
+        court_b_only = self.client.get(
+            self.transaction_list_url(self.club), {"court": self.court_b.id}
+        )
+
+        self.assertEqual(all_courts.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self.list_ids(all_courts),
+            {
+                self.tx_court_a_staff.id,
+                self.tx_court_a_owner.id,
+                self.tx_court_b_other_staff.id,
+                tx_court_c.id,
+            },
+        )
+        self.assertEqual(self.list_ids(court_b_only), {self.tx_court_b_other_staff.id})
+
+    def test_staff_court_filter_only_narrows_own_club_transactions(self):
+        own_court_b = self.create_transaction(
+            self.booking_b,
+            amount=Decimal("75.00"),
+            created_by=self.staff.profile,
+        )
+        court_c = self.create_court(self.club, "Court C")
+        self.client.force_authenticate(user=self.staff)
+        unfiltered = self.client.get(self.transaction_list_url(self.club))
+        court_a_only = self.client.get(
+            self.transaction_list_url(self.club), {"court": self.court_a.id}
+        )
+        court_b_only = self.client.get(
+            self.transaction_list_url(self.club), {"court": self.court_b.id}
+        )
+        empty_court = self.client.get(
+            self.transaction_list_url(self.club), {"court": court_c.id}
+        )
+
+        self.assertEqual(
+            self.list_ids(unfiltered), {self.tx_court_a_staff.id, own_court_b.id}
+        )
+        self.assertEqual(self.list_ids(court_a_only), {self.tx_court_a_staff.id})
+        self.assertEqual(self.list_ids(court_b_only), {own_court_b.id})
+        self.assertEqual(self.list_ids(empty_court), set())
+
+    def test_cross_club_court_filter_cannot_escape_requested_club(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        response = self.client.get(
+            self.transaction_list_url(self.club), {"court": self.other_court.id}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.list_ids(response), set())
+
+    def test_search_and_ordering_intersect_with_court_filter(self):
+        later = self.create_transaction(
+            self.booking_b,
+            amount=Decimal("75.00"),
+            created_by=self.other_staff.profile,
+        )
+        created = timezone.now()
+        Transaction.objects.filter(pk=self.tx_court_b_other_staff.pk).update(
+            created=created
+        )
+        Transaction.objects.filter(pk=later.pk).update(created=created)
+
+        self.client.force_authenticate(user=self.owner)
+        search = self.client.get(
+            self.transaction_list_url(self.club),
+            {"court": self.court_b.id, "search": "Booking Court B"},
+        )
+        newest = self.client.get(
+            self.transaction_list_url(self.club),
+            {"court": self.court_b.id, "ordering": "-created"},
+        )
+        oldest = self.client.get(
+            self.transaction_list_url(self.club),
+            {"court": self.court_b.id, "ordering": "created"},
+        )
+        combined = self.client.get(
+            self.transaction_list_url(self.club),
+            {
+                "court": self.court_b.id,
+                "search": "Booking Court B",
+                "ordering": "-created",
+            },
+        )
+
+        self.assertEqual(
+            self.list_ids(search), {self.tx_court_b_other_staff.id, later.id}
+        )
+        self.assertEqual(
+            [item["id"] for item in newest.data["results"]],
+            sorted([self.tx_court_b_other_staff.id, later.id], reverse=True),
+        )
+        self.assertEqual(
+            [item["id"] for item in oldest.data["results"]],
+            sorted([self.tx_court_b_other_staff.id, later.id]),
+        )
+        self.assertEqual(
+            [item["id"] for item in combined.data["results"]],
+            sorted([self.tx_court_b_other_staff.id, later.id], reverse=True),
+        )
+
     def test_club_isolation_enforced(self):
         """Staff from another club cannot access this club's transactions."""
         self.client.force_authenticate(user=self.other_club_user)
@@ -345,9 +472,8 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
 
     def test_custody_separation_regression(self):
         """
-        Verify that Current Custody (Club + Collector) includes all collections
-        across all courts for a staff member, completely independent of
-        operational transaction court scoping.
+        Verify that staff listing and Current Custody both include the staff
+        member's own selected-club collections across every court.
         """
         tx_court_b_staff = Transaction.objects.create(
             club=self.club,
@@ -359,8 +485,9 @@ class TransactionAuthorizationSpineTests(TransactionAPITestCase):
         )
         self.client.force_authenticate(user=self.staff)
         tx_list = self.client.get(self.transaction_list_url(self.club))
-        self.assertIn(self.tx_court_a_staff.id, self.list_ids(tx_list))
-        self.assertNotIn(tx_court_b_staff.id, self.list_ids(tx_list))
+        self.assertEqual(
+            self.list_ids(tx_list), {self.tx_court_a_staff.id, tx_court_b_staff.id}
+        )
         preview_res = preview_settlement(
             club=self.club, collected_by=self.staff.profile
         )

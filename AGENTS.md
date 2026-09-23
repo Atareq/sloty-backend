@@ -110,6 +110,7 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 - **Current Custody**: Settlement preview, grouped unsettled summary, and settlement creation consume the same all-time club-wide calculation. Optional collector filtering uses `Transaction.created_by`; Court is metadata and never narrows settlement candidates. Creation recalculates while locking candidates inside `transaction.atomic()`.
 - **Demo Seed Identity**: `seed_demo_data` creates only the local `testing` club, keeps `User` rows for authentication, and creates explicit `AdminProfile`, `OwnerProfile`, and `StaffProfile` actors. The testing club's business rows store those Profile objects directly; rerunning the seed remains idempotent.
 - **Scheduling contract**: `apps/bookings` owns generated slot availability and stored HOLD deadlines. Read [`docs/scheduling-contract.md`](docs/scheduling-contract.md) and the live OpenAPI schema at `/api/v1/schema/` before changing booking or frontend-facing scheduling behavior.
+  Scheduling uses canonical half-open `[start_time, end_time)` intervals across pricing, slots, and booking conflicts; cross-midnight periods are resolved as timezone-aware local datetimes.
   The slots endpoint returns one unified `slots` timeline: generated slots are
   merged with visible booking records, and bookings outside configured working
   hours are returned as `slot_type=BOOKING_ONLY` items. The top-level response

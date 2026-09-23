@@ -283,7 +283,7 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
         response = self.client.get(self.settlement_unsettled_summary_url(self.club))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_transaction_api_stays_court_scoped_while_custody_does_not(self):
+    def test_transaction_api_is_club_scoped_while_custody_does_not(self):
         from django.urls import reverse
 
         self.client.force_authenticate(user=self.staff)
@@ -292,7 +292,7 @@ class SettlementAuthorizationSpineTests(SettlementAPITestCase):
         )
         tx_ids = {row["id"] for row in tx_list.data["results"]}
         self.assertIn(self.tx_staff_court_a.id, tx_ids)
-        self.assertNotIn(self.tx_staff_court_b.id, tx_ids)
+        self.assertIn(self.tx_staff_court_b.id, tx_ids)
         preview_res = preview_settlement(
             club=self.club, collected_by=self.staff.profile
         )

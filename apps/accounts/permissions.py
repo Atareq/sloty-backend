@@ -19,8 +19,8 @@ class CanAccessUsers(BasePermission):
     """
     Permission for /api/v1/users/:
     - Platform super admins have full CRUD access.
-    - Club Owners have read-only access (GET/HEAD/OPTIONS) within their club
-      staff scope.
+    - Club Owners have read access and may PATCH ``is_active`` within their
+      owned-club staff scope.
     - All other users (Staff, standard users, anonymous) are denied.
     """
 
@@ -31,7 +31,7 @@ class CanAccessUsers(BasePermission):
         profile = getattr(user, "profile", None)
         if profile and profile.is_enabled and profile.role == Profile.Role.ADMIN:
             return True
-        if request.method in SAFE_METHODS:
+        if request.method in SAFE_METHODS or request.method == "PATCH":
             return Profile.objects.filter(
                 user=user,
                 role=Profile.Role.OWNER,
@@ -46,7 +46,7 @@ class CanAccessUsers(BasePermission):
         profile = getattr(user, "profile", None)
         if profile and profile.is_enabled and profile.role == Profile.Role.ADMIN:
             return True
-        if request.method in SAFE_METHODS:
+        if request.method in SAFE_METHODS or request.method == "PATCH":
             return Profile.objects.filter(
                 user=user,
                 role=Profile.Role.OWNER,

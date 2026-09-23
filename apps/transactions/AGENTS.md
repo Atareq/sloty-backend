@@ -55,7 +55,9 @@ Profile IDs; display names use the linked account full name or phone number.
 - `/api/v1/clubs/{club_slug}/transactions/`: List and create transactions.
 - `/api/v1/clubs/{club_slug}/transactions/{id}/`: Retrieve transaction detail.
 - Transaction list/detail/create responses expose read-only `is_settled`, derived from whether the immutable transaction has a `settlement_line`; it is not stored as a duplicate flag.
-- `GET .../transactions/?search=<value>` searches related ClubPlayer customer name, related PlayerProfile phone, related collector account name, and payment reference after authorization and club/court scoping.
+- `GET .../transactions/` starts from the selected club's ledger rows. Staff visibility is then narrowed to `created_by=current_profile`; owners and platform admins retain the full selected-club ledger.
+- `GET .../transactions/?search=<value>` searches related ClubPlayer customer name, related PlayerProfile phone, related collector account name, and payment reference after the selected-club and collector scopes are applied.
+- `GET .../transactions/?court=<id>` is an optional narrowing filter on that already authorized club queryset. It is never a separate court-rooted lookup and cannot cross the selected club.
 - `POST .../transactions/{id}/cancel/`: Transaction correction endpoint requiring `cancellation_reason`.
   - A late direct-cancellation rejection is HTTP 409 with `code=PAYMENT_CANCELLATION_REQUIRES_BOOKING_CANCELLATION` and message `This payment can no longer be cancelled directly. Cancel the booking instead.` Frontends should handle the stable code and display the message.
 - `/api/v1/clubs/{club_slug}/transaction-attempts/`: Traceability list/detail and dismissal for rejected attempts.
@@ -64,9 +66,9 @@ Profile IDs; display names use the linked account full name or phone number.
 
 > Club/court **WHERE** belongs to the Authorization Spine. `apps/transactions/authorization.py` keeps **business conditions** the matrix cannot express: Staff `created_by` / `attempted_by` narrowing, cancel-own (except Platform Admin), dismiss-own, and create-on-authorized-booking.
 
-- **ViewSets:** `SlotyScopedResourceMixin` + `SlotyBasePermission`. Models declare `authorization_config` (`default_scope="court"`). The secured queryset is built before filters, pagination, and serializers.
+- **ViewSets:** `SlotyScopedResourceMixin` + `SlotyBasePermission`. Transaction list and retrieve use the model's declared Club scope; cancel retains its Court scope. The secured queryset is built before filters, pagination, and serializers.
 - **Operational boundary:** Club + Court. Settlement / Current Custody is separately Spine v2 club-scoped with collector narrowing — Club + optional Collector, **never** Court.
-- **Staff list/retrieve:** assigned court(s) **and** `created_by=context.profile` (collector self-scope). This is not applied to Bookings.
+- **Staff list/retrieve:** selected club **and** `created_by=context.profile` (collector self-scope); an optional court filter only narrows list rows. Staff can retrieve every transaction returned by their list, including their own collection on an unassigned court. This is not applied to Bookings.
 - **Staff create:** any booking on an assigned court (not creator-scoped).
 - **Cancel:** Platform Admin may cancel any in-scope transaction. Owner and Staff may cancel only their own collections. Out-of-scope rows are HTTP 404; in-scope rows the actor may not cancel are HTTP 403.
 - **TransactionAttempt:** Club + Court, then Staff `attempted_by=context.profile`. Dismiss is attempter-only for every role.
