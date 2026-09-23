@@ -1,4 +1,6 @@
+from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.urls import reverse
 from django.utils import timezone
@@ -158,6 +160,70 @@ class TransactionCancelAPITests(TransactionAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assert_api_error(response, "PAYMENT_SETTLED_CANNOT_BE_CANCELLED")
         self.assertNotIn("transaction", response.data)
+        transaction_obj.refresh_from_db()
+        self.assertFalse(transaction_obj.is_cancelled)
+
+    def test_recent_transaction_ignores_booking_cancellation_notice(self):
+        now = timezone.now()
+        self.court.cancellation_refund_notice_days = 3
+        self.court.save(update_fields=["cancellation_refund_notice_days"])
+        self.booking.start_time = now + timedelta(days=1)
+        self.booking.end_time = self.booking.start_time + timedelta(hours=1)
+        self.booking.save(update_fields=["start_time", "end_time"])
+        transaction_obj = self.create_transaction(self.booking, created_by=self.owner)
+        Transaction.objects.filter(pk=transaction_obj.pk).update(
+            created=now - timedelta(minutes=15)
+        )
+
+        with patch("apps.transactions.services.timezone.now", return_value=now):
+            response = self.post_cancel(self.club, transaction_obj, self.owner)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_older_transaction_can_be_cancelled_inside_booking_notice_window(self):
+        now = timezone.now()
+        self.court.cancellation_refund_notice_days = 1
+        self.court.save(update_fields=["cancellation_refund_notice_days"])
+        self.booking.start_time = now + timedelta(days=2)
+        self.booking.end_time = self.booking.start_time + timedelta(hours=1)
+        self.booking.save(update_fields=["start_time", "end_time"])
+        transaction_obj = self.create_transaction(self.booking, created_by=self.owner)
+        Transaction.objects.filter(pk=transaction_obj.pk).update(
+            created=now - timedelta(minutes=16)
+        )
+
+        with patch("apps.transactions.services.timezone.now", return_value=now):
+            response = self.post_cancel(self.club, transaction_obj, self.owner)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_older_transaction_outside_booking_notice_requires_booking_cancel(self):
+        now = timezone.now()
+        self.court.cancellation_refund_notice_days = 3
+        self.court.save(update_fields=["cancellation_refund_notice_days"])
+        self.booking.start_time = now + timedelta(days=1)
+        self.booking.end_time = self.booking.start_time + timedelta(hours=1)
+        self.booking.save(update_fields=["start_time", "end_time"])
+        transaction_obj = self.create_transaction(self.booking, created_by=self.owner)
+        Transaction.objects.filter(pk=transaction_obj.pk).update(
+            created=now - timedelta(minutes=16)
+        )
+
+        with patch("apps.transactions.services.timezone.now", return_value=now):
+            response = self.post_cancel(self.club, transaction_obj, self.owner)
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            response.data,
+            {
+                "success": False,
+                "code": "PAYMENT_CANCELLATION_REQUIRES_BOOKING_CANCELLATION",
+                "message": (
+                    "This payment can no longer be cancelled directly. "
+                    "Cancel the booking instead."
+                ),
+            },
+        )
         transaction_obj.refresh_from_db()
         self.assertFalse(transaction_obj.is_cancelled)
 

@@ -12,7 +12,7 @@ from apps.transactions.services import create_booking_transaction
 
 
 class BookingCustomerIdentityMixin(serializers.Serializer):
-    """Keep booking_customer_* keys; source ClubPlayer (exact booking-time version)."""
+    """Booking identity sourced from the existing customer relations."""
 
     booking_customer_name = serializers.SerializerMethodField()
     booking_customer_phone = PhoneNumberField(
@@ -25,8 +25,19 @@ class BookingCustomerIdentityMixin(serializers.Serializer):
         return booking_customer_display_name(obj.booking)
 
 
+class TransactionResponseContextMixin(BookingCustomerIdentityMixin):
+    """Transaction-only read context shared by list and detail responses."""
+
+    is_settled = serializers.SerializerMethodField(
+        help_text="True when the transaction is linked to a settlement."
+    )
+
+    def get_is_settled(self, obj) -> bool:
+        return hasattr(obj, "settlement_line")
+
+
 class TransactionListSerializer(
-    BookingCustomerIdentityMixin, serializers.ModelSerializer
+    TransactionResponseContextMixin, serializers.ModelSerializer
 ):
     created_by = serializers.PrimaryKeyRelatedField(
         read_only=True,
@@ -71,6 +82,7 @@ class TransactionListSerializer(
             "occurred_at",
             "created_by",
             "created_by_name",
+            "is_settled",
             "is_cancelled",
             "cancelled_by",
             "cancelled_at",
@@ -81,7 +93,7 @@ class TransactionListSerializer(
 
 
 class TransactionDetailSerializer(
-    BookingCustomerIdentityMixin, serializers.ModelSerializer
+    TransactionResponseContextMixin, serializers.ModelSerializer
 ):
     created_by = serializers.PrimaryKeyRelatedField(
         read_only=True,
@@ -126,6 +138,7 @@ class TransactionDetailSerializer(
             "created_by",
             "created_by_name",
             "client_request_id",
+            "is_settled",
             "is_cancelled",
             "cancelled_by",
             "cancelled_at",

@@ -7,7 +7,7 @@ from django.utils.translation import pgettext
 
 from apps.bookings.filters import exclude_logically_expired_holds
 from apps.common.weekdays import to_sloty_weekday
-from apps.courts.pricing import datetime_for_local_date, working_hour_bounds
+from apps.courts.pricing import datetime_for_local_date, working_hour_datetime_bounds
 from apps.reports.authorization import scoped_report_bookings, scoped_report_courts
 from apps.reports.constants import (
     DEMAND_BUCKET_MINUTES,
@@ -90,13 +90,11 @@ def period_window_for_working_hours(
 ):
     if working_hour is None:
         return None
-    bounds = working_hour_bounds(working_hour)
-    if bounds is None:
+    datetime_bounds = working_hour_datetime_bounds(working_hour, date_value)
+    if datetime_bounds is None:
         return None
 
-    opens_at, closes_at, _pricing_periods = bounds
-    opens_at = aware_combine(date_value, opens_at, is_end=False)
-    closes_at = aware_combine(date_value, closes_at, is_end=True)
+    opens_at, closes_at, _pricing_periods = datetime_bounds
     if period == PERIOD_DAYTIME:
         period_start = opens_at
         period_end = min(

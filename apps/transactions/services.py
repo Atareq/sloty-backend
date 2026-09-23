@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import IntegrityError, transaction
@@ -24,6 +25,9 @@ DUPLICATE_PAYMENT_REFERENCE_MESSAGE = (
 )
 PAYMENT_ALREADY_CANCELLED_MESSAGE = _("This payment is already cancelled.")
 PAYMENT_SETTLED_CANNOT_BE_CANCELLED_MESSAGE = _("Settled payments cannot be cancelled.")
+PAYMENT_CANCELLATION_REQUIRES_BOOKING_CANCELLATION_MESSAGE = _(
+    "This payment can no longer be cancelled directly. Cancel the booking instead."
+)
 PAYMENT_TERMINAL_BOOKING_CANNOT_BE_CANCELLED_MESSAGE = _(
     "Payments on terminal bookings cannot be cancelled."
 )
@@ -71,6 +75,7 @@ TRANSACTION_ATTEMPT_VALIDATION_FAILURE_CODES = {
     DUPLICATE_PAYMENT_REFERENCE_CODE,
     TRANSACTION_VALIDATION_ERROR_CODE,
 }
+TRANSACTION_CANCELLATION_SAFETY_WINDOW = timedelta(minutes=15)
 
 
 def normalize_payment_reference(payment_reference):
@@ -894,6 +899,15 @@ def cancel_transaction(*, access, transaction_obj, reason, actor: Profile):
         )
         locked_transaction.booking = locked_booking
 
+        if Transaction.objects.filter(
+            pk=locked_transaction.pk,
+            settlement_line__isnull=False,
+        ).exists():
+            raise SlotyAPIException(
+                status_code=status.HTTP_409_CONFLICT,
+                code="PAYMENT_SETTLED_CANNOT_BE_CANCELLED",
+                message=PAYMENT_SETTLED_CANNOT_BE_CANCELLED_MESSAGE,
+            )
         can_cancel = (
             access.can_cancel_transaction(locked_transaction)
             if hasattr(access, "can_cancel_transaction")
@@ -917,15 +931,6 @@ def cancel_transaction(*, access, transaction_obj, reason, actor: Profile):
                 code="REFUND_TRANSACTION_CANNOT_BE_CANCELLED",
                 message=REFUND_TRANSACTION_CANNOT_BE_CANCELLED_MESSAGE,
             )
-        if Transaction.objects.filter(
-            pk=locked_transaction.pk,
-            settlement_line__isnull=False,
-        ).exists():
-            raise SlotyAPIException(
-                status_code=status.HTTP_409_CONFLICT,
-                code="PAYMENT_SETTLED_CANNOT_BE_CANCELLED",
-                message=PAYMENT_SETTLED_CANNOT_BE_CANCELLED_MESSAGE,
-            )
         if locked_booking.status in Booking.LOCKED_STATUSES:
             raise SlotyAPIException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -933,13 +938,37 @@ def cancel_transaction(*, access, transaction_obj, reason, actor: Profile):
                 message=PAYMENT_TERMINAL_BOOKING_CANNOT_BE_CANCELLED_MESSAGE,
             )
 
+        now = timezone.now()
+        if locked_transaction.created < now - TRANSACTION_CANCELLATION_SAFETY_WINDOW:
+            from apps.bookings.services import calculate_cancellation_refund
+
+            try:
+                cancellation = calculate_cancellation_refund(
+                    booking=locked_booking,
+                    requested_at=now,
+                )
+            except SlotyAPIException as exc:
+                if exc.api_code != "BOOKING_CANCELLATION_TIME_PASSED":
+                    raise
+                raise SlotyAPIException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    code="PAYMENT_CANCELLATION_REQUIRES_BOOKING_CANCELLATION",
+                    message=PAYMENT_CANCELLATION_REQUIRES_BOOKING_CANCELLATION_MESSAGE,
+                ) from exc
+            if not cancellation["full_refund"]:
+                raise SlotyAPIException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    code="PAYMENT_CANCELLATION_REQUIRES_BOOKING_CANCELLATION",
+                    message=PAYMENT_CANCELLATION_REQUIRES_BOOKING_CANCELLATION_MESSAGE,
+                )
+
         transaction_before_data = transaction_audit_snapshot(locked_transaction)
         transaction_before_data["is_cancelled"] = False
         booking_before_data = booking_audit_snapshot(locked_booking)
         old_booking_status = locked_booking.status
         locked_transaction.is_cancelled = True
         locked_transaction.cancelled_by = actor
-        locked_transaction.cancelled_at = timezone.now()
+        locked_transaction.cancelled_at = now
         locked_transaction.cancellation_reason = reason
         locked_transaction.save(
             update_fields=[

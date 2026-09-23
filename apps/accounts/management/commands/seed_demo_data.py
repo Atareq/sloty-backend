@@ -2,7 +2,6 @@ from datetime import time, timedelta
 from decimal import Decimal
 
 from django.core.management.base import BaseCommand
-from django.db import transaction
 from django.utils import timezone
 
 from apps.accounts.models import User
@@ -11,7 +10,6 @@ from apps.bookings.models import Booking
 from apps.bookings.services import hold_expiry_deadline, resolve_booking_club_player
 from apps.clubs.models import Club
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
-from apps.courts.services import replace_weekly_working_hours
 from apps.profiles.models import (
     AdminProfile,
     OwnerProfile,
@@ -23,37 +21,6 @@ from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
 
 DEMO_PASSWORD = "123"
-ALBALADYA_PASSWORD = DEMO_PASSWORD
-ALBALADYA_USER_SPECS = (
-    {
-        "key": "admin",
-        "phone_number": "+201000000010",
-        "email": "admin@sloty.test",
-        "first_name": "Platform",
-        "last_name": "Admin",
-        "role": Profile.Role.ADMIN,
-        "created_by": None,
-    },
-    {
-        "key": "owner",
-        "phone_number": "+201000000011",
-        "email": "owner@sloty.test",
-        "first_name": "Test",
-        "last_name": "Owner",
-        "role": Profile.Role.OWNER,
-        "created_by": "admin",
-    },
-    {
-        "key": "staff",
-        "phone_number": "+201000000012",
-        "email": "staff@sloty.test",
-        "first_name": "Test",
-        "last_name": "Staff",
-        "role": Profile.Role.STAFF,
-        "created_by": "owner",
-    },
-)
-
 USER_SPECS = (
     {
         "key": "platform_admin",
@@ -66,71 +33,21 @@ USER_SPECS = (
         "is_superuser": True,
     },
     {
-        "key": "hossam_admin",
-        "phone_number": "+201011111112",
-        "email": "hossam_admin@example.com",
-        "first_name": "Hossam",
-        "last_name": "Platform Admin",
-        "role": Profile.Role.ADMIN,
-        "is_staff": True,
-        "is_superuser": True,
-    },
-    {
-        "key": "owner_a",
+        "key": "owner",
         "phone_number": "+201022222221",
-        "email": "owner_a@example.com",
+        "email": "owner@example.com",
         "first_name": "Owner",
-        "last_name": "Tarek",
+        "last_name": "Testing",
         "role": Profile.Role.OWNER,
         "is_staff": False,
         "is_superuser": False,
     },
     {
-        "key": "staff_a",
+        "key": "staff",
         "phone_number": "+201033333331",
-        "email": "staff_a@example.com",
+        "email": "staff@example.com",
         "first_name": "Staff",
-        "last_name": "Tarek",
-        "role": Profile.Role.STAFF,
-        "is_staff": False,
-        "is_superuser": False,
-    },
-    {
-        "key": "owner_b",
-        "phone_number": "+201022222222",
-        "email": "owner_b@example.com",
-        "first_name": "Owner",
-        "last_name": "Hossam",
-        "role": Profile.Role.OWNER,
-        "is_staff": False,
-        "is_superuser": False,
-    },
-    {
-        "key": "staff_b",
-        "phone_number": "+201033333332",
-        "email": "staff_b@example.com",
-        "first_name": "Staff",
-        "last_name": "Hossam",
-        "role": Profile.Role.STAFF,
-        "is_staff": False,
-        "is_superuser": False,
-    },
-    {
-        "key": "owner_c",
-        "phone_number": "+201022222223",
-        "email": "owner_c@example.com",
-        "first_name": "Owner",
-        "last_name": "Tarek",
-        "role": Profile.Role.OWNER,
-        "is_staff": False,
-        "is_superuser": False,
-    },
-    {
-        "key": "staff_c",
-        "phone_number": "+201033333333",
-        "email": "staff_c@example.com",
-        "first_name": "Staff",
-        "last_name": "Tarek",
+        "last_name": "Testing",
         "role": Profile.Role.STAFF,
         "is_staff": False,
         "is_superuser": False,
@@ -139,31 +56,13 @@ USER_SPECS = (
 
 CLUB_SPECS = (
     {
-        "key": "A",
-        "slug": "barcelona-fc",
-        "name": "Barcelona FC",
+        "key": "testing",
+        "slug": "testing",
+        "name": "Testing",
         "governorate": "ASSIUT",
         "city": "ASSIUT_MARKAZ",
-        "address": "Barcelona FC demo club, Assiut",
-        "court_names": ("Spotify Camp Nou", "La Masia Training Court"),
-    },
-    {
-        "key": "B",
-        "slug": "real-madrid-cf",
-        "name": "Real Madrid CF",
-        "governorate": "SOHAG",
-        "city": "SOHAG_MARKAZ",
-        "address": "Real Madrid CF demo club, Sohag",
-        "court_names": ("Santiago Bernabeu", "Valdebebas Training Court"),
-    },
-    {
-        "key": "C",
-        "slug": "liverpool-fc",
-        "name": "Liverpool FC",
-        "governorate": "MINYA",
-        "city": "MINYA_MARKAZ",
-        "address": "Liverpool FC demo club, Minya",
-        "court_names": ("Anfield", "Kirkby Academy Court"),
+        "address": "Testing club, Assiut",
+        "court_names": ("Testing Main Court", "Testing Secondary Court"),
     },
 )
 CLUB_SPECS_BY_KEY = {spec["key"]: spec for spec in CLUB_SPECS}
@@ -214,19 +113,7 @@ AUDIT_ACTION_SPECS = (
 class Command(BaseCommand):
     help = "Create idempotent local/demo data for manual API testing."
 
-    def add_arguments(self, parser):
-        parser.add_argument(
-            "--scenario",
-            choices=("default", "albaladya-test"),
-            default="default",
-            help="Seed the default demo data or a scoped deterministic scenario.",
-        )
-
     def handle(self, *args, **options):
-        if options["scenario"] == "albaladya-test":
-            self.seed_albaladya_test()
-            return
-
         users = self.create_users()
         profiles = self.create_admin_profiles(users)
         clubs = self.create_clubs(profiles)
@@ -253,133 +140,6 @@ class Command(BaseCommand):
             transactions,
             settlements,
             audit_logs,
-        )
-
-    def seed_albaladya_test(self):
-        with transaction.atomic():
-            users = self.create_albaladya_users()
-            admin, _ = AdminProfile.objects.update_or_create(
-                user=users["admin"],
-                defaults={
-                    "role": Profile.Role.ADMIN,
-                    "is_enabled": True,
-                    "created_by": None,
-                },
-            )
-            owner, _ = OwnerProfile.objects.update_or_create(
-                user=users["owner"],
-                defaults={
-                    "role": Profile.Role.OWNER,
-                    "is_enabled": True,
-                    "created_by": admin,
-                },
-            )
-            club = self.create_albaladya_club(admin)
-            owner.clubs.set([club])
-            court = self.create_albaladya_court(owner, club)
-            staff, _ = StaffProfile.objects.update_or_create(
-                user=users["staff"],
-                defaults={
-                    "role": Profile.Role.STAFF,
-                    "is_enabled": True,
-                    "club": club,
-                    "created_by": owner,
-                },
-            )
-            StaffCourtAccess.objects.get_or_create(staff_profile=staff, court=court)
-            profiles = {"admin": admin, "owner": owner, "staff": staff}
-            self.replace_albaladya_working_hours(court)
-        self.print_albaladya_summary(users, club, court, profiles)
-
-    def create_albaladya_users(self):
-        users = {}
-        for spec in ALBALADYA_USER_SPECS:
-            user, _ = User.objects.update_or_create(
-                phone_number=spec["phone_number"],
-                defaults={
-                    "email": spec["email"],
-                    "first_name": spec["first_name"],
-                    "last_name": spec["last_name"],
-                    "is_active": True,
-                    "is_staff": spec["role"] == Profile.Role.ADMIN,
-                    "is_superuser": spec["role"] == Profile.Role.ADMIN,
-                },
-            )
-            user.set_password(ALBALADYA_PASSWORD)
-            user.save(update_fields=["password"])
-            users[spec["key"]] = user
-
-        return users
-
-    def create_albaladya_club(self, admin_profile):
-        club, _ = Club.objects.update_or_create(
-            slug="albaladya-test",
-            defaults={
-                "name": "Albaladya Test",
-                "governorate": "ASSIUT",
-                "city": "ASSIUT_MARKAZ",
-                "address": "Albaladya Test Club, Assiut",
-                "phone_number": "+201000000001",
-                "is_active": True,
-                "created_by": admin_profile,
-            },
-        )
-        return club
-
-    def create_albaladya_court(self, owner_profile, club):
-        court, _ = Court.objects.update_or_create(
-            club=club,
-            name="Albaladya Main Court",
-            defaults={
-                "sport_type": Court.SportType.FOOTBALL,
-                "players_count": 10,
-                "default_price": Decimal("200.00"),
-                "minimum_deposit": Decimal("200.00"),
-                "slot_duration_minutes": 60,
-                "is_active": True,
-                "requires_digital_payment_reference": False,
-                "internal_hold_expiry_hours": 12,
-                "cancellation_refund_notice_days": 0,
-                "notes": "Main court for local development and frontend testing.",
-                "created_by": owner_profile,
-            },
-        )
-        return court
-
-    def albaladya_working_hours_payload(self):
-        rows = []
-        for weekday in CourtWorkingHour.Weekday.values:
-            if weekday == CourtWorkingHour.Weekday.FRIDAY:
-                rows.append(
-                    {
-                        "weekday": weekday,
-                        "pricing_periods": [],
-                    }
-                )
-                continue
-            rows.append(
-                {
-                    "weekday": weekday,
-                    "pricing_periods": [
-                        {
-                            "starts_at": time(10, 0),
-                            "ends_at": time(18, 0),
-                            "price": Decimal("200.00"),
-                        },
-                        {
-                            "starts_at": time(18, 0),
-                            "ends_at": time(23, 0),
-                            "price": Decimal("300.00"),
-                        },
-                    ],
-                }
-            )
-        return rows
-
-    def replace_albaladya_working_hours(self, court):
-        return replace_weekly_working_hours(
-            court=court,
-            working_hours=self.albaladya_working_hours_payload(),
         )
 
     def create_users(self):
@@ -481,9 +241,8 @@ class Command(BaseCommand):
         profiles = dict(admin_profiles)
         platform_admin = profiles["platform_admin"]
         for club_key, club in clubs.items():
-            suffix = club_key.lower()
             owner, _ = OwnerProfile.objects.update_or_create(
-                user=users[f"owner_{suffix}"],
+                user=users["owner"],
                 defaults={
                     "role": Profile.Role.OWNER,
                     "is_enabled": True,
@@ -492,7 +251,7 @@ class Command(BaseCommand):
             )
             owner.clubs.set([club])
             staff, _ = StaffProfile.objects.update_or_create(
-                user=users[f"staff_{suffix}"],
+                user=users["staff"],
                 defaults={
                     "role": Profile.Role.STAFF,
                     "is_enabled": True,
@@ -503,8 +262,8 @@ class Command(BaseCommand):
             StaffCourtAccess.objects.get_or_create(
                 staff_profile=staff, court=courts[club_key][1]
             )
-            profiles[f"owner_{suffix}"] = owner
-            profiles[f"staff_{suffix}"] = staff
+            profiles["owner"] = owner
+            profiles["staff"] = staff
         return profiles
 
     def base_day(self):
@@ -528,7 +287,7 @@ class Command(BaseCommand):
                 court = courts[club_key][1]
                 phone = f"+2010{club_index + 1}{booking_index:07d}"
                 customer_name = f"Demo {club_key} {customer_label}"
-                staff_profile = profiles[f"staff_{club_key.lower()}"]
+                staff_profile = profiles["staff"]
                 # Identity resolution: seeded bookings bypass create_booking()
                 # (update_or_create is used for idempotent re-seeding), but
                 # must still resolve a real ClubPlayer — Booking.club_player
@@ -563,7 +322,7 @@ class Command(BaseCommand):
                 )
                 bookings[(club_key, booking_key)] = booking
 
-            if club_key == "A":
+            if club_key == "testing":
                 for index, hour in ((13, 10), (14, 11)):
                     status = (
                         Booking.Status.HOLD if index == 13 else Booking.Status.CONFIRMED
@@ -572,9 +331,9 @@ class Command(BaseCommand):
                     court = courts[club_key][2]
                     phone = f"+2010{club_index + 1}{index:07d}"
                     customer_name = (
-                        "Demo A Court 2 Hold Customer"
+                        "Demo Testing Court 2 Hold Customer"
                         if index == 13
-                        else "Demo A Court 2 Confirmed Customer"
+                        else "Demo Testing Court 2 Confirmed Customer"
                     )
                     club_player = resolve_booking_club_player(
                         club=club,
@@ -597,8 +356,8 @@ class Command(BaseCommand):
                             ),
                             "source": Booking.Source.MANUAL,
                             "notes": "Demo seed booking.",
-                            "created_by": profiles["owner_a"],
-                            "last_status_changed_by": profiles["owner_a"],
+                            "created_by": profiles["owner"],
+                            "last_status_changed_by": profiles["owner"],
                             "last_status_changed_by_type": (
                                 Booking.LastStatusActorType.PROFILE
                             ),
@@ -609,12 +368,9 @@ class Command(BaseCommand):
 
     def create_transactions(self, profiles, bookings):
         transactions = {}
-        for club_key in ("A", "B", "C"):
-            staff_profile = profiles[f"staff_{club_key.lower()}"]
-            created_at = self.demo_time(
-                day_offset=3 + ord(club_key) - ord("A"),
-                hour=9,
-            )
+        for club_key in ("testing",):
+            staff_profile = profiles["staff"]
+            created_at = self.demo_time(day_offset=3, hour=9)
             for index, (
                 booking_key,
                 amount,
@@ -622,7 +378,7 @@ class Command(BaseCommand):
                 payment_method,
             ) in enumerate(TRANSACTION_SPECS):
                 booking = bookings[(club_key, booking_key)]
-                payment_reference = f"{club_key}-{reference_suffix}"
+                payment_reference = f"{club_key.upper()}-{reference_suffix}"
                 transaction_obj, _ = Transaction.objects.update_or_create(
                     club=booking.club,
                     payment_reference=payment_reference,
@@ -641,11 +397,11 @@ class Command(BaseCommand):
                 transaction_obj.refresh_from_db()
                 transactions[(club_key, booking_key)] = transaction_obj
 
-            if club_key == "A":
-                booking = bookings[("A", "court2_14")]
+            if club_key == "testing":
+                booking = bookings[("testing", "court2_14")]
                 transaction_obj, _ = Transaction.objects.update_or_create(
                     club=booking.club,
-                    payment_reference="A-DIGITAL-COURT2-001",
+                    payment_reference="TESTING-DIGITAL-COURT2-001",
                     defaults={
                         "court": booking.court,
                         "booking": booking,
@@ -659,13 +415,13 @@ class Command(BaseCommand):
                     created=created_at + timedelta(minutes=20),
                 )
                 transaction_obj.refresh_from_db()
-                transactions[("A", "court2_digital")] = transaction_obj
+                transactions[("testing", "court2_digital")] = transaction_obj
         return transactions
 
     def create_settlements(self, profiles, clubs, courts, transactions):
         settlements = {}
         for club_key, club in clubs.items():
-            owner_profile = profiles[f"owner_{club_key.lower()}"]
+            owner_profile = profiles["owner"]
             admin_profile = profiles["platform_admin"]
 
             pending_transaction = transactions[(club_key, "pending")]
@@ -728,11 +484,9 @@ class Command(BaseCommand):
                     settlements,
                 )
                 seed_key = f"DEMO-{club_key}-{action.replace('_', '-')}"
-                actor = (
-                    profiles["platform_admin"]
-                    if actor_type == "platform"
-                    else profiles[f"{actor_type}_{club_key.lower()}"]
-                )
+                actor = profiles[
+                    "platform_admin" if actor_type == "platform" else actor_type
+                ]
                 audit_log, _ = AuditLog.objects.get_or_create(
                     club=club,
                     action=action,
@@ -820,19 +574,18 @@ class Command(BaseCommand):
             self.stdout.write(f"- {club.slug}")
         self.stdout.write("")
         self.stdout.write("Useful checks:")
-        self.stdout.write("- owner_a can settle in barcelona-fc")
-        self.stdout.write("- staff_a can access only Spotify Camp Nou")
-        self.stdout.write("- staff_a cannot access La Masia Training Court")
-        self.stdout.write("- staff_a cannot access Real Madrid CF or Liverpool FC data")
+        self.stdout.write("- owner can settle in testing")
+        self.stdout.write("- staff can access only Testing Main Court")
+        self.stdout.write("- staff cannot access Testing Secondary Court")
         self.stdout.write("")
         self.stdout.write("Endpoints:")
         self.stdout.write("- /api/v1/auth/token/")
         self.stdout.write("- /api/v1/me/")
         self.stdout.write("- /api/v1/clubs/")
-        self.stdout.write("- /api/v1/clubs/barcelona-fc/bookings/")
-        self.stdout.write("- /api/v1/clubs/barcelona-fc/transactions/")
-        self.stdout.write("- /api/v1/clubs/barcelona-fc/settlements/preview/")
-        self.stdout.write("- /api/v1/clubs/barcelona-fc/audit-logs/")
+        self.stdout.write("- /api/v1/clubs/testing/bookings/")
+        self.stdout.write("- /api/v1/clubs/testing/transactions/")
+        self.stdout.write("- /api/v1/clubs/testing/settlements/preview/")
+        self.stdout.write("- /api/v1/clubs/testing/audit-logs/")
         self.stdout.write("")
         self.stdout.write(
             "Counts: "
@@ -842,27 +595,3 @@ class Command(BaseCommand):
             f"transactions={len(transactions)}, settlements={len(settlements)}, "
             f"audit_logs={len(audit_logs)}"
         )
-
-    def print_albaladya_summary(self, users, club, court, profiles):
-        self.stdout.write(self.style.SUCCESS("Albaladya test data is ready."))
-        self.stdout.write("")
-        self.stdout.write("Club:")
-        self.stdout.write(f"- {club.name}")
-        self.stdout.write(f"- slug: {club.slug}")
-        self.stdout.write("")
-        self.stdout.write("Users:")
-        for key in ("admin", "owner", "staff"):
-            self.stdout.write(f"- {users[key].phone_number} / {ALBALADYA_PASSWORD}")
-        self.stdout.write("")
-        self.stdout.write("Password:")
-        self.stdout.write(
-            f"- {ALBALADYA_PASSWORD} (development/test-only; never use in production)"
-        )
-        self.stdout.write("")
-        self.stdout.write("Creation hierarchy:")
-        self.stdout.write("- admin created by bootstrap/null")
-        self.stdout.write("- owner created by admin")
-        self.stdout.write("- staff created by owner")
-        self.stdout.write("")
-        self.stdout.write("Staff court:")
-        self.stdout.write(f"- {court.name}")

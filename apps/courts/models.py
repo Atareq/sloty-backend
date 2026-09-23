@@ -1,4 +1,3 @@
-from datetime import time
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
@@ -189,11 +188,8 @@ class CourtWorkingHourPricePeriod(models.Model):
         ordering = ("starts_at", "id")
         constraints = [
             models.CheckConstraint(
-                check=(
-                    models.Q(starts_at__lt=models.F("ends_at"))
-                    | (models.Q(ends_at=time(0, 0)) & ~models.Q(starts_at=time(0, 0)))
-                ),
-                name="court_price_period_starts_before_ends",
+                check=~models.Q(starts_at=models.F("ends_at")),
+                name="court_price_period_non_empty",
             ),
             models.CheckConstraint(
                 check=models.Q(price__gte=Decimal("0.00")),
@@ -212,7 +208,7 @@ class CourtWorkingHourPricePeriod(models.Model):
             and self.ends_at
             and not is_valid_period_bounds(self.starts_at, self.ends_at)
         ):
-            errors["starts_at"] = "starts_at must be before ends_at."
+            errors["starts_at"] = "starts_at and ends_at must not be equal."
         if self.price is not None and self.price < Decimal("0.00"):
             errors["price"] = "Price must be greater than or equal to zero."
         if self.price is not None and self.working_hour_id is not None and not errors:

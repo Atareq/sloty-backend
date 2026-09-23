@@ -105,8 +105,12 @@ URL Routing → ViewSet/APIView → Serializer Validation → Service / Validato
 - **Offline & Reconnect Safety**: Server is authoritative. Reconnect mutations require idempotency keys (`client_request_id`). Duplicate requests return `200 OK` with the existing entity; mismatched payloads return `409 Conflict`. Financial mutations (payments, refunds, settlements) require live server authority and can never be committed offline.
 - **Account and Profile Lifecycle**: `User` is authentication identity; the current `Profile` is application-role authority. A missing or invalid profile scope is denied immediately (`CLUB_ACCESS_REVOKED`), regardless of JWT claims.
 - **Business Actor IDs**: Actor and custody IDs accepted or returned by business APIs are `Profile.id` values. Display names may come from `Profile.user`; authentication account IDs are not accepted as alternate actor IDs.
-- **Demo Seed Identity**: `seed_demo_data` keeps `User` rows for authentication and creates explicit `AdminProfile`, `OwnerProfile`, and `StaffProfile` actors. Business rows store those Profile objects directly; rerunning the seed remains idempotent.
+- **Transaction Settlement State**: Transaction responses expose read-only `is_settled`, derived from the existing one-to-one `settlement_line`. Never add or synchronize a duplicate settlement-status flag on Transaction.
+- **Transaction Cancellation Window**: Settled transactions are never cancellable. Unsettled transactions have a 15-minute direct-correction safety window; after it, direct cancellation is allowed only while the linked booking remains inside the court's full-refund cancellation window. Late corrections return `PAYMENT_CANCELLATION_REQUIRES_BOOKING_CANCELLATION` and must use booking cancellation so `cancellation_refund_notice_days` retention/refund policy is preserved.
+- **Current Custody**: Settlement preview, grouped unsettled summary, and settlement creation consume the same all-time club-wide calculation. Optional collector filtering uses `Transaction.created_by`; Court is metadata and never narrows settlement candidates. Creation recalculates while locking candidates inside `transaction.atomic()`.
+- **Demo Seed Identity**: `seed_demo_data` creates only the local `testing` club, keeps `User` rows for authentication, and creates explicit `AdminProfile`, `OwnerProfile`, and `StaffProfile` actors. The testing club's business rows store those Profile objects directly; rerunning the seed remains idempotent.
 - **Scheduling contract**: `apps/bookings` owns generated slot availability and stored HOLD deadlines. Read [`docs/scheduling-contract.md`](docs/scheduling-contract.md) and the live OpenAPI schema at `/api/v1/schema/` before changing booking or frontend-facing scheduling behavior.
+  Scheduling uses canonical half-open `[start_time, end_time)` intervals across pricing, slots, and booking conflicts; cross-midnight periods are resolved as timezone-aware local datetimes.
   The slots endpoint returns one unified `slots` timeline: generated slots are
   merged with visible booking records, and bookings outside configured working
   hours are returned as `slot_type=BOOKING_ONLY` items. The top-level response
@@ -280,10 +284,11 @@ Key Django management commands for maintenance and development:
 - **Seed Demo Data**:
   ```bash
   python manage.py seed_demo_data
-  # Or with specific test scenario:
-  python manage.py seed_demo_data --scenario albaladya-test
   ```
-  Idempotently populates multi-club test fixtures, demo users (`admin`, `owner`, `staff`), profile extensions, courts, working hours, bookings, transactions, and settlements for local development and manual testing.
+  Idempotently populates one `testing` club, demo users (`platform_admin`,
+  `owner`, `staff`), profile extensions, courts, working hours, bookings,
+  related transactions, settlements, and audit logs for local development and
+  manual testing.
 
 - **Runtime version**:
   ```text

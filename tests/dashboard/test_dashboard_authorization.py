@@ -153,14 +153,14 @@ class DashboardAuthorizationSpineTests(DashboardAPITestCase):
         self.assertEqual(overview.data["unsettled_transaction_count"], 2)
         self.assertEqual(overview.data["unsettled_transaction_total_amount"], "100.00")
 
-    def test_transaction_api_stays_court_scoped_while_dashboard_custody_does_not(self):
+    def test_transaction_list_uses_club_scope_while_dashboard_custody_does_not(self):
         self.client.force_authenticate(user=self.staff_a)
         tx_list = self.client.get(
             reverse("club-transaction-list", kwargs={"club_slug": self.club_a.slug})
         )
         tx_ids = {row["id"] for row in tx_list.data["results"]}
         self.assertIn(self.tx_staff_assigned.id, tx_ids)
-        self.assertNotIn(self.tx_staff_unassigned_court.id, tx_ids)
+        self.assertIn(self.tx_staff_unassigned_court.id, tx_ids)
         preview_res = preview_settlement(
             club=self.club_a, collected_by=self.staff_a.profile
         )

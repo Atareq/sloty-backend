@@ -71,8 +71,9 @@ class TransactionFilter(django_filters.FilterSet):
     search = django_filters.CharFilter(
         method="filter_search",
         help_text=(
-            "Search ClubPlayer display name, PlayerProfile phone "
-            "(including Egyptian phone variants), and payment_reference."
+            "Search ClubPlayer display name, PlayerProfile phone (including "
+            "Egyptian phone variants), collector account name, and "
+            "payment_reference."
         ),
     )
     ordering = django_filters.ChoiceFilter(
@@ -142,6 +143,8 @@ class TransactionFilter(django_filters.FilterSet):
             return queryset
         return queryset.filter(
             booking_identity_search_q(cleaned, booking_prefix="booking__")
+            | Q(created_by__user__first_name__icontains=cleaned)
+            | Q(created_by__user__last_name__icontains=cleaned)
             | Q(payment_reference__icontains=cleaned)
         )
 

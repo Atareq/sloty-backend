@@ -1393,12 +1393,15 @@ class SettlementSeedSchemaTests(SettlementAPITestCase):
             Transaction.objects.filter(settlement_line__isnull=True).count(),
             counts["unsettled"],
         )
-        self.assertTrue(Settlement.objects.filter(club__slug="barcelona-fc").exists())
+        self.assertTrue(Settlement.objects.filter(club__slug="testing").exists())
         self.assertTrue(
             Transaction.objects.filter(
-                club__slug="barcelona-fc",
+                club__slug="testing",
                 settlement_line__isnull=True,
-                payment_reference__in=["A-UNSETTLED-001", "A-UNSETTLED-002"],
+                payment_reference__in=[
+                    "TESTING-UNSETTLED-001",
+                    "TESTING-UNSETTLED-002",
+                ],
             ).exists()
         )
 
@@ -1635,9 +1638,69 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
         if isinstance(period_start, str):
             period_start = parse_datetime(period_start)
         self.assertEqual(period_start, self.staff_cash.created)
+        period_end = staff_row["period_end"]
+        if isinstance(period_end, str):
+            period_end = parse_datetime(period_end)
+        self.assertEqual(period_end, self.staff_refund.created)
         owner_row = by_id[self.owner.profile.id]
         self.assertTrue(owner_row["is_self"])
         self.assertTrue(owner_row["can_approve"])
+
+    def test_summary_matches_the_trusted_preview_calculation(self):
+        self.client.force_authenticate(user=self.owner)
+        preview = self.client.get(
+            self.settlement_preview_url(self.club),
+            {"collected_by": self.staff.profile.id},
+        )
+        summary = self.client.get(
+            self.settlement_unsettled_summary_url(self.club),
+            {"collected_by": self.staff.profile.id},
+        )
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertEqual(summary.status_code, status.HTTP_200_OK)
+        summary_row = summary.data["results"][0]
+        for field in (
+            "period_start",
+            "period_end",
+            "transaction_count",
+            "total_amount",
+            "net_amount",
+            "booking_payments",
+            "booking_refunds",
+            "totals_by_payment_method",
+        ):
+            self.assertEqual(summary_row[field], preview.data[field])
+
+    def test_summary_court_input_does_not_narrow_club_wide_custody(self):
+        second_court = self.create_court(self.club, "Second Summary Court")
+        second_booking = self.create_booking(
+            second_court,
+            customer_name="Cross Court Summary Customer",
+            customer_phone="+201012345679",
+        )
+        cross_court_transaction = self.create_transaction(
+            second_booking,
+            amount=Decimal("50.00"),
+            created=self.time_at(16),
+            created_by=self.staff.profile,
+            payment_reference="SUM-CROSS-COURT",
+        )
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.get(
+            self.settlement_unsettled_summary_url(self.club),
+            {
+                "collected_by": self.staff.profile.id,
+                "court": self.court.id,
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        staff_row = response.data["results"][0]
+        self.assertEqual(staff_row["transaction_count"], 4)
+        self.assertEqual(staff_row["total_amount"], "1200.00")
+        period_end = staff_row["period_end"]
+        if isinstance(period_end, str):
+            period_end = parse_datetime(period_end)
+        self.assertEqual(period_end, cross_court_transaction.created)
 
     def test_old_unsettled_transaction_remains_visible_days_later(self):
         old_created = timezone.now() - timedelta(days=4)
@@ -1696,6 +1759,12 @@ class SettlementUnsettledSummaryTests(SettlementAPITestCase):
             "-100.00",
         )
         self.assertNotIn(no_candidates_collector.profile.id, by_id)
+        empty = self.client.get(
+            self.settlement_unsettled_summary_url(self.club),
+            {"collected_by": no_candidates_collector.profile.id},
+        )
+        self.assertEqual(empty.status_code, status.HTTP_200_OK)
+        self.assertEqual(empty.data["results"], [])
 
     def test_user_filter_validates_access_and_club(self):
         self.client.force_authenticate(user=self.owner)
@@ -1952,10 +2021,12 @@ class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
         self.assertEqual(settled_ids, preview_ids)
         self.assertEqual(settlement_obj.total_amount, Decimal("450.00"))
 
-    def test_8_operational_transaction_authorization_remains_court_restricted(self):
+    def test_8_transaction_listing_is_club_scoped_for_staff(self):
         """
-        Staff A cannot access cross-court transactions via operational
-        Transaction APIs.
+        Staff A can list their transactions across the club's courts.
+
+        The staff collector restriction remains in place, so another staff
+        member's transaction is not exposed.
         """
         self.client.force_authenticate(user=self.staff_a)
         transactions_url = reverse(
@@ -1965,8 +2036,8 @@ class FinancialCustodyDomainInvariantsTests(SettlementAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         accessible_tx_ids = {row["id"] for row in response.data["results"]}
         self.assertIn(self.t1.id, accessible_tx_ids)
-        self.assertNotIn(self.t2.id, accessible_tx_ids)
-        self.assertNotIn(self.t3.id, accessible_tx_ids)
+        self.assertIn(self.t2.id, accessible_tx_ids)
+        self.assertIn(self.t3.id, accessible_tx_ids)
         self.assertNotIn(self.t_staff_b.id, accessible_tx_ids)
 
     def test_9_no_court_restriction_in_custody(self):

@@ -91,6 +91,7 @@
     and overlap rules.
   - Keep `Booking(court, start_time)` for court range retrieval. Do not add
     hold-expiry or scheduling indexes without measured query evidence.
+  - Scheduling intervals use the canonical half-open `[start_time, end_time)` rule. Adjacent bookings do not conflict; cross-midnight court periods are resolved as aware local datetimes by `apps.courts.pricing`.
 
 Booking `created_by` / `last_status_changed_by` and attempt `attempted_by`
 response values are Profile IDs. The `attempted_by` filter also takes a Profile

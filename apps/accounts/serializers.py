@@ -291,5 +291,20 @@ class UserUpdateSerializer(serializers.ModelSerializer):
             "is_active",
         )
 
+    def validate(self, attrs):
+        request = self.context.get("request")
+        profile = getattr(getattr(request, "user", None), "profile", None)
+        if profile and profile.role == Profile.Role.OWNER:
+            submitted_fields = set(self.initial_data or {})
+            forbidden_fields = submitted_fields - {"is_active"}
+            if forbidden_fields:
+                raise serializers.ValidationError(
+                    {
+                        field: "Club Owners may update only is_active."
+                        for field in sorted(forbidden_fields)
+                    }
+                )
+        return attrs
+
     def to_representation(self, instance):
         return UserListSerializer(instance, context=self.context).data

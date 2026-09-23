@@ -47,7 +47,7 @@ Authentication answers **only** “Who are you?”. It must not decide club/cour
 
 - `/api/v1/auth/token/`: JWT token obtain endpoint (`SlotyTokenObtainPairView`). Accepts `phone_number` + `password` and optional `club_slug` to return **convenience** JWT claims (`role`, `club_id`, `court_id`).
 - `/api/v1/auth/token/refresh/`: JWT token refresh endpoint. It rechecks the current user record before issuing access, so inactive, deleted, and password-changed accounts cannot refresh.
-- `/api/v1/auth/password/change/`: authenticated own-password endpoint. It accepts `current_password`, `new_password`, and `new_password_confirmation`, applies Django validators, and returns `204 No Content`.
+- `/api/v1/auth/password/change/`: authenticated own-password endpoint for Admin, Owner, Staff, and other authenticated users. It accepts `current_password`, `new_password`, and `new_password_confirmation`, applies Django validators, and returns `204 No Content`; it never changes another account.
 - Auth failure codes: expired access tokens raise `SESSION_EXPIRED`; malformed/expired refresh tokens use `TOKEN_NOT_VALID`; inactive accounts return `USER_INACTIVE`; deleted accounts return `USER_DELETED`; password-hash mismatches return `PASSWORD_CHANGED`.
 
 **JWT rule (locked):** Token claims are UX convenience only. They are never authority. Authority is:
@@ -71,7 +71,7 @@ Frontend must never treat “JWT contains `club_id`” as proof of access.
 
 ### Platform User Management
 
-- `/api/v1/users/`: Restricted to Platform Super Admins for full CRUD. Club Owners have read-only access to staff within their club scope. Creation produces an AdminProfile inheriting Profile; staff creation belongs to the club-scoped staff API.
+- `/api/v1/users/`: Platform Super Admins have full account-management access. Club Owners can list/retrieve staff within their owned-club scope and may PATCH only `is_active`; staff creation belongs to the club-scoped staff API.
 - Serializers and schemas define the authoritative request/response shape (e.g., [`UserMeSerializer`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/serializers.py), [`UserListSerializer`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/serializers.py)).
 
 ## Authorization & Scoping (Current-State)
@@ -80,7 +80,7 @@ Frontend must never treat “JWT contains `club_id`” as proof of access.
 > This represents current-state/legacy authorization implementation for the users API. Do not treat it as an unchangeable target architecture. Cross-club operational authorization uses the Authorization Spine under `apps/common/authorization/` (see root AGENTS.md §5).
 
 - [`IsPlatformSuperAdmin`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/permissions.py): Grants access only for authenticated users whose enabled Profile has `role == ADMIN`.
-- [`CanAccessUsers`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/permissions.py): Platform super admin has full access; Club Owners have safe-method access scoped to enabled staff profiles in their owned clubs.
+- [`CanAccessUsers`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/accounts/permissions.py): Platform super admin has full access; Club Owners have read access and `PATCH` access scoped to enabled staff profiles in their owned clubs. `UserUpdateSerializer` rejects owner writes other than `is_active`.
 
 ## Cross-App Dependencies
 
@@ -96,7 +96,7 @@ Frontend must never treat “JWT contains `club_id`” as proof of access.
   - `test_user_model.py`: Identity constraints and platform admin checks.
   - `test_account_api.py`: `/api/v1/me/` and `/api/v1/users/` permissions and serialization.
   - Profile architecture tests verify current role authority, Profile extension scope, retired-manager deactivation, and profile-backed seed data.
-  - `test_seed_demo_data.py`: Multi-club demo seed data creation.
+  - `test_seed_demo_data.py`: Single-club `testing` demo seed data creation.
 
 ## Concrete Profile identity
 
@@ -106,8 +106,9 @@ Create a concrete Profile child directly. User and profile creation is atomic,
 with creator provenance stored on `Profile.created_by` when applicable.
 Use `select_related("profile")`, not a plural profile prefetch.
 
-`seed_demo_data` keeps authentication accounts separate from business actors:
-the default hierarchy is `AdminProfile` → `OwnerProfile` → `StaffProfile`,
-with creator provenance on the Profile rows. Clubs, courts, bookings,
-transactions, settlements, and audit logs receive explicit Profile actors.
-The command remains idempotent across reruns.
+`seed_demo_data` keeps authentication accounts separate from business actors
+and creates only the local `testing` club. The default hierarchy is
+`AdminProfile` → `OwnerProfile` → `StaffProfile`, with creator provenance on
+the Profile rows. The testing club's courts, bookings, transactions,
+settlements, and audit logs receive explicit Profile actors. The command
+remains idempotent across reruns.

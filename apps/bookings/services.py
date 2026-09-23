@@ -36,7 +36,7 @@ from apps.courts.pricing import (
     calculate_booking_price_from_schedule,
     datetime_for_local_date,
     slot_price_from_schedule,
-    working_hour_bounds,
+    working_hour_datetime_bounds,
 )
 from apps.profiles.models import Profile
 from apps.transactions.models import Transaction
@@ -897,14 +897,16 @@ def generate_open_booking_slots(*, court, date_from, date_to):
     while current_date <= date_to:
         sloty_wd = to_sloty_weekday(current_date.weekday())
         working_hour = working_hours_by_weekday.get(sloty_wd)
-        bounds = working_hour_bounds(working_hour) if working_hour is not None else None
+        bounds = (
+            working_hour_datetime_bounds(working_hour, current_date)
+            if working_hour is not None
+            else None
+        )
         if bounds is None:
             current_date += timedelta(days=1)
             continue
 
-        opens_at, closes_at, _pricing_periods = bounds
-        day_open = local_datetime_for_date(current_date, opens_at, is_end=False)
-        day_close = local_datetime_for_date(current_date, closes_at, is_end=True)
+        day_open, day_close, _pricing_periods = bounds
         slot_delta = timedelta(minutes=court.slot_duration_minutes)
         slot_start = day_open
         weekday = sloty_wd

@@ -1,7 +1,5 @@
-from decimal import Decimal
 from typing import Optional
 
-from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import extend_schema_field
 from phonenumber_field.serializerfields import PhoneNumberField
@@ -20,11 +18,9 @@ from apps.settlements.authorization import (
     validate_unsettled_summary_authority,
 )
 from apps.settlements.models import Settlement, SettlementTransaction
+from apps.settlements.services import calculate as calculate_settlement
 from apps.settlements.services import create as create_settlement
 from apps.settlements.services import preview as preview_settlement
-from apps.transactions.models import Transaction
-
-ZERO = Decimal("0.00")
 
 
 def profile_display_name(profile: Optional[Profile]) -> str:
@@ -399,75 +395,25 @@ class SettlementUnsettledSummaryRequestSerializer(serializers.Serializer):
     def get_summary(self):
         context = self.context.get("access_context") or self.context.get("club_access")
         target_collector = self.validated_data.get("collected_by")
-        court = self.validated_data.get("court")
-        queryset = Transaction.objects.filter(
-            club=context.club,
-            settlement_line__isnull=True,
-            is_cancelled=False,
+        calculation = calculate_settlement(
+            context.club,
+            collected_by=target_collector,
+            allow_empty=True,
         )
-        if target_collector is not None:
-            queryset = queryset.filter(created_by=target_collector)
-        if court is not None:
-            queryset = queryset.filter(court=court)
-
-        grouped = {}
-        for t in queryset.select_related("created_by", "created_by__user").order_by(
-            "created", "id"
-        ):
-            c = t.created_by
-            c_id = c.id if c else None
-            if c_id not in grouped:
-                grouped[c_id] = {
-                    "collector": c,
-                    "transactions": [],
-                }
-            grouped[c_id]["transactions"].append(t)
-
-        now = timezone.now()
-        collector_ids = list(grouped.keys())
+        collector_rows = calculation["collector_breakdown"]
+        collector_ids = [row["collected_by"] for row in collector_rows]
         roles_by_collector_id = get_active_profile_roles_by_id(
             context.club, collector_ids
         )
         results = []
-        for c_id, data in grouped.items():
+        for row in collector_rows:
+            c_id = row["collected_by"]
             roles = roles_by_collector_id.get(c_id, set())
             if not can_view_collector_in_summary(context, c_id, roles):
                 continue
-            txs = data["transactions"]
-            payments = sum(
-                (
-                    tx.amount
-                    for tx in txs
-                    if tx.transaction_type == Transaction.Type.PAYMENT
-                ),
-                ZERO,
-            )
-            refunds = sum(
-                (
-                    tx.amount
-                    for tx in txs
-                    if tx.transaction_type == Transaction.Type.REFUND
-                ),
-                ZERO,
-            )
-            net = payments + refunds
-            method_totals = {str(m): ZERO for m, _ in Transaction.PaymentMethod.choices}
-            for tx in txs:
-                method_totals[str(tx.payment_method)] += tx.amount
-
-            name = profile_display_name(data["collector"])
             results.append(
-                {
-                    "collected_by": c_id,
-                    "collected_by_name": name,
-                    "period_start": txs[0].created,
-                    "period_end": now,
-                    "transaction_count": len(txs),
-                    "total_amount": net,
-                    "net_amount": net,
-                    "booking_payments": payments,
-                    "booking_refunds": refunds,
-                    "totals_by_payment_method": method_totals,
+                row
+                | {
                     "is_self": bool(context.profile and c_id == context.profile.id),
                     "can_approve": can_approve_collector(context, c_id, roles),
                 }

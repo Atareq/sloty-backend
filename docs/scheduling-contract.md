@@ -6,6 +6,14 @@ The live OpenAPI schema is served at `/api/v1/schema/`; Swagger UI is at
 
 ## Availability and working hours
 
+All scheduling intervals use half-open `[start_time, end_time)` semantics: the
+start is included and the end is excluded. Adjacent periods and bookings do not
+overlap, so `01:00–05:00` and `05:00–09:00` are distinct and `05:00` belongs to
+the second interval. This rule is shared by working-hour validation, pricing,
+slot generation, booking conflict checks, and availability. Cross-midnight
+periods are resolved as timezone-aware local datetime intervals; for example,
+`23:00–01:00` ends on the following local date.
+
 Use `GET /api/v1/clubs/{club_slug}/bookings/slots/` to retrieve one unified
 booking timeline. The backend generates candidate slots from current court
 working hours and pricing, retrieves visible bookings independently, and merges

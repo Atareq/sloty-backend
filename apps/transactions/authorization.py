@@ -41,7 +41,7 @@ def apply_staff_collector_scope(
     *,
     actor_field: str,
 ) -> QuerySet:
-    """Narrow an already court-scoped queryset to the Staff member's own rows."""
+    """Narrow an already authorized queryset to the Staff member's own rows."""
     if _is_staff_collector(context):
         return queryset.filter(**{actor_field: context.profile})
     return queryset

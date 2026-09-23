@@ -139,8 +139,8 @@ class TransactionViewSet(
     GenericViewSet,
 ):
     """
-    Authorization: club+court via Transaction.authorization_config.
-    Staff are additionally restricted to created_by=context.profile.
+    Read authorization: club scope, then Staff created_by=context.profile.
+    Cancellation retains Transaction's court scope.
     Cancel: Platform Admin any in-scope row; others only their own collections.
     """
 
@@ -155,6 +155,12 @@ class TransactionViewSet(
         if request.method.lower() not in self.http_method_names:
             raise MethodNotAllowed(request.method)
         super().initial(request, *args, **kwargs)
+
+    def get_resource_scope(self):
+        """Read from the selected club before applying collector filtering."""
+        if self.action in {"list", "retrieve"}:
+            return ResourceScope.CLUB
+        return super().get_resource_scope()
 
     def filter_scoped_queryset(self, queryset):
         queryset = apply_staff_collector_scope(

@@ -58,85 +58,77 @@ def datetime_for_local_date(
 
 def is_valid_period_bounds(starts_at: time, ends_at: time) -> bool:
     """
-    Validate that starts_at is strictly before ends_at, evaluating ends_at
-    with the shared end-boundary semantic (00:00 = 24:00 / 1440 min).
-    00:00 -> 00:00 is invalid.
+    Validate a non-empty half-open time-of-day interval. An end before the
+    start is resolved on the following local date; equal bounds are invalid.
     """
-    if starts_at == MIDNIGHT_TIME and ends_at == MIDNIGHT_TIME:
-        return False
-    return time_to_minutes(starts_at, is_end=False) < time_to_minutes(
-        ends_at, is_end=True
+    return starts_at != ends_at
+
+
+def normalized_pricing_periods(periods):
+    """Return pricing periods ordered on one half-open operational timeline."""
+    entries = []
+    overnight_starts = []
+    for period in periods:
+        starts_at = (
+            period["starts_at"] if isinstance(period, dict) else period.starts_at
+        )
+        ends_at = period["ends_at"] if isinstance(period, dict) else period.ends_at
+        start = time_to_minutes(starts_at)
+        raw_end = time_to_minutes(ends_at)
+        end = time_to_minutes(ends_at, is_end=True)
+        if ends_at != MIDNIGHT_TIME and raw_end < start:
+            overnight_starts.append(start)
+        entries.append((period, start, end))
+
+    if not entries:
+        return []
+
+    anchor = min(overnight_starts, default=min(entry[1] for entry in entries))
+    normalized = []
+    for period, start, end in entries:
+        if start < anchor:
+            start += MIDNIGHT_END_MINUTES
+        while end <= start:
+            end += MIDNIGHT_END_MINUTES
+        normalized.append((period, start, end))
+    return sorted(normalized, key=lambda entry: (entry[1], entry[2]))
+
+
+def datetime_for_operational_minute(date_value: date, minute: int) -> datetime:
+    day_offset, minute_of_day = divmod(minute, MIDNIGHT_END_MINUTES)
+    return datetime_for_local_date(
+        date_value + timedelta(days=day_offset),
+        time(minute_of_day // 60, minute_of_day % 60),
     )
 
 
-def compare_adjacent_period_bounds(current_start: time, previous_end: time) -> int:
-    """
-    Compare current period start with previous period end.
-    Returns:
-        < 0 if periods overlap
-        > 0 if there is a gap
-        == 0 if contiguous
-    """
-    return time_to_minutes(current_start, is_end=False) - time_to_minutes(
-        previous_end, is_end=True
-    )
-
-
-def is_same_operational_day(local_start: datetime, local_end: datetime) -> bool:
-    """
-    Check if an interval belongs to a single operational day.
-    Ending at 00:00 on date + 1 belongs to the operational day of start (24:00).
-    Crossing past next-day midnight is disallowed (no general overnight scheduling).
-    """
-    if local_start.date() == local_end.date():
-        return True
-    return (
-        local_end.date() == local_start.date() + timedelta(days=1)
-        and local_end.time() == MIDNIGHT_TIME
-    )
-
-
-def operational_end_date(local_datetime: datetime) -> date:
-    """
-    Return the operational date for an end datetime.
-    If the end datetime is at midnight (00:00:00), it belongs to the previous
-    calendar day.
-    """
-    if local_datetime.time() == MIDNIGHT_TIME:
-        return local_datetime.date() - timedelta(days=1)
-    return local_datetime.date()
+def pricing_intervals_for_local_date(working_hour, date_value: date):
+    """Resolve configured periods to aware [start, end) datetime intervals."""
+    return [
+        (
+            period,
+            datetime_for_operational_minute(date_value, start),
+            datetime_for_operational_minute(date_value, end),
+        )
+        for period, start, end in normalized_pricing_periods(
+            get_prefetched_pricing_periods(working_hour)
+        )
+    ]
 
 
 def minutes_between(start, end):
     return int((end - start).total_seconds() // 60)
 
 
-def is_aligned_to_slot_grid(
-    *,
-    boundary: time,
-    opens_at: time,
-    slot_duration_minutes: int,
-    is_end: bool = False,
-) -> bool:
-    """
-    Check if a boundary aligns with the court slot duration from opens_at.
-    When is_end=True, 00:00 is evaluated as 24:00 (1440 minutes).
-    """
-    offset = time_to_minutes(boundary, is_end=is_end) - time_to_minutes(
-        opens_at, is_end=False
-    )
-    return offset >= 0 and offset % slot_duration_minutes == 0
-
-
 def get_prefetched_pricing_periods(working_hour):
     return list(working_hour.pricing_periods.all())
 
 
-def working_hour_bounds(working_hour):
-    periods = get_prefetched_pricing_periods(working_hour)
-    if not periods:
+def working_hour_datetime_bounds(working_hour, date_value: date):
+    intervals = pricing_intervals_for_local_date(working_hour, date_value)
+    if not intervals:
         return None
-    return periods[0].starts_at, periods[-1].ends_at, periods
+    return intervals[0][1], intervals[-1][2], intervals
 
 
 def get_working_hour_for_local_date(*, court, local_date, working_hours=None):
@@ -166,28 +158,29 @@ def calculate_booking_price_from_schedule(
 ) -> Decimal:
     local_start = timezone.localtime(start_time)
     local_end = timezone.localtime(end_time)
-    if not is_same_operational_day(local_start, local_end):
-        raise_booking_error(
-            "BOOKING_MULTIDAY_NOT_SUPPORTED",
-            BOOKING_MULTIDAY_NOT_SUPPORTED_MESSAGE,
-        )
 
-    working_hour = get_working_hour_for_local_date(
-        court=court,
-        local_date=local_start.date(),
-        working_hours=working_hours,
-    )
-    bounds = working_hour_bounds(working_hour) if working_hour is not None else None
-    if bounds is None:
-        raise_booking_error(
-            "BOOKING_OUTSIDE_WORKING_HOURS",
-            BOOKING_OUTSIDE_WORKING_HOURS_MESSAGE,
+    day_open = pricing_intervals = None
+    for operational_date in (
+        local_start.date(),
+        local_start.date() - timedelta(days=1),
+    ):
+        working_hour = get_working_hour_for_local_date(
+            court=court,
+            local_date=operational_date,
+            working_hours=working_hours,
         )
+        if working_hour is None:
+            continue
+        candidate_bounds = working_hour_datetime_bounds(working_hour, operational_date)
+        if candidate_bounds is None:
+            continue
+        candidate_open, candidate_close, candidate_intervals = candidate_bounds
+        if candidate_open <= local_start and local_end <= candidate_close:
+            day_open = candidate_open
+            pricing_intervals = candidate_intervals
+            break
 
-    opens_at, closes_at, pricing_periods = bounds
-    day_open = datetime_for_local_date(local_start.date(), opens_at, is_end=False)
-    day_close = datetime_for_local_date(local_start.date(), closes_at, is_end=True)
-    if local_start < day_open or local_end > day_close:
+    if pricing_intervals is None:
         raise_booking_error(
             "BOOKING_OUTSIDE_WORKING_HOURS",
             BOOKING_OUTSIDE_WORKING_HOURS_MESSAGE,
@@ -200,19 +193,9 @@ def calculate_booking_price_from_schedule(
             "BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID",
             BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID_MESSAGE,
         )
-    if not (
-        is_aligned_to_slot_grid(
-            boundary=local_start.time(),
-            opens_at=opens_at,
-            slot_duration_minutes=slot_duration,
-            is_end=False,
-        )
-        and is_aligned_to_slot_grid(
-            boundary=local_end.time(),
-            opens_at=opens_at,
-            slot_duration_minutes=slot_duration,
-            is_end=True,
-        )
+    if any(
+        minutes_between(day_open, boundary) % slot_duration != 0
+        for boundary in (local_start, local_end)
     ):
         raise_booking_error(
             "BOOKING_TIME_NOT_ALIGNED_WITH_SLOT_GRID",
@@ -221,13 +204,7 @@ def calculate_booking_price_from_schedule(
 
     total = Decimal("0.00")
     cursor = local_start
-    for period in pricing_periods:
-        period_start = datetime_for_local_date(
-            local_start.date(), period.starts_at, is_end=False
-        )
-        period_end = datetime_for_local_date(
-            local_start.date(), period.ends_at, is_end=True
-        )
+    for period, period_start, period_end in pricing_intervals:
         if period_end <= cursor:
             continue
         if period_start > cursor:

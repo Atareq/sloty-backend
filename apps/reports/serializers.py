@@ -6,7 +6,6 @@ from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
 from apps.courts.models import Court
-from apps.courts.pricing import is_valid_period_bounds
 from apps.profiles.models import Profile
 from apps.reports.authorization import (
     can_access_report_court,
@@ -85,7 +84,9 @@ class CourtUsageReportQuerySerializer(serializers.Serializer):
                     _("hour_from and hour_to are required for custom period."),
                     "CUSTOM_REPORT_HOURS_REQUIRED",
                 )
-            if not is_valid_period_bounds(attrs["hour_from"], attrs["hour_to"]):
+            hour_from = attrs["hour_from"]
+            hour_to = attrs["hour_to"]
+            if hour_from == hour_to or (hour_to != time.min and hour_to < hour_from):
                 raise self.coded_error(
                     "hour_to",
                     _("hour_to must be after hour_from."),

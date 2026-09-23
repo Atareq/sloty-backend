@@ -19,7 +19,7 @@ from apps.bookings.models import Booking
 from apps.bookings.services import blocking_booking_queryset
 from apps.common.weekdays import to_sloty_weekday
 from apps.courts.models import CourtWorkingHour
-from apps.courts.pricing import datetime_for_local_date, working_hour_bounds
+from apps.courts.pricing import working_hour_datetime_bounds
 from apps.dashboard.authorization import (
     can_access_court,
     can_view_financial_summary,
@@ -47,10 +47,6 @@ def money_sum(expression, *, filter=None):
         Value(ZERO),
         output_field=DecimalField(max_digits=12, decimal_places=2),
     )
-
-
-def datetime_for_date(date_value, time_value, *, is_end=False):
-    return datetime_for_local_date(date_value, time_value, is_end=is_end)
 
 
 def build_court_availability_payload(*, club, court, date):
@@ -82,16 +78,14 @@ def build_court_availability_payload(*, club, court, date):
     if working_hour is None:
         return base_response
 
-    bounds = working_hour_bounds(working_hour)
-    if bounds is None:
+    datetime_bounds = working_hour_datetime_bounds(working_hour, date)
+    if datetime_bounds is None:
         return base_response
 
-    opens_at, closes_at, _pricing_periods = bounds
-    base_response["opens_at"] = opens_at
-    base_response["closes_at"] = closes_at
+    opens_at, closes_at, _pricing_periods = datetime_bounds
+    base_response["opens_at"] = opens_at.time()
+    base_response["closes_at"] = closes_at.time()
     base_response["is_closed"] = False
-    opens_at = datetime_for_date(date, opens_at, is_end=False)
-    closes_at = datetime_for_date(date, closes_at, is_end=True)
     slot_delta = timedelta(minutes=court.slot_duration_minutes)
 
     blocking_bookings = list(
@@ -950,12 +944,14 @@ def available_minutes_for_court(court, working_hours_by_weekday, date_from, date
         working_hour = working_hours_by_weekday.get(
             to_sloty_weekday(date_value.weekday())
         )
-        bounds = working_hour_bounds(working_hour) if working_hour is not None else None
-        if bounds is None:
+        datetime_bounds = (
+            working_hour_datetime_bounds(working_hour, date_value)
+            if working_hour is not None
+            else None
+        )
+        if datetime_bounds is None:
             continue
-        opens_at, closes_at, _pricing_periods = bounds
-        opens_at = datetime_for_date(date_value, opens_at, is_end=False)
-        closes_at = datetime_for_date(date_value, closes_at, is_end=True)
+        opens_at, closes_at, _pricing_periods = datetime_bounds
         clipped_start = max(opens_at, date_from)
         clipped_end = min(closes_at, date_to)
         if clipped_start < clipped_end:

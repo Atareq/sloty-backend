@@ -1326,7 +1326,7 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
         platform_admin = User.objects.get(email="platform_admin@example.com")
         booking = (
             Booking.objects.filter(
-                club__slug="barcelona-fc", status__in=Booking.BLOCKING_STATUSES
+                club__slug="testing", status__in=Booking.BLOCKING_STATUSES
             )
             .select_related("club", "court")
             .first()
@@ -1343,10 +1343,10 @@ class DashboardSchemaRegressionTests(DashboardDataMixin, DashboardAPITestCase):
         self.assertTrue(any((slot["is_available"] for slot in response.data["slots"])))
         self.assertTrue(
             Transaction.objects.filter(
-                club__slug="barcelona-fc", settlement_line__isnull=True
+                club__slug="testing", settlement_line__isnull=True
             ).exists()
         )
-        self.assertTrue(AuditLog.objects.filter(club__slug="barcelona-fc").exists())
+        self.assertTrue(AuditLog.objects.filter(club__slug="testing").exists())
 
 
 class DashboardQueryScalingTests(DashboardDataMixin, DashboardAPITestCase):
@@ -1456,3 +1456,44 @@ class DashboardMidnightWorkingHourTests(DashboardDataMixin, DashboardAPITestCase
         self.assertEqual(result["available_minutes"], 360)
         self.assertEqual(result["booked_minutes"], 60)
         self.assertEqual(result["utilization_percentage"], "16.67")
+
+    def test_availability_uses_contiguous_cross_midnight_pricing_periods(self):
+        overnight_court = self.create_court(self.club, "Overnight Court")
+        working_hour = CourtWorkingHour.objects.create(
+            court=overnight_court,
+            weekday=CourtWorkingHour.Weekday.MONDAY,
+        )
+        CourtWorkingHourPricePeriod.objects.bulk_create(
+            [
+                CourtWorkingHourPricePeriod(
+                    working_hour=working_hour,
+                    starts_at=time(23),
+                    ends_at=time(1),
+                    price=Decimal("200.00"),
+                ),
+                CourtWorkingHourPricePeriod(
+                    working_hour=working_hour,
+                    starts_at=time(1),
+                    ends_at=time(5),
+                    price=Decimal("300.00"),
+                ),
+            ]
+        )
+
+        self.client.force_authenticate(user=self.platform_admin)
+        response = self.client.get(
+            self.availability_url(self.club, overnight_court),
+            {"date": "2026-07-06"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [slot["start_time"] for slot in response.data["slots"]],
+            [
+                (self.time_at(23) + timedelta(hours=index)).isoformat()
+                for index in range(6)
+            ],
+        )
+        self.assertEqual(
+            len({slot["start_time"] for slot in response.data["slots"]}), 6
+        )
