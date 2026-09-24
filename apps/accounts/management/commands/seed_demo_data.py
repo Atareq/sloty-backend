@@ -396,26 +396,6 @@ class Command(BaseCommand):
                 )
                 transaction_obj.refresh_from_db()
                 transactions[(club_key, booking_key)] = transaction_obj
-
-            if club_key == "testing":
-                booking = bookings[("testing", "court2_14")]
-                transaction_obj, _ = Transaction.objects.update_or_create(
-                    club=booking.club,
-                    payment_reference="TESTING-DIGITAL-COURT2-001",
-                    defaults={
-                        "court": booking.court,
-                        "booking": booking,
-                        "amount": Decimal("150.00"),
-                        "payment_method": Transaction.PaymentMethod.DIGITAL_WALLET,
-                        "notes": "Demo seed digital transaction for Court 2.",
-                        "created_by": staff_profile,
-                    },
-                )
-                Transaction.objects.filter(pk=transaction_obj.pk).update(
-                    created=created_at + timedelta(minutes=20),
-                )
-                transaction_obj.refresh_from_db()
-                transactions[("testing", "court2_digital")] = transaction_obj
         return transactions
 
     def create_settlements(self, profiles, clubs, courts, transactions):

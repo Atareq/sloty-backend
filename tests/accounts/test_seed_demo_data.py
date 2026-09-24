@@ -27,7 +27,7 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertEqual(Club.objects.count(), 1)
         self.assertEqual(Court.objects.count(), 2)
         self.assertEqual(Booking.objects.count(), 14)
-        self.assertEqual(Transaction.objects.count(), 7)
+        self.assertEqual(Transaction.objects.count(), 6)
         self.assertEqual(Settlement.objects.count(), 2)
         self.assertEqual(SettlementTransaction.objects.count(), 2)
         self.assertEqual(AuditLog.objects.count(), 5)
@@ -61,6 +61,11 @@ class SeedDemoDataCommandTests(TestCase):
             ).exists()
         )
         self.assertTrue(Transaction.objects.filter(club=club).exists())
+        self.assertFalse(
+            Transaction.objects.filter(
+                payment_reference="TESTING-DIGITAL-COURT2-001"
+            ).exists()
+        )
         self.assertTrue(Settlement.objects.filter(club=club).exists())
         self.assertTrue(
             SettlementTransaction.objects.filter(settlement__club=club).exists()
