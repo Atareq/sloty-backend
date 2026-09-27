@@ -906,49 +906,53 @@ def generate_open_booking_slots(*, court, date_from, date_to):
             current_date += timedelta(days=1)
             continue
 
-        day_open, day_close, _pricing_periods = bounds
+        _day_open, _day_close, pricing_intervals = bounds
         slot_delta = timedelta(minutes=court.slot_duration_minutes)
-        slot_start = day_open
         weekday = sloty_wd
-        while slot_start + slot_delta <= day_close:
-            slot_end = slot_start + slot_delta
-            price_key = (weekday, slot_start.time(), slot_end.time())
-            if price_key in slot_price_cache:
-                slot_price = slot_price_cache[price_key]
-            else:
-                slot_price = slot_price_from_schedule(
-                    court=court,
-                    start_time=slot_start,
-                    end_time=slot_end,
-                    working_hours=working_hours,
+        # Only configured intervals produce slots; gaps are closed time.
+        for _period, period_start, period_end in pricing_intervals:
+            slot_start = period_start
+            while slot_start + slot_delta <= period_end:
+                slot_end = slot_start + slot_delta
+                price_key = (weekday, slot_start.time(), slot_end.time())
+                if price_key in slot_price_cache:
+                    slot_price = slot_price_cache[price_key]
+                else:
+                    slot_price = slot_price_from_schedule(
+                        court=court,
+                        start_time=slot_start,
+                        end_time=slot_end,
+                        working_hours=working_hours,
+                    )
+                    slot_price_cache[price_key] = slot_price
+                slot_status = (
+                    FREE_SLOT_STATUS
+                    if slot_price is not None
+                    else UNAVAILABLE_SLOT_STATUS
                 )
-                slot_price_cache[price_key] = slot_price
-            slot_status = (
-                FREE_SLOT_STATUS if slot_price is not None else UNAVAILABLE_SLOT_STATUS
-            )
-            is_available = slot_price is not None
-            slots.append(
-                {
-                    "date": current_date.isoformat(),
-                    "start_time": slot_start,
-                    "end_time": slot_end,
-                    "slot_price": (
-                        f"{slot_price:.2f}" if slot_price is not None else None
-                    ),
-                    "slot_status": slot_status,
-                    "is_available": is_available,
-                    "available": is_available,
-                    "booking": None,
-                    "recurring_anchor_booking_id": None,
-                    "recurring_context": None,
-                    "can_start_recurring": None,
-                    "recurring_blocked_reason": None,
-                    "first_recurring_conflict_start": None,
-                    "label": format_slot_label(slot_status),
-                    "slot_type": "GENERATED",
-                }
-            )
-            slot_start = slot_end
+                is_available = slot_price is not None
+                slots.append(
+                    {
+                        "date": current_date.isoformat(),
+                        "start_time": slot_start,
+                        "end_time": slot_end,
+                        "slot_price": (
+                            f"{slot_price:.2f}" if slot_price is not None else None
+                        ),
+                        "slot_status": slot_status,
+                        "is_available": is_available,
+                        "available": is_available,
+                        "booking": None,
+                        "recurring_anchor_booking_id": None,
+                        "recurring_context": None,
+                        "can_start_recurring": None,
+                        "recurring_blocked_reason": None,
+                        "first_recurring_conflict_start": None,
+                        "label": format_slot_label(slot_status),
+                        "slot_type": "GENERATED",
+                    }
+                )
+                slot_start = slot_end
 
         current_date += timedelta(days=1)
     return slots

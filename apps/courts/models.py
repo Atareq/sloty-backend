@@ -230,6 +230,42 @@ class CourtWorkingHourPricePeriod(models.Model):
                 errors["price"] = minimum_deposit_above_lowest_price_message(
                     lowest_price
                 )
+        if (
+            self.working_hour_id is not None
+            and self.starts_at is not None
+            and self.ends_at is not None
+            and self.price is not None
+            and not errors
+        ):
+            # Editing one period must not bypass the weekly row rules.
+            from rest_framework import serializers
+
+            from apps.courts.services import validate_pricing_periods_for_row
+
+            siblings = CourtWorkingHourPricePeriod.objects.filter(
+                working_hour_id=self.working_hour_id
+            ).exclude(pk=self.pk)
+            row_periods = [
+                {"starts_at": starts_at, "ends_at": ends_at, "price": price}
+                for starts_at, ends_at, price in siblings.values_list(
+                    "starts_at", "ends_at", "price"
+                )
+            ]
+            row_periods.append(
+                {
+                    "starts_at": self.starts_at,
+                    "ends_at": self.ends_at,
+                    "price": self.price,
+                }
+            )
+            try:
+                validate_pricing_periods_for_row(
+                    court=self.working_hour.court,
+                    row={"pricing_periods": row_periods},
+                )
+            except serializers.ValidationError as exc:
+                detail = exc.detail["pricing_periods"][0]
+                errors["starts_at"] = ValidationError(str(detail), code=detail.code)
         if errors:
             raise ValidationError(errors)
 

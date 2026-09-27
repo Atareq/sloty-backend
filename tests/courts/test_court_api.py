@@ -537,23 +537,223 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_nested_put_rejects_pricing_gap_overlap_outside_and_misalignment(self):
-        scenarios = (
-            (
-                "WORKING_HOUR_PRICING_INCOMPLETE",
-                [
-                    {
-                        "starts_at": "10:00:00",
-                        "ends_at": "14:00:00",
-                        "price": "200.00",
-                    },
-                    {
-                        "starts_at": "15:00:00",
-                        "ends_at": "22:00:00",
-                        "price": "300.00",
-                    },
-                ],
+    def test_nested_put_accepts_separated_pricing_periods_with_closed_gap(self):
+        self.client.force_authenticate(user=self.owner)
+        periods = [
+            {"starts_at": "01:00:00", "ends_at": "05:00:00", "price": "250.00"},
+            {"starts_at": "12:00:00", "ends_at": "18:00:00", "price": "150.00"},
+        ]
+
+        response = self.client.put(
+            self.nested_working_hour_url(self.club, self.court),
+            self.weekly_payload(self.open_row(pricing_periods=periods)),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        monday = CourtWorkingHour.objects.get(
+            court=self.court,
+            weekday=CourtWorkingHour.Weekday.MONDAY,
+        )
+        self.assertEqual(
+            list(
+                monday.pricing_periods.order_by("starts_at").values_list(
+                    "starts_at", "ends_at", "price"
+                )
             ),
+            [
+                (time(1, 0), time(5, 0), Decimal("250.00")),
+                (time(12, 0), time(18, 0), Decimal("150.00")),
+            ],
+        )
+        returned_monday = next(
+            row
+            for row in response.data["working_hours"]
+            if row["weekday"] == CourtWorkingHour.Weekday.MONDAY
+        )
+        self.assertEqual(
+            [
+                (row["starts_at"], row["ends_at"], row["price"])
+                for row in returned_monday["pricing_periods"]
+            ],
+            [("01:00:00", "05:00:00", "250.00"), ("12:00:00", "18:00:00", "150.00")],
+        )
+
+    def test_nested_put_half_open_boundary_matrix(self):
+        def periods(*bounds):
+            return [
+                {"starts_at": f"{start}:00", "ends_at": f"{end}:00", "price": "200.00"}
+                for start, end in bounds
+            ]
+
+        allowed = (
+            periods(("08:00", "12:00"), ("12:00", "15:00")),
+            periods(("12:00", "15:00"), ("15:00", "19:00")),
+            periods(("08:00", "12:00"), ("12:00", "15:00"), ("15:00", "19:00")),
+            periods(("08:00", "12:00"), ("15:00", "19:00")),
+            periods(("00:00", "01:00"), ("01:00", "05:00")),
+            periods(("05:00", "09:00"), ("09:00", "12:00")),
+            periods(("23:00", "01:00"), ("01:00", "05:00")),
+        )
+        overlapping = (
+            periods(("08:00", "12:00"), ("11:00", "15:00")),
+            periods(("08:00", "12:00"), ("08:00", "12:00")),
+            periods(("08:00", "12:00"), ("10:00", "13:00")),
+            periods(("10:00", "15:00"), ("14:00", "18:00")),
+            periods(("23:00", "02:00"), ("01:00", "05:00")),
+        )
+        self.client.force_authenticate(user=self.owner)
+
+        for pricing_periods in allowed:
+            with self.subTest(allowed=pricing_periods):
+                response = self.client.put(
+                    self.nested_working_hour_url(self.club, self.court),
+                    self.weekly_payload(self.open_row(pricing_periods=pricing_periods)),
+                    format="json",
+                )
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+        for pricing_periods in overlapping:
+            with self.subTest(overlapping=pricing_periods):
+                response = self.client.put(
+                    self.nested_working_hour_url(self.club, self.court),
+                    self.weekly_payload(self.open_row(pricing_periods=pricing_periods)),
+                    format="json",
+                )
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(
+                    self.field_error_code(response, "pricing_periods"),
+                    "WORKING_HOUR_PRICING_OVERLAP",
+                )
+
+    def test_nested_put_updates_non_contiguous_periods_independently(self):
+        self.client.force_authenticate(user=self.owner)
+        period_a = {"starts_at": "08:00:00", "ends_at": "12:00:00", "price": "300.00"}
+
+        def put(*pricing_periods):
+            return self.client.put(
+                self.nested_working_hour_url(self.club, self.court),
+                self.weekly_payload(
+                    self.open_row(pricing_periods=list(pricing_periods))
+                ),
+                format="json",
+            )
+
+        def stored_periods():
+            return list(
+                CourtWorkingHourPricePeriod.objects.filter(
+                    working_hour__court=self.court,
+                    working_hour__weekday=CourtWorkingHour.Weekday.MONDAY,
+                )
+                .order_by("starts_at")
+                .values_list("starts_at", "ends_at")
+            )
+
+        self.assertEqual(put(period_a).status_code, status.HTTP_200_OK)
+        response = put(
+            period_a,
+            {"starts_at": "15:00:00", "ends_at": "19:00:00", "price": "500.00"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        expected = [(time(8, 0), time(12, 0)), (time(15, 0), time(19, 0))]
+        self.assertEqual(stored_periods(), expected)
+
+        overlap = put(
+            period_a,
+            {"starts_at": "11:00:00", "ends_at": "19:00:00", "price": "500.00"},
+        )
+
+        self.assertEqual(overlap.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            self.field_error_code(overlap, "pricing_periods"),
+            "WORKING_HOUR_PRICING_OVERLAP",
+        )
+        self.assertEqual(stored_periods(), expected)
+
+    def test_nested_put_updates_keep_back_to_back_periods_and_reject_overlap(self):
+        self.client.force_authenticate(user=self.owner)
+
+        def put(prices, second_start="12:00:00"):
+            return self.client.put(
+                self.nested_working_hour_url(self.club, self.court),
+                self.weekly_payload(
+                    self.open_row(
+                        pricing_periods=[
+                            {
+                                "starts_at": "08:00:00",
+                                "ends_at": "12:00:00",
+                                "price": prices[0],
+                            },
+                            {
+                                "starts_at": second_start,
+                                "ends_at": "15:00:00",
+                                "price": prices[1],
+                            },
+                            {
+                                "starts_at": "15:00:00",
+                                "ends_at": "19:00:00",
+                                "price": prices[2],
+                            },
+                        ]
+                    )
+                ),
+                format="json",
+            )
+
+        def stored_periods():
+            return list(
+                CourtWorkingHourPricePeriod.objects.filter(
+                    working_hour__court=self.court,
+                    working_hour__weekday=CourtWorkingHour.Weekday.MONDAY,
+                )
+                .order_by("starts_at")
+                .values_list("starts_at", "ends_at", "price")
+            )
+
+        self.assertEqual(put(("300.00", "400.00", "500.00")).status_code, 200)
+        self.assertEqual(put(("310.00", "410.00", "510.00")).status_code, 200)
+        expected = [
+            (time(8, 0), time(12, 0), Decimal("310.00")),
+            (time(12, 0), time(15, 0), Decimal("410.00")),
+            (time(15, 0), time(19, 0), Decimal("510.00")),
+        ]
+        self.assertEqual(stored_periods(), expected)
+
+        response = put(("320.00", "420.00", "520.00"), second_start="11:00:00")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            self.field_error_code(response, "pricing_periods"),
+            "WORKING_HOUR_PRICING_OVERLAP",
+        )
+        self.assertEqual(stored_periods(), expected)
+
+    def test_single_period_full_clean_uses_row_overlap_rules(self):
+        from django.core.exceptions import ValidationError
+
+        working_hour = CourtWorkingHour.objects.create(
+            court=self.court, weekday=CourtWorkingHour.Weekday.MONDAY
+        )
+        self.create_price_period(working_hour, "08:00", "12:00", "300.00")
+        second = self.create_price_period(working_hour, "12:00", "15:00", "400.00")
+
+        second.starts_at = time(11, 0)
+        with self.assertRaises(ValidationError) as raised:
+            second.full_clean()
+        self.assertEqual(
+            raised.exception.error_dict["starts_at"][0].code,
+            "WORKING_HOUR_PRICING_OVERLAP",
+        )
+
+        gap_period = CourtWorkingHourPricePeriod(
+            working_hour=working_hour,
+            starts_at=time(17, 0),
+            ends_at=time(19, 0),
+            price=Decimal("500.00"),
+        )
+        gap_period.full_clean()
+
+    def test_nested_put_rejects_pricing_overlap_and_misalignment(self):
+        scenarios = (
             (
                 "WORKING_HOUR_PRICING_OVERLAP",
                 [
@@ -740,30 +940,43 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         self.assertEqual(saved_periods[1].starts_at, time(18, 0))
         self.assertEqual(saved_periods[1].ends_at, time(0, 0))
 
-    def test_nested_put_rejects_non_contiguous_pricing_periods_after_midnight(self):
+    def test_nested_put_gap_rules_around_midnight(self):
         self.client.force_authenticate(user=self.owner)
-        periods = [
-            {
-                "starts_at": "10:00:00",
-                "ends_at": "00:00:00",
-                "price": "200.00",
-            },
-            {
-                "starts_at": "00:00:00",
-                "ends_at": "02:00:00",
-                "price": "300.00",
-            },
+        same_day_gap = [
+            {"starts_at": "10:00:00", "ends_at": "00:00:00", "price": "200.00"},
+            {"starts_at": "00:00:00", "ends_at": "02:00:00", "price": "300.00"},
         ]
         response = self.client.put(
             self.nested_working_hour_url(self.club, self.court),
-            self.weekly_payload(self.open_row(pricing_periods=periods)),
+            self.weekly_payload(self.open_row(pricing_periods=same_day_gap)),
             format="json",
         )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(
-            self.field_error_code(response, "pricing_periods"),
-            "WORKING_HOUR_PRICING_INCOMPLETE",
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # A period carried past midnight by an overnight period must continue
+        # the timeline; a gap there would move it to the next calendar day.
+        gap_after_overnight = (
+            [
+                {"starts_at": "22:00:00", "ends_at": "01:00:00", "price": "200.00"},
+                {"starts_at": "02:00:00", "ends_at": "04:00:00", "price": "300.00"},
+            ],
+            [
+                {"starts_at": "10:00:00", "ends_at": "12:00:00", "price": "200.00"},
+                {"starts_at": "23:00:00", "ends_at": "01:00:00", "price": "300.00"},
+            ],
         )
+        for periods in gap_after_overnight:
+            with self.subTest(periods=periods):
+                response = self.client.put(
+                    self.nested_working_hour_url(self.club, self.court),
+                    self.weekly_payload(self.open_row(pricing_periods=periods)),
+                    format="json",
+                )
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(
+                    self.field_error_code(response, "pricing_periods"),
+                    "WORKING_HOUR_PRICING_INCOMPLETE",
+                )
 
     def test_nested_put_uses_half_open_period_boundaries(self):
         self.client.force_authenticate(user=self.owner)

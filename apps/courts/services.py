@@ -4,7 +4,11 @@ from rest_framework import serializers, status
 
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
-from apps.courts.pricing import is_valid_period_bounds, normalized_pricing_periods
+from apps.courts.pricing import (
+    MIDNIGHT_END_MINUTES,
+    is_valid_period_bounds,
+    normalized_pricing_periods,
+)
 
 
 def format_time(value):
@@ -75,7 +79,7 @@ def validate_pricing_periods_for_row(*, court, row):
         if not is_valid_period_bounds(starts_at, ends_at):
             raise coded_error(
                 "pricing_periods",
-                _("Pricing periods must cover the full working period without gaps."),
+                _("Pricing-period start and end times must differ."),
                 "WORKING_HOUR_PRICING_INCOMPLETE",
             )
         if price < 0:
@@ -98,10 +102,13 @@ def validate_pricing_periods_for_row(*, court, row):
                 _("Pricing periods must not overlap."),
                 "WORKING_HOUR_PRICING_OVERLAP",
             )
-        if start != previous_end:
+        # Gaps are closed time. Only a period carried past midnight must
+        # continue the timeline; otherwise it would silently move to the
+        # next calendar day.
+        if start != previous_end and start >= MIDNIGHT_END_MINUTES:
             raise coded_error(
                 "pricing_periods",
-                _("Pricing periods must cover the full working period without gaps."),
+                _("Pricing periods after midnight must continue without gaps."),
                 "WORKING_HOUR_PRICING_INCOMPLETE",
             )
         previous_end = end

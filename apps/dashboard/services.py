@@ -82,7 +82,7 @@ def build_court_availability_payload(*, club, court, date):
     if datetime_bounds is None:
         return base_response
 
-    opens_at, closes_at, _pricing_periods = datetime_bounds
+    opens_at, closes_at, pricing_intervals = datetime_bounds
     base_response["opens_at"] = opens_at.time()
     base_response["closes_at"] = closes_at.time()
     base_response["is_closed"] = False
@@ -94,39 +94,43 @@ def build_court_availability_payload(*, club, court, date):
         )
     )
 
-    current = opens_at
-    while current + slot_delta <= closes_at:
-        slot_end = current + slot_delta
-        blocking_booking = next(
-            (
-                booking
-                for booking in blocking_bookings
-                if booking.start_time < slot_end and booking.end_time > current
-            ),
-            None,
-        )
-        is_available = blocking_booking is None
-        base_response["slots"].append(
-            {
-                "start_time": current,
-                "end_time": slot_end,
-                "is_available": is_available,
-                "available": is_available,
-                "blocking_booking": (
-                    blocking_booking.id if blocking_booking is not None else None
+    # Only configured intervals produce slots; gaps are closed time.
+    for _period, period_start, period_end in pricing_intervals:
+        current = period_start
+        while current + slot_delta <= period_end:
+            slot_end = current + slot_delta
+            blocking_booking = next(
+                (
+                    booking
+                    for booking in blocking_bookings
+                    if booking.start_time < slot_end and booking.end_time > current
                 ),
-                "blocking_status": (
-                    blocking_booking.status if blocking_booking is not None else None
-                ),
-                "hold_expires_at": (
-                    blocking_booking.hold_expires_at
-                    if blocking_booking is not None
-                    and blocking_booking.status == Booking.Status.HOLD
-                    else None
-                ),
-            }
-        )
-        current = slot_end
+                None,
+            )
+            is_available = blocking_booking is None
+            base_response["slots"].append(
+                {
+                    "start_time": current,
+                    "end_time": slot_end,
+                    "is_available": is_available,
+                    "available": is_available,
+                    "blocking_booking": (
+                        blocking_booking.id if blocking_booking is not None else None
+                    ),
+                    "blocking_status": (
+                        blocking_booking.status
+                        if blocking_booking is not None
+                        else None
+                    ),
+                    "hold_expires_at": (
+                        blocking_booking.hold_expires_at
+                        if blocking_booking is not None
+                        and blocking_booking.status == Booking.Status.HOLD
+                        else None
+                    ),
+                }
+            )
+            current = slot_end
     return base_response
 
 
