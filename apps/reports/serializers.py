@@ -1,4 +1,4 @@
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -29,6 +29,36 @@ def date_bounds(date_value):
         timezone.make_aware(start, timezone_value),
         timezone.make_aware(end, timezone_value),
     )
+
+
+class MonthlyCourtStatisticsQuerySerializer(serializers.Serializer):
+    month = serializers.RegexField(
+        regex=r"^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])\Z",
+        trim_whitespace=False,
+        help_text="Calendar month in YYYY-MM format.",
+    )
+
+    def validate_month(self, value):
+        month_start = date.fromisoformat(f"{value}-01")
+        next_month = (
+            date(month_start.year + 1, 1, 1)
+            if month_start.month == 12
+            else date(month_start.year, month_start.month + 1, 1)
+        )
+        timezone_value = timezone.get_current_timezone()
+        self.month_start = timezone.make_aware(
+            datetime.combine(month_start, time.min), timezone_value
+        )
+        self.month_end = timezone.make_aware(
+            datetime.combine(next_month, time.min), timezone_value
+        )
+        return value
+
+
+class MonthlyCourtStatisticsResponseSerializer(serializers.Serializer):
+    month = serializers.CharField()
+    total_income = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_bookings = serializers.IntegerField()
 
 
 class CourtUsageReportQuerySerializer(serializers.Serializer):

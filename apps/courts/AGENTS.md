@@ -18,7 +18,7 @@
 - **Pricing Periods Are Opening Windows**:
   - Pricing periods define independent open/priced half-open `[start, end)` intervals. Gaps between them are closed time: they generate no slots and reject bookings with `BOOKING_OUTSIDE_WORKING_HOURS`. Never store a synthetic zero-price period for a gap.
   - Periods must not overlap (`WORKING_HOUR_PRICING_OVERLAP`); adjacent end/start boundaries are valid. Every boundary aligns with `Court.slot_duration_minutes` relative to the weekday's first period start.
-  - A period that normalization carries past midnight after an overnight period (for example `22:00–01:00` then `01:00–03:00`) must continue the timeline without a gap; otherwise it would silently move to the next calendar day (`WORKING_HOUR_PRICING_INCOMPLETE`). The same code rejects a period whose start and end are equal.
+  - Gaps are also valid on the existing normalized overnight timeline. `WORKING_HOUR_PRICING_INCOMPLETE` only rejects a period whose start and end are equal; it must never reject a gap.
   - A weekday with no pricing periods (`pricing_periods=[]`) represents a closed day.
 - **Midnight & Time Semantics** (`apps/courts/pricing.py`):
   - `time(0, 0)` as an end time represents `24:00` / next-day midnight (`MIDNIGHT_END_MINUTES = 1440`); an end earlier than its start is resolved on the following local date.

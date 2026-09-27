@@ -2226,11 +2226,33 @@ class BookingPeriodBoundaryTests(BookingAPITestCase):
 
     def test_non_contiguous_periods_are_a_valid_schedule(self):
         # Working hours do not need to be contiguous; 12:00-15:00 is closed.
-        self.set_price_periods(
-            self.working_hour,
-            (time(8, 0), time(12, 0), Decimal("300.00")),
-            (time(15, 0), time(19, 0), Decimal("500.00")),
+        configured = self.client.put(
+            reverse(
+                "club-court-nested-working-hour-list",
+                kwargs={"club_slug": self.club.slug, "court_id": self.court.pk},
+            ),
+            {
+                "working_hours": [
+                    {
+                        "weekday": CourtWorkingHour.Weekday.WEDNESDAY,
+                        "pricing_periods": [
+                            {
+                                "starts_at": "08:00:00",
+                                "ends_at": "12:00:00",
+                                "price": "300.00",
+                            },
+                            {
+                                "starts_at": "15:00:00",
+                                "ends_at": "19:00:00",
+                                "price": "500.00",
+                            },
+                        ],
+                    }
+                ]
+            },
+            format="json",
         )
+        self.assertEqual(configured.status_code, status.HTTP_200_OK)
 
         slots = self.get_slots()
 
@@ -2264,6 +2286,35 @@ class BookingPeriodBoundaryTests(BookingAPITestCase):
                     self.assert_api_error(response, "BOOKING_OUTSIDE_WORKING_HOURS")
                 else:
                     self.assertEqual(response.data["total_price"], expected_price)
+
+    def test_overnight_gap_generates_no_slots_and_rejects_bookings(self):
+        self.set_price_periods(
+            self.working_hour,
+            (time(23, 0), time(1, 0), Decimal("200.00")),
+            (time(3, 0), time(5, 0), Decimal("300.00")),
+        )
+        next_day = self.time_at(0) + timedelta(days=1)
+
+        slots = self.get_slots()
+
+        self.assertEqual(
+            [slot["start_time"] for slot in slots],
+            [self.time_at(23)]
+            + [next_day + timedelta(hours=hour) for hour in (0, 3, 4)],
+        )
+        self.assertEqual(
+            [slot["slot_price"] for slot in slots],
+            ["200.00", "200.00", "300.00", "300.00"],
+        )
+        self.assert_slot_prices_match_booking_pricing(slots)
+        gap_booking = self.post_booking(
+            self.club,
+            self.court,
+            start_time=(next_day + timedelta(hours=1)).isoformat(),
+            end_time=(next_day + timedelta(hours=2)).isoformat(),
+        )
+        self.assertEqual(gap_booking.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(gap_booking, "BOOKING_OUTSIDE_WORKING_HOURS")
 
     def test_overnight_periods_resolve_on_one_local_timeline(self):
         self.set_price_periods(

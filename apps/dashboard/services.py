@@ -32,7 +32,10 @@ from apps.dashboard.authorization import (
 )
 from apps.profiles.models import Profile
 from apps.transactions.models import Transaction
-from apps.transactions.services import annotate_booking_paid_amount
+from apps.transactions.services import (
+    annotate_booking_paid_amount,
+    settlement_eligible_transactions,
+)
 
 ZERO = Decimal("0.00")
 
@@ -439,11 +442,8 @@ def get_current_unsettled_transactions(
     court=None,
 ):
     target_club = club or (access.club if access else None)
-    qs = Transaction.objects.filter(
-        club=target_club,
-        created_by__isnull=False,
-        settlement_line__isnull=True,
-        is_cancelled=False,
+    qs = settlement_eligible_transactions(club=target_club).filter(
+        created_by__isnull=False
     )
     if collected_by is not None:
         qs = qs.filter(created_by=collected_by)

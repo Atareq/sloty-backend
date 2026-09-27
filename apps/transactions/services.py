@@ -102,6 +102,26 @@ def annotate_booking_paid_amount(queryset, *, relation="transactions"):
     return queryset.annotate(paid_amount=paid_amount_annotation(relation))
 
 
+def valid_financial_transactions(*, club):
+    """Return the club's non-cancelled transactions, settled or unsettled."""
+    return Transaction.objects.filter(club=club, is_cancelled=False)
+
+
+def settlement_eligible_transactions(*, club):
+    """Return the club's canonical unsettled financial transaction queryset."""
+    return (
+        valid_financial_transactions(club=club)
+        .filter(settlement_line__isnull=True)
+        .select_related(
+            "booking",
+            "booking__club_player__player_profile",
+            "court",
+            "created_by",
+            "created_by__user",
+        )
+    )
+
+
 def get_booking_paid_amount(booking, *, include_cancelled=False) -> Decimal:
     queryset = Transaction.objects.filter(
         booking=booking,

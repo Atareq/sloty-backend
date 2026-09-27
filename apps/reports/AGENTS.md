@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-`apps/reports/` owns cross-domain analytical reporting. It currently implements the Court Usage Report. It contains no database models or migrations.
+`apps/reports/` owns cross-domain analytical reporting. It implements the Court Usage Report and monthly Court statistics. It contains no database models or migrations.
 
 ## Domain Invariants
 
@@ -22,6 +22,9 @@
     - Financial values use historical `Booking.total_price` snapshots, **not** current court pricing periods.
     - Financial totals sum non-cancelled attached transactions.
     - Booking revenue is attributed entirely to the booking's local start date, even if occupancy spans past midnight.
+- **Monthly Court Statistics**:
+    - `total_income` starts from `apps.transactions.services.valid_financial_transactions()` and adds only the requested Court and Cairo-local `Transaction.created` month boundaries. It is historical income: settled and unsettled rows both count, cancelled rows never count, and refunds keep their negative sign. Settlement state affects only settlement and custody, never this total.
+    - `total_bookings` counts `Booking.TIMELINE_STATUSES` by Cairo-local `Booking.start_time` and excludes logically expired HOLDs. It is a separate booking aggregate, not a transaction count.
 - **Customer identity**: Court Usage Report does **not** display `customer_name` / `customer_phone` or ClubPlayer. It is occupancy and financial aggregation only. Tests create bookings through ClubPlayer resolution; that is fixture data, not a report identity contract.
 - **Demand Analysis Buckets**:
     - Demand is analyzed in 60-minute clock buckets (`DEMAND_BUCKET_MINUTES = 60`). Low-demand results must include zero-demand generated slots.
@@ -29,10 +32,16 @@
 ## Service Layer
 
 - [`apps/reports/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/reports/services.py):
+    - `get_monthly_court_statistics()`: Database-aggregates valid (non-cancelled) transaction income and authoritative booking lifecycle counts for one authorized Court/month.
     - `get_court_usage_report()`: Coordinates date window validation, occupancy clipping, demand bucketing, and financial aggregation on **already authorized** court and booking querysets.
 
 ## API Boundaries & Key Invariants
 
+- `/api/v1/clubs/{club_slug}/courts/{court_id}/monthly-statistics/?month=YYYY-MM`:
+    - Read-only Admin/Owner report returning exactly `month`, `total_income`, and `total_bookings`; out-of-scope Courts are not exposed.
+    - Its OpenAPI operation explicitly documents both path parameters, the
+      required `month` query parameter, the exact three-field success schema,
+      JWT authorization, and normalized `400`/`401`/`403`/`404` responses.
 - `/api/v1/clubs/{club_slug}/reports/court-usage/`:
     - Query parameters: `date_from`, `date_to`, `court`, `period` (`all_day`, `daytime`, `evening`, `custom`), `hour_from`, `hour_to`, `staff`, `status`.
 - No Excel / CSV / PDF export path exists. The JSON response is the only output.

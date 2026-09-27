@@ -953,8 +953,7 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-        # A period carried past midnight by an overnight period must continue
-        # the timeline; a gap there would move it to the next calendar day.
+        # The canonical overnight timeline also allows closed gaps.
         gap_after_overnight = (
             [
                 {"starts_at": "22:00:00", "ends_at": "01:00:00", "price": "200.00"},
@@ -972,11 +971,7 @@ class CourtWorkingHourAPITests(CourtAPITestCase):
                     self.weekly_payload(self.open_row(pricing_periods=periods)),
                     format="json",
                 )
-                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-                self.assertEqual(
-                    self.field_error_code(response, "pricing_periods"),
-                    "WORKING_HOUR_PRICING_INCOMPLETE",
-                )
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_nested_put_uses_half_open_period_boundaries(self):
         self.client.force_authenticate(user=self.owner)

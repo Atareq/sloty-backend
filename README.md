@@ -421,8 +421,11 @@ route so working hours and pricing remain atomic.
 Court create/update requests no longer accept `default_price`. Court responses
 include `pricing_configured`, `minimum_slot_price`, and `maximum_slot_price`.
 `Court.default_price` remains in the database only as legacy migration data.
-Every open working-hours row must have complete, non-overlapping pricing
-coverage with boundaries aligned to `slot_duration_minutes`.
+Pricing periods define independent open/priced half-open `[start, end)` windows
+with boundaries aligned to `slot_duration_minutes`. Adjacent periods are valid;
+overlapping or duplicate periods are rejected. Gaps are closed time and generate
+no slots. `pricing_periods=[]` represents a closed day; no synthetic gap row is
+stored. Bookings inside or across a gap return `BOOKING_OUTSIDE_WORKING_HOURS`.
 
 ## Sprint 3 Booking Endpoints
 

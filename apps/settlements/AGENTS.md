@@ -15,6 +15,7 @@
 ## Domain rules
 
 - Unsettled custody consists of transactions in the selected club where `is_cancelled=false` and `settlement_line IS NULL`.
+- The predicate above is implemented only by `apps.transactions.services.settlement_eligible_transactions()`; settlement calculation applies optional collector filtering and locking after consuming that queryset.
 - Custody includes signed refunds and is not limited by transaction age, booking status, or payment method.
 - Preview, unsettled summary, and settlement creation use the same club-wide calculation across courts. Their optional `court` input is validated and treated as metadata; it never narrows custody candidates.
 - The calculation supports an optional collector Profile. With one, custody is limited to `Transaction.created_by=collector`; without one, it includes every eligible transaction in the club.

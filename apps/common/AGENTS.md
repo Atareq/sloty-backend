@@ -17,6 +17,9 @@
 - **Base Exception**: `SlotyAPIException(status_code=..., code=..., message=..., details=...)`. Domain services raise this or subclasses for business rule violations.
 - **Exception Handler**: `sloty_exception_handler` configured in `config.settings.base.REST_FRAMEWORK["EXCEPTION_HANDLER"]`.
 - **Normalized Response Shapes**:
+  - `SlotyErrorResponseSerializer` and `SlotyValidationErrorResponseSerializer`
+    document these existing runtime shapes when an endpoint declares OpenAPI
+    error responses; they do not replace the global exception handler.
   - Validation Errors (`HTTP 400`):
     ```json
     {

@@ -1038,6 +1038,15 @@ class SettlementCurrentCustodyContractTests(SettlementAPITestCase):
             {"club", "collected_by", "court", "settled_by", "notes"},
         )
 
+    def test_financial_eligibility_requires_club_scope(self):
+        import inspect
+
+        from apps.transactions.services import settlement_eligible_transactions
+
+        parameters = inspect.signature(settlement_eligible_transactions).parameters
+        self.assertEqual(set(parameters), {"club"})
+        self.assertIs(parameters["club"].default, inspect.Parameter.empty)
+
 
 class SettlementNegativeCustodyFlowTests(SettlementAPITestCase):
 
