@@ -5895,6 +5895,47 @@ class BookingMidnightWorkingHourAPITests(BookingAPITestCase):
         self.assertEqual(response.data["total_price"], "300.00")
         self.assertEqual(response.data["status"], Booking.Status.HOLD)
 
+    def test_absolute_midnight_datetimes_are_required_and_returned(self):
+        self.client.force_authenticate(user=self.owner)
+        same_day_response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(20).isoformat(),
+            end_time=self.time_at(21).isoformat(),
+        )
+        self.assertEqual(same_day_response.status_code, status.HTTP_201_CREATED)
+
+        midnight_response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(23).isoformat(),
+            end_time=(self.time_at(23) + timedelta(hours=1)).isoformat(),
+        )
+        self.assertEqual(midnight_response.status_code, status.HTTP_201_CREATED)
+
+        reversed_response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(23).isoformat(),
+            end_time=self.time_at(0).isoformat(),
+        )
+        self.assertEqual(reversed_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(reversed_response, "end_time")
+
+        slots_response = self.client.get(
+            self.booking_slots_url(self.club),
+            {"court": self.court.id, "date": "2026-05-20"},
+        )
+        self.assertEqual(slots_response.status_code, status.HTTP_200_OK)
+        midnight_slot = next(
+            slot
+            for slot in slots_response.data["slots"]
+            if slot["start_time"] == self.time_at(23)
+        )
+        self.assertEqual(
+            midnight_slot["end_time"], self.time_at(23) + timedelta(hours=1)
+        )
+
     def test_booking_creation_past_midnight_is_rejected_outside_working_hours(self):
         self.client.force_authenticate(user=self.owner)
         response = self.post_booking(
@@ -6001,6 +6042,10 @@ class BookingOvernightWorkingHourAPITests(BookingAPITestCase):
         self.assertEqual(
             [slot["start_time"] for slot in slots],
             [self.time_at(23) + timedelta(hours=index) for index in range(6)],
+        )
+        self.assertEqual(
+            [slot["end_time"] for slot in slots],
+            [self.time_at(23) + timedelta(hours=index + 1) for index in range(6)],
         )
         self.assertEqual(len({slot["start_time"] for slot in slots}), len(slots))
         self.assertEqual(slots[2]["slot_price"], "300.00")

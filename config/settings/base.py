@@ -84,6 +84,7 @@ APPS = [
     "apps.common.apps.CommonConfig",
     "apps.clubs.apps.ClubsConfig",
     "apps.players.apps.PlayersConfig",
+    "apps.images.apps.ImagesConfig",
     "apps.courts.apps.CourtsConfig",
     "apps.bookings.apps.BookingsConfig",
     "apps.transactions.apps.TransactionsConfig",

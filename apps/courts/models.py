@@ -5,7 +5,7 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models, transaction
 
 from apps.clubs.models import Club
-from apps.common.models import SlotyTimeStampedModel
+from apps.common.models import SlotyCreatedModel, SlotyTimeStampedModel
 from apps.courts.pricing import is_valid_period_bounds
 
 
@@ -124,6 +124,29 @@ class Court(SlotyTimeStampedModel):
             Court.objects.select_for_update().filter(pk=self.pk).first()
             self.clean()
             return super().save(*args, **kwargs)
+
+
+class CourtImage(SlotyCreatedModel):
+    court = models.ForeignKey(
+        Court,
+        on_delete=models.CASCADE,
+        related_name="court_images",
+    )
+    image = models.ForeignKey(
+        "images.Image",
+        on_delete=models.PROTECT,
+        related_name="court_images",
+    )
+    position = models.PositiveIntegerField()
+
+    class Meta:
+        ordering = ("position", "id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["court", "image"],
+                name="unique_court_image",
+            )
+        ]
 
 
 class CourtWorkingHour(models.Model):

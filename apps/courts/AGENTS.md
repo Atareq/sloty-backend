@@ -43,6 +43,10 @@
 - [`CourtWorkingHourPricePeriod`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/models.py):
   - Child periods defining `starts_at`, `ends_at`, and `price`. Stored in clock-time order; consumers normalize them into operational order so a cross-midnight schedule resolves onto one timeline.
 
+## Court Images
+
+`CourtImage` is the explicit bridge from Court to `images.Image`. It uses `SlotyCreatedModel`; its `position` is the sole arrangement source of truth and retrieval is ordered by `(position, id)`. Attached images use `PROTECT`; deleting a bridge detaches only and does not delete the Image.
+
 ## Service Layer
 
 - [`apps/courts/pricing.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/pricing.py):

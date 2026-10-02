@@ -76,7 +76,9 @@ class MonthlyCourtStatisticsTests(CourtUsageReportAPITestCase):
         self.settle(
             Transaction.objects.get(booking=self.completed, amount=Decimal("450.00"))
         )
-        self.assertEqual(refund.occurred_at.date(), timezone.localdate())
+        self.assertEqual(
+            timezone.localtime(refund.occurred_at).date(), timezone.localdate()
+        )
 
         self.client.force_authenticate(user=self.owner)
         response = self.client.get(self.url(), {"month": "2026-07"})

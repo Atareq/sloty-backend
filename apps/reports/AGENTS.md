@@ -25,6 +25,10 @@
 - **Monthly Court Statistics**:
     - `total_income` starts from `apps.transactions.services.valid_financial_transactions()` and adds only the requested Court and Cairo-local `Transaction.created` month boundaries. It is historical income: settled and unsettled rows both count, cancelled rows never count, and refunds keep their negative sign. Settlement state affects only settlement and custody, never this total.
     - `total_bookings` counts `Booking.TIMELINE_STATUSES` by Cairo-local `Booking.start_time` and excludes logically expired HOLDs. It is a separate booking aggregate, not a transaction count.
+    - Tests that inspect `Transaction.occurred_at` must convert it with
+      `timezone.localtime()` before comparing calendar dates. It is a UTC
+      event timestamp and never replaces `Transaction.created` for monthly
+      income filtering.
 - **Customer identity**: Court Usage Report does **not** display `customer_name` / `customer_phone` or ClubPlayer. It is occupancy and financial aggregation only. Tests create bookings through ClubPlayer resolution; that is fixture data, not a report identity contract.
 - **Demand Analysis Buckets**:
     - Demand is analyzed in 60-minute clock buckets (`DEMAND_BUCKET_MINUTES = 60`). Low-demand results must include zero-demand generated slots.
