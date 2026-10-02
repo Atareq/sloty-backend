@@ -2,10 +2,13 @@ from collections import defaultdict
 from datetime import timedelta
 from decimal import Decimal
 
+from django.db.models import DecimalField, Sum, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.translation import pgettext
 
 from apps.bookings.filters import exclude_logically_expired_holds
+from apps.bookings.models import Booking
 from apps.common.weekdays import to_sloty_weekday
 from apps.courts.pricing import datetime_for_local_date, working_hour_datetime_bounds
 from apps.reports.authorization import scoped_report_bookings, scoped_report_courts
@@ -17,9 +20,45 @@ from apps.reports.constants import (
     PERIOD_DAYTIME,
     PERIOD_EVENING,
 )
-from apps.transactions.services import annotate_booking_paid_amount
+from apps.transactions.services import (
+    annotate_booking_paid_amount,
+    valid_financial_transactions,
+)
 
 ZERO = Decimal("0.00")
+
+
+def get_monthly_court_statistics(*, access, court, month, month_start, month_end):
+    total_income = (
+        valid_financial_transactions(club=access.club)
+        .filter(
+            court=court,
+            created__gte=month_start,
+            created__lt=month_end,
+        )
+        .aggregate(
+            total=Coalesce(
+                Sum("amount"),
+                Value(ZERO),
+                output_field=DecimalField(max_digits=12, decimal_places=2),
+            )
+        )["total"]
+    )
+
+    total_bookings = exclude_logically_expired_holds(
+        scoped_report_bookings(access).filter(
+            court=court,
+            status__in=Booking.TIMELINE_STATUSES,
+            start_time__gte=month_start,
+            start_time__lt=month_end,
+        )
+    ).count()
+
+    return {
+        "month": month,
+        "total_income": total_income,
+        "total_bookings": total_bookings,
+    }
 
 
 def money(value):

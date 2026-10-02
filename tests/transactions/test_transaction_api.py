@@ -1777,6 +1777,11 @@ class TransactionCentralizedAccessTests(TransactionAPITestCase):
         self.assertNotIn("parse_date_param", view_source)
         self.assertNotIn("parse_datetime_param", view_source)
 
+    def test_transaction_filters_do_not_depend_on_settlement_eligibility(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        filter_source = (repo_root / "apps" / "transactions" / "filters.py").read_text()
+        self.assertNotIn("settlement_eligible_transactions", filter_source)
+
     def test_schema_and_docs_return_200(self):
         schema_response = self.client.get(reverse("schema"))
         docs_response = self.client.get(reverse("swagger-ui"))

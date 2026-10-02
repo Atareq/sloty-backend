@@ -12,6 +12,7 @@
   - The `/dashboard/summary/` endpoint supports both: Staff receive operational counts, while all financial fields are set to `null` (`can_view_financial_summary() == False`). This is a read-model presentation rule, not a second security engine.
 - **Unsettled Transactions Authority**:
   - Dashboard settlement metrics are computed from live unsettled transactions (`is_cancelled=False` and `settlement_line IS NULL`), **never** from `Settlement.status=PENDING`.
+  - Current Custody starts from `apps.transactions.services.settlement_eligible_transactions()` and only adds dashboard presentation narrowing such as non-null collector and an explicit court.
   - Collector identity and custody grouping use `Transaction.created_by` (`Profile`). `collected_by` accepts and returns a Profile ID; names may be read from `Profile.user`.
   - Field naming: Counts must never be named `amount`. `staff_with_unsettled_transactions_count` represents distinct collectors with unsettled candidates.
 - **Date Authority Rules**:

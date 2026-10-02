@@ -15,6 +15,7 @@ from apps.common.exceptions import SlotyAPIException
 from apps.profiles.models import Profile
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
+from apps.transactions.services import settlement_eligible_transactions
 
 ZERO = Decimal("0.00")
 NO_UNSETTLED_TRANSACTIONS_MESSAGE = _(
@@ -38,25 +39,13 @@ def calculate(
     lock=False,
     allow_empty=False,
 ) -> dict:
-    queryset = Transaction.objects.filter(
-        club=club,
-        settlement_line__isnull=True,
-        is_cancelled=False,
-    )
+    queryset = settlement_eligible_transactions(club=club)
     if collected_by is not None:
         queryset = queryset.filter(created_by=collected_by)
     if lock:
         queryset = queryset.select_for_update(of=("self",))
 
-    candidates = list(
-        queryset.select_related(
-            "booking",
-            "booking__club_player__player_profile",
-            "court",
-            "created_by",
-            "created_by__user",
-        ).order_by("created", "id")
-    )
+    candidates = list(queryset.order_by("created", "id"))
     if not candidates and not allow_empty:
         raise SlotyAPIException(
             status_code=status.HTTP_409_CONFLICT,

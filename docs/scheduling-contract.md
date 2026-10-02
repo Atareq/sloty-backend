@@ -14,6 +14,12 @@ slot generation, booking conflict checks, and availability. Cross-midnight
 periods are resolved as timezone-aware local datetime intervals; for example,
 `23:00–01:00` ends on the following local date.
 
+Pricing periods are the court's opening windows. Gaps between periods are valid
+and mean the court is closed: for `01:00–05:00` and `12:00–18:00`, generated
+slots cover only those two windows, nothing is returned for `05:00–12:00`, and
+a booking in the gap is rejected with `BOOKING_OUTSIDE_WORKING_HOURS`. A gap is
+not an `UNAVAILABLE` slot. A weekday with `pricing_periods=[]` is a closed day.
+
 Use `GET /api/v1/clubs/{club_slug}/bookings/slots/` to retrieve one unified
 booking timeline. The backend generates candidate slots from current court
 working hours and pricing, retrieves visible bookings independently, and merges

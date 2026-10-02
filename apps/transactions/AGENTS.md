@@ -46,6 +46,8 @@ Profile IDs; display names use the linked account full name or phone number.
 ## Service Layer
 
 - [`apps/transactions/services.py`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/transactions/services.py):
+  - `valid_financial_transactions()`: Base club-scoped queryset of non-cancelled transactions, settled or unsettled. Monthly Court income adds only Court and month narrowing to it.
+  - `settlement_eligible_transactions()`: `valid_financial_transactions()` plus no settlement line. Settlement and dashboard Current Custody add only their consumer-specific narrowing to this source.
   - `create_transaction()`: Enforces court deposit rules, digital references, updates booking `HOLD -> CONFIRMED`, and audits.
   - `cancel_transaction()`: Enforces unsettled status and the 15-minute/direct-correction versus booking-cancellation policy, marks cancelled, recalculates booking status (`CONFIRMED -> HOLD` if unbacked), and audits.
   - `annotate_booking_paid_amount()`: Authoritative aggregation of non-cancelled payment rows minus refunds.
@@ -58,6 +60,7 @@ Profile IDs; display names use the linked account full name or phone number.
 - `GET .../transactions/` starts from the selected club's ledger rows. Staff visibility is then narrowed to `created_by=current_profile`; owners and platform admins retain the full selected-club ledger.
 - `GET .../transactions/?search=<value>` searches related ClubPlayer customer name, related PlayerProfile phone, related collector account name, and payment reference after the selected-club and collector scopes are applied.
 - `GET .../transactions/?court=<id>` is an optional narrowing filter on that already authorized club queryset. It is never a separate court-rooted lookup and cannot cross the selected club.
+- `GET .../transactions/?settlement_status=unsettled|settled` is a history filter on that authorized queryset. It intentionally does not use `settlement_eligible_transactions()`; the Transactions API never depends on settlement eligibility.
 - `POST .../transactions/{id}/cancel/`: Transaction correction endpoint requiring `cancellation_reason`.
   - A late direct-cancellation rejection is HTTP 409 with `code=PAYMENT_CANCELLATION_REQUIRES_BOOKING_CANCELLATION` and message `This payment can no longer be cancelled directly. Cancel the booking instead.` Frontends should handle the stable code and display the message.
 - `/api/v1/clubs/{club_slug}/transaction-attempts/`: Traceability list/detail and dismissal for rejected attempts.

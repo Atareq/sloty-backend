@@ -75,7 +75,7 @@ def validate_pricing_periods_for_row(*, court, row):
         if not is_valid_period_bounds(starts_at, ends_at):
             raise coded_error(
                 "pricing_periods",
-                _("Pricing periods must cover the full working period without gaps."),
+                _("Pricing-period start and end times must differ."),
                 "WORKING_HOUR_PRICING_INCOMPLETE",
             )
         if price < 0:
@@ -97,12 +97,6 @@ def validate_pricing_periods_for_row(*, court, row):
                 "pricing_periods",
                 _("Pricing periods must not overlap."),
                 "WORKING_HOUR_PRICING_OVERLAP",
-            )
-        if start != previous_end:
-            raise coded_error(
-                "pricing_periods",
-                _("Pricing periods must cover the full working period without gaps."),
-                "WORKING_HOUR_PRICING_INCOMPLETE",
             )
         previous_end = end
 

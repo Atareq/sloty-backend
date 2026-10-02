@@ -92,6 +92,9 @@
   - Keep `Booking(court, start_time)` for court range retrieval. Do not add
     hold-expiry or scheduling indexes without measured query evidence.
   - Scheduling intervals use the canonical half-open `[start_time, end_time)` rule. Adjacent bookings do not conflict; cross-midnight court periods are resolved as aware local datetimes by `apps.courts.pricing`.
+  - The slots API serializes `start_time` and `end_time` as timezone-aware
+    ISO-8601 datetimes. Consumers must retain those exact values for booking
+    mutations; displayed wall-clock labels are presentation only.
 
 Booking `created_by` / `last_status_changed_by` and attempt `attempted_by`
 response values are Profile IDs. The `attempted_by` filter also takes a Profile

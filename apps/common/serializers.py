@@ -3,6 +3,25 @@ from django.utils.dateparse import parse_datetime
 from rest_framework import serializers
 
 
+class SlotyErrorResponseSerializer(serializers.Serializer):
+    success = serializers.BooleanField(
+        help_text="Always false for normalized API errors."
+    )
+    code = serializers.CharField()
+    message = serializers.CharField()
+
+
+class SlotyValidationErrorDetailSerializer(serializers.Serializer):
+    code = serializers.CharField()
+    message = serializers.CharField()
+
+
+class SlotyValidationErrorResponseSerializer(SlotyErrorResponseSerializer):
+    field_errors = serializers.DictField(
+        child=serializers.ListField(child=SlotyValidationErrorDetailSerializer())
+    )
+
+
 class TimezoneAwareDateTimeField(serializers.DateTimeField):
     default_error_messages = {
         **serializers.DateTimeField.default_error_messages,

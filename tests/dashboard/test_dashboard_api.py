@@ -1457,6 +1457,51 @@ class DashboardMidnightWorkingHourTests(DashboardDataMixin, DashboardAPITestCase
         self.assertEqual(result["booked_minutes"], 60)
         self.assertEqual(result["utilization_percentage"], "16.67")
 
+    def test_availability_skips_gap_between_pricing_periods(self):
+        gap_court = self.create_court(self.club, "Gap Court")
+        working_hour = CourtWorkingHour.objects.create(
+            court=gap_court, weekday=CourtWorkingHour.Weekday.MONDAY
+        )
+        CourtWorkingHourPricePeriod.objects.bulk_create(
+            [
+                CourtWorkingHourPricePeriod(
+                    working_hour=working_hour,
+                    starts_at=time(1),
+                    ends_at=time(5),
+                    price=Decimal("250.00"),
+                ),
+                CourtWorkingHourPricePeriod(
+                    working_hour=working_hour,
+                    starts_at=time(12),
+                    ends_at=time(18),
+                    price=Decimal("150.00"),
+                ),
+            ]
+        )
+        expected_starts = [
+            self.time_at(hour).isoformat() for hour in (1, 2, 3, 4, *range(12, 18))
+        ]
+
+        self.client.force_authenticate(user=self.platform_admin)
+        response = self.client.get(
+            self.availability_url(self.club, gap_court), {"date": "2026-07-06"}
+        )
+        public_response = self.client.get(
+            self.public_availability_url(self.club, gap_court), {"date": "2026-07-06"}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["is_closed"])
+        self.assertEqual(
+            [slot["start_time"] for slot in response.data["slots"]], expected_starts
+        )
+        self.assertTrue(all(slot["is_available"] for slot in response.data["slots"]))
+        self.assertEqual(public_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [slot["start_time"] for slot in public_response.data["slots"]],
+            expected_starts,
+        )
+
     def test_availability_uses_contiguous_cross_midnight_pricing_periods(self):
         overnight_court = self.create_court(self.club, "Overnight Court")
         working_hour = CourtWorkingHour.objects.create(

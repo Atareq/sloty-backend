@@ -124,6 +124,20 @@ def get_prefetched_pricing_periods(working_hour):
     return list(working_hour.pricing_periods.all())
 
 
+def intervals_cover(intervals, start, end) -> bool:
+    """Whether configured [start, end) intervals cover the range with no gap."""
+    cursor = start
+    for _period, period_start, period_end in intervals:
+        if period_end <= cursor:
+            continue
+        if period_start > cursor:
+            return False
+        cursor = period_end
+        if cursor >= end:
+            return True
+    return False
+
+
 def working_hour_datetime_bounds(working_hour, date_value: date):
     intervals = pricing_intervals_for_local_date(working_hour, date_value)
     if not intervals:
@@ -174,8 +188,8 @@ def calculate_booking_price_from_schedule(
         candidate_bounds = working_hour_datetime_bounds(working_hour, operational_date)
         if candidate_bounds is None:
             continue
-        candidate_open, candidate_close, candidate_intervals = candidate_bounds
-        if candidate_open <= local_start and local_end <= candidate_close:
+        candidate_open, _candidate_close, candidate_intervals = candidate_bounds
+        if intervals_cover(candidate_intervals, local_start, local_end):
             day_open = candidate_open
             pricing_intervals = candidate_intervals
             break

@@ -2012,6 +2012,350 @@ class BookingSlotAvailabilityTests(BookingAPITestCase):
         self.assertIn("/api/v1/clubs/{club_slug}/bookings/slots/", schema)
 
 
+class BookingSeparatedPricingPeriodTests(BookingAPITestCase):
+    """Gaps between pricing periods are closed time, not unavailable slots."""
+
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin()
+        self.club = self.create_club("Gap Club", slug="gap-club")
+        self.court = self.create_court(
+            self.club, "Gap Court", minimum_deposit=Decimal("0.00")
+        )
+        self.set_price_periods(
+            self.court.working_hours.get(weekday=CourtWorkingHour.Weekday.WEDNESDAY),
+            (time(1, 0), time(5, 0), Decimal("250.00")),
+            (time(12, 0), time(18, 0), Decimal("150.00")),
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+    def test_slots_come_only_from_configured_periods(self):
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {"court": self.court.id, "date": "2026-05-20"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slots = response.data["slots"]
+        self.assertEqual(
+            [timezone.localtime(slot["start_time"]).hour for slot in slots],
+            [1, 2, 3, 4, 12, 13, 14, 15, 16, 17],
+        )
+        self.assertEqual(
+            [slot["slot_price"] for slot in slots],
+            ["250.00"] * 4 + ["150.00"] * 6,
+        )
+        self.assertEqual({slot["slot_status"] for slot in slots}, {"FREE"})
+        self.assertEqual({slot["slot_type"] for slot in slots}, {"GENERATED"})
+
+    def test_booking_inside_or_across_gap_is_outside_working_hours(self):
+        for start_hour, end_hour in ((8, 9), (4, 13)):
+            with self.subTest(start_hour=start_hour, end_hour=end_hour):
+                response = self.post_booking(
+                    self.club,
+                    self.court,
+                    start_time=self.time_at(start_hour).isoformat(),
+                    end_time=self.time_at(end_hour).isoformat(),
+                )
+                self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+                self.assert_api_error(response, "BOOKING_OUTSIDE_WORKING_HOURS")
+        self.assertFalse(Booking.objects.filter(court=self.court).exists())
+
+    def test_bookings_in_each_period_use_that_period_price(self):
+        for start_hour, expected_price in ((2, "250.00"), (14, "150.00")):
+            with self.subTest(start_hour=start_hour):
+                response = self.post_booking(
+                    self.club,
+                    self.court,
+                    start_time=self.time_at(start_hour).isoformat(),
+                    end_time=self.time_at(start_hour + 1).isoformat(),
+                )
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+                self.assertEqual(response.data["total_price"], expected_price)
+
+    def test_recurrence_next_uses_the_same_period_rules(self):
+        def recurring_booking(start_hour, phone):
+            booking = self.create_booking(
+                self.court,
+                start_time=self.time_at(start_hour),
+                end_time=self.time_at(start_hour + 1),
+                customer_phone=phone,
+                total_price=Decimal("150.00"),
+                status=Booking.Status.CONFIRMED,
+                source=Booking.Source.RECURRING,
+                recurrence_status=Booking.RecurrenceStatus.ACTIVE,
+            )
+            self.create_transaction(booking, amount=booking.total_price)
+            return booking
+
+        # 08:00 became a gap after this recurrence was booked.
+        for booking, expected_status in (
+            (recurring_booking(14, "+201000000071"), status.HTTP_200_OK),
+            (recurring_booking(8, "+201000000072"), status.HTTP_409_CONFLICT),
+        ):
+            with (
+                self.subTest(start=booking.start_time),
+                patch(
+                    "apps.bookings.services.timezone.now",
+                    return_value=booking.end_time + timedelta(minutes=1),
+                ),
+            ):
+                response = self.client.get(
+                    self.booking_lifecycle_url(self.club, booking, "recurrence-next")
+                )
+                self.assertEqual(response.status_code, expected_status)
+                if expected_status == status.HTTP_200_OK:
+                    self.assertEqual(response.data["next_total_price"], "150.00")
+                else:
+                    self.assert_api_error(response, "NEXT_RECURRING_SLOT_UNAVAILABLE")
+
+
+class BookingPeriodBoundaryTests(BookingAPITestCase):
+    """Touching periods share one half-open rule for slots, price, and booking."""
+
+    def setUp(self):
+        self.platform_admin = self.create_platform_admin()
+        self.club = self.create_club("Boundary Club", slug="boundary-club")
+        self.court = self.create_court(
+            self.club, "Boundary Court", minimum_deposit=Decimal("0.00")
+        )
+        self.working_hour = self.court.working_hours.get(
+            weekday=CourtWorkingHour.Weekday.WEDNESDAY
+        )
+        self.set_price_periods(
+            self.working_hour,
+            (time(8, 0), time(12, 0), Decimal("300.00")),
+            (time(12, 0), time(15, 0), Decimal("400.00")),
+            (time(15, 0), time(19, 0), Decimal("500.00")),
+        )
+        self.client.force_authenticate(user=self.platform_admin)
+
+    def get_slots(self):
+        response = self.client.get(
+            self.booking_slots_url(self.club),
+            {"court": self.court.id, "date": "2026-05-20"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.data["slots"]
+
+    def assert_slot_prices_match_booking_pricing(self, slots):
+        from apps.bookings.services import calculate_booking_price
+
+        for slot in slots:
+            self.assertEqual(
+                calculate_booking_price(
+                    self.court, slot["start_time"], slot["end_time"]
+                ),
+                Decimal(slot["slot_price"]),
+            )
+
+    def test_slots_are_unique_and_priced_by_their_own_period(self):
+        slots = self.get_slots()
+
+        starts = [slot["start_time"] for slot in slots]
+        self.assertEqual(len(starts), len(set(starts)))
+        self.assertEqual(
+            [timezone.localtime(start).hour for start in starts], list(range(8, 19))
+        )
+        self.assertEqual(
+            [slot["slot_price"] for slot in slots],
+            ["300.00"] * 4 + ["400.00"] * 3 + ["500.00"] * 4,
+        )
+        self.assert_slot_prices_match_booking_pricing(slots)
+
+    def test_boundary_slots_book_at_their_own_period_price(self):
+        for start_hour, expected_price in (
+            (11, "300.00"),
+            (12, "400.00"),
+            (14, "400.00"),
+            (15, "500.00"),
+        ):
+            with self.subTest(start_hour=start_hour):
+                response = self.post_booking(
+                    self.club,
+                    self.court,
+                    start_time=self.time_at(start_hour).isoformat(),
+                    end_time=self.time_at(start_hour + 1).isoformat(),
+                )
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+                self.assertEqual(response.data["total_price"], expected_price)
+
+    def test_booking_across_touching_periods_sums_each_period(self):
+        for start_hour, end_hour, expected_price in (
+            (11, 13, "700.00"),
+            (14, 16, "900.00"),
+        ):
+            with self.subTest(start_hour=start_hour, end_hour=end_hour):
+                response = self.post_booking(
+                    self.club,
+                    self.court,
+                    start_time=self.time_at(start_hour).isoformat(),
+                    end_time=self.time_at(end_hour).isoformat(),
+                )
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+                self.assertEqual(response.data["total_price"], expected_price)
+
+    def test_adjacent_bookings_at_a_boundary_do_not_conflict(self):
+        for start_hour, phone in ((11, "+201000000061"), (12, "+201000000062")):
+            response = self.post_booking(
+                self.club,
+                self.court,
+                start_time=self.time_at(start_hour).isoformat(),
+                end_time=self.time_at(start_hour + 1).isoformat(),
+                customer_phone=phone,
+            )
+            self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        duplicate = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(12).isoformat(),
+            end_time=self.time_at(13).isoformat(),
+            customer_phone="+201000000063",
+        )
+        self.assertEqual(duplicate.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(duplicate, "BOOKING_SLOT_UNAVAILABLE")
+
+        with self.during_fixture_schedule():
+            statuses = {
+                timezone.localtime(slot["start_time"]).hour: slot["slot_status"]
+                for slot in self.get_slots()
+            }
+        self.assertEqual(
+            (statuses[11], statuses[12], statuses[13]), ("HOLD", "HOLD", "FREE")
+        )
+
+    def test_non_contiguous_periods_are_a_valid_schedule(self):
+        # Working hours do not need to be contiguous; 12:00-15:00 is closed.
+        configured = self.client.put(
+            reverse(
+                "club-court-nested-working-hour-list",
+                kwargs={"club_slug": self.club.slug, "court_id": self.court.pk},
+            ),
+            {
+                "working_hours": [
+                    {
+                        "weekday": CourtWorkingHour.Weekday.WEDNESDAY,
+                        "pricing_periods": [
+                            {
+                                "starts_at": "08:00:00",
+                                "ends_at": "12:00:00",
+                                "price": "300.00",
+                            },
+                            {
+                                "starts_at": "15:00:00",
+                                "ends_at": "19:00:00",
+                                "price": "500.00",
+                            },
+                        ],
+                    }
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(configured.status_code, status.HTTP_200_OK)
+
+        slots = self.get_slots()
+
+        self.assertEqual(
+            [timezone.localtime(slot["start_time"]).hour for slot in slots],
+            [8, 9, 10, 11, 15, 16, 17, 18],
+        )
+        self.assertEqual(
+            [slot["slot_price"] for slot in slots], ["300.00"] * 4 + ["500.00"] * 4
+        )
+        self.assert_slot_prices_match_booking_pricing(slots)
+        for start_hour, expected_status, expected_price in (
+            (10, status.HTTP_201_CREATED, "300.00"),
+            (11, status.HTTP_201_CREATED, "300.00"),
+            (15, status.HTTP_201_CREATED, "500.00"),
+            (16, status.HTTP_201_CREATED, "500.00"),
+            (12, status.HTTP_409_CONFLICT, None),
+            (13, status.HTTP_409_CONFLICT, None),
+            (14, status.HTTP_409_CONFLICT, None),
+        ):
+            with self.subTest(start_hour=start_hour):
+                response = self.post_booking(
+                    self.club,
+                    self.court,
+                    start_time=self.time_at(start_hour).isoformat(),
+                    end_time=self.time_at(start_hour + 1).isoformat(),
+                    customer_phone=f"+2010000001{start_hour:02d}",
+                )
+                self.assertEqual(response.status_code, expected_status)
+                if expected_price is None:
+                    self.assert_api_error(response, "BOOKING_OUTSIDE_WORKING_HOURS")
+                else:
+                    self.assertEqual(response.data["total_price"], expected_price)
+
+    def test_overnight_gap_generates_no_slots_and_rejects_bookings(self):
+        self.set_price_periods(
+            self.working_hour,
+            (time(23, 0), time(1, 0), Decimal("200.00")),
+            (time(3, 0), time(5, 0), Decimal("300.00")),
+        )
+        next_day = self.time_at(0) + timedelta(days=1)
+
+        slots = self.get_slots()
+
+        self.assertEqual(
+            [slot["start_time"] for slot in slots],
+            [self.time_at(23)]
+            + [next_day + timedelta(hours=hour) for hour in (0, 3, 4)],
+        )
+        self.assertEqual(
+            [slot["slot_price"] for slot in slots],
+            ["200.00", "200.00", "300.00", "300.00"],
+        )
+        self.assert_slot_prices_match_booking_pricing(slots)
+        gap_booking = self.post_booking(
+            self.club,
+            self.court,
+            start_time=(next_day + timedelta(hours=1)).isoformat(),
+            end_time=(next_day + timedelta(hours=2)).isoformat(),
+        )
+        self.assertEqual(gap_booking.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(gap_booking, "BOOKING_OUTSIDE_WORKING_HOURS")
+
+    def test_overnight_periods_resolve_on_one_local_timeline(self):
+        self.set_price_periods(
+            self.working_hour,
+            (time(23, 0), time(1, 0), Decimal("200.00")),
+            (time(1, 0), time(5, 0), Decimal("300.00")),
+        )
+        next_day = self.time_at(0) + timedelta(days=1)
+
+        slots = self.get_slots()
+
+        self.assertEqual(
+            [slot["start_time"] for slot in slots],
+            [self.time_at(23)]
+            + [next_day + timedelta(hours=hour) for hour in range(5)],
+        )
+        self.assertEqual(
+            [slot["slot_price"] for slot in slots],
+            ["200.00", "200.00", "300.00", "300.00", "300.00", "300.00"],
+        )
+        self.assert_slot_prices_match_booking_pricing(slots)
+
+        across_boundary = self.post_booking(
+            self.club,
+            self.court,
+            start_time=next_day.isoformat(),
+            end_time=(next_day + timedelta(hours=2)).isoformat(),
+        )
+        self.assertEqual(across_boundary.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(across_boundary.data["total_price"], "500.00")
+        after_close = self.post_booking(
+            self.club,
+            self.court,
+            start_time=(next_day + timedelta(hours=5)).isoformat(),
+            end_time=(next_day + timedelta(hours=6)).isoformat(),
+            customer_phone="+201000000064",
+        )
+        self.assertEqual(after_close.status_code, status.HTTP_409_CONFLICT)
+        self.assert_api_error(after_close, "BOOKING_OUTSIDE_WORKING_HOURS")
+
+
 class BookingScopeTests(BookingAPITestCase):
 
     def setUp(self):
@@ -5551,6 +5895,47 @@ class BookingMidnightWorkingHourAPITests(BookingAPITestCase):
         self.assertEqual(response.data["total_price"], "300.00")
         self.assertEqual(response.data["status"], Booking.Status.HOLD)
 
+    def test_absolute_midnight_datetimes_are_required_and_returned(self):
+        self.client.force_authenticate(user=self.owner)
+        same_day_response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(20).isoformat(),
+            end_time=self.time_at(21).isoformat(),
+        )
+        self.assertEqual(same_day_response.status_code, status.HTTP_201_CREATED)
+
+        midnight_response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(23).isoformat(),
+            end_time=(self.time_at(23) + timedelta(hours=1)).isoformat(),
+        )
+        self.assertEqual(midnight_response.status_code, status.HTTP_201_CREATED)
+
+        reversed_response = self.post_booking(
+            self.club,
+            self.court,
+            start_time=self.time_at(23).isoformat(),
+            end_time=self.time_at(0).isoformat(),
+        )
+        self.assertEqual(reversed_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assert_field_error(reversed_response, "end_time")
+
+        slots_response = self.client.get(
+            self.booking_slots_url(self.club),
+            {"court": self.court.id, "date": "2026-05-20"},
+        )
+        self.assertEqual(slots_response.status_code, status.HTTP_200_OK)
+        midnight_slot = next(
+            slot
+            for slot in slots_response.data["slots"]
+            if slot["start_time"] == self.time_at(23)
+        )
+        self.assertEqual(
+            midnight_slot["end_time"], self.time_at(23) + timedelta(hours=1)
+        )
+
     def test_booking_creation_past_midnight_is_rejected_outside_working_hours(self):
         self.client.force_authenticate(user=self.owner)
         response = self.post_booking(
@@ -5657,6 +6042,10 @@ class BookingOvernightWorkingHourAPITests(BookingAPITestCase):
         self.assertEqual(
             [slot["start_time"] for slot in slots],
             [self.time_at(23) + timedelta(hours=index) for index in range(6)],
+        )
+        self.assertEqual(
+            [slot["end_time"] for slot in slots],
+            [self.time_at(23) + timedelta(hours=index + 1) for index in range(6)],
         )
         self.assertEqual(len({slot["start_time"] for slot in slots}), len(slots))
         self.assertEqual(slots[2]["slot_price"], "300.00")
