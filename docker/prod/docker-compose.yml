@@ -1,0 +1,60 @@
+# Canonical invocation, from the repository root:
+#   docker compose --env-file .env -f docker/prod/docker-compose.yml up -d --build
+#
+# This stack is for parity and future use. The live production deploy today is
+# scripts/deploy-sloty-backend on the host (root AGENTS.md section 10); this
+# compose file does not replace it.
+name: sloty-backend-prod
+
+services:
+  db:
+    image: postgres:16-alpine
+    env_file: ../../.env
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: ../..
+      dockerfile: docker/prod/Dockerfile
+    env_file: ../../.env
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Same probe the production deploy script requires: in-process, no DB, no JWT.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  db_data:
+  redis_data:
