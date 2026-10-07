@@ -21,7 +21,7 @@ TIMESTAMP="$(TZ=Africa/Cairo date +'%Y-%m-%dT%H%M%S%z')"
 BACKUP_NAME="sloty_prod-${TIMESTAMP}.dump"
 BACKUP_PATH="${BACKUP_DIR}/${BACKUP_NAME}"
 PARTIAL_PATH="${BACKUP_DIR}/.${BACKUP_NAME}.partial"
-R2_DIRECTORY="sloty:${R2_BUCKET}/db"
+R2_DIRECTORY="sloty:${R2_BUCKET_BACKUP}/db"
 R2_OBJECT="${R2_DIRECTORY}/${BACKUP_NAME}"
 
 [[ ! -e "$BACKUP_PATH" && ! -e "$PARTIAL_PATH" ]] ||

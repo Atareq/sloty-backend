@@ -28,6 +28,7 @@
   - Availability uses the stored HOLD deadline as booking overlap does: a HOLD blocks a slot only while `hold_expires_at > now`.
   - Calendar items and court-utilization occupancy use the same helper (`exclude_logically_expired_holds`). Dashboard summary `hold_bookings` still counts persisted `HOLD` rows, including those not yet cleaned up.
 - **Schedule boundaries**: Availability and court-utilization resolve working hours through `apps.courts.pricing.working_hour_datetime_bounds()`, using timezone-aware half-open `[start, end)` intervals. Adjacent pricing periods do not duplicate a slot; cross-midnight periods retain their next-day end.
+- **Public Court Discovery**: `GET /public/courts/` and `/public/courts/search/` are anonymous, paginated public read models. They include only active Club/Court rows and expose public identity, Arabic location names, address, and the first ordered Court image URL. Date searches reuse `build_court_availability_payload()` with batched weekday/pricing and blocking-booking reads; requested `HH:MM` values match exact available slot starts, never a separately implemented availability rule.
 
 ## Service Layer
 

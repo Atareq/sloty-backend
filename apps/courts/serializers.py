@@ -1,19 +1,62 @@
 from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import extend_schema_field
+from phonenumber_field.serializerfields import PhoneNumberField
 from rest_framework import serializers
 
-from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
+from apps.courts.models import (
+    Court,
+    CourtImage,
+    CourtWorkingHour,
+    CourtWorkingHourPricePeriod,
+)
 from apps.courts.services import (
     get_court_pricing_summary,
     pricing_configured_for_court,
     validate_minimum_deposit_against_lowest_price,
     validate_slot_duration_against_pricing,
 )
+from apps.images.storage import build_public_image_url
 
 
 def validate_positive(value, field_name):
     if value <= 0:
         raise serializers.ValidationError({field_name: "Must be greater than 0."})
+
+
+class ImagePublicSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    display_url = serializers.SerializerMethodField()
+    thumbnail_url = serializers.SerializerMethodField()
+    width = serializers.IntegerField(read_only=True)
+    height = serializers.IntegerField(read_only=True)
+
+    def get_display_url(self, image):
+        return build_public_image_url(image.display_key)
+
+    def get_thumbnail_url(self, image):
+        return build_public_image_url(image.thumbnail_key)
+
+
+class CourtImageSerializer(serializers.ModelSerializer):
+    image = ImagePublicSerializer(read_only=True)
+
+    class Meta:
+        model = CourtImage
+        fields = ("id", "position", "image")
+        read_only_fields = fields
+
+
+class CourtImageUploadSerializer(serializers.Serializer):
+    # The processing service, not DRF's ImageField, performs the canonical
+    # decode/format/size validation and produces both server-owned variants.
+    image = serializers.FileField(write_only=True)
+
+
+class CourtImageReorderSerializer(serializers.Serializer):
+    image_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        allow_empty=True,
+    )
 
 
 class CourtWorkingHourPricePeriodSerializer(serializers.ModelSerializer):
@@ -118,6 +161,7 @@ class CourtWeeklyWorkingHoursSerializer(serializers.Serializer):
 
 
 class CourtListSerializer(serializers.ModelSerializer):
+    phone_number = PhoneNumberField(allow_blank=True, allow_null=True, read_only=True)
     pricing_configured = serializers.SerializerMethodField()
     minimum_slot_price = serializers.SerializerMethodField()
     maximum_slot_price = serializers.SerializerMethodField()
@@ -128,6 +172,7 @@ class CourtListSerializer(serializers.ModelSerializer):
             "id",
             "club",
             "name",
+            "phone_number",
             "sport_type",
             "slot_duration_minutes",
             "is_active",
@@ -156,6 +201,7 @@ class CourtListSerializer(serializers.ModelSerializer):
 
 class CourtDetailSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    phone_number = PhoneNumberField(allow_blank=True, allow_null=True, read_only=True)
     working_hours = CourtWorkingHourSerializer(many=True, read_only=True)
     pricing_configured = serializers.SerializerMethodField()
     minimum_slot_price = serializers.SerializerMethodField()
@@ -167,6 +213,7 @@ class CourtDetailSerializer(serializers.ModelSerializer):
             "id",
             "club",
             "name",
+            "phone_number",
             "sport_type",
             "slot_duration_minutes",
             "is_active",
@@ -199,11 +246,14 @@ class CourtDetailSerializer(serializers.ModelSerializer):
 
 
 class CourtCreateSerializer(serializers.ModelSerializer):
+    phone_number = PhoneNumberField(required=False, allow_blank=True, allow_null=True)
+
     class Meta:
         model = Court
         fields = (
             "id",
             "name",
+            "phone_number",
             "sport_type",
             "slot_duration_minutes",
             "is_active",
@@ -236,10 +286,13 @@ class CourtCreateSerializer(serializers.ModelSerializer):
 
 
 class CourtUpdateSerializer(serializers.ModelSerializer):
+    phone_number = PhoneNumberField(required=False, allow_blank=True, allow_null=True)
+
     class Meta:
         model = Court
         fields = (
             "name",
+            "phone_number",
             "sport_type",
             "slot_duration_minutes",
             "is_active",

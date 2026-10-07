@@ -133,6 +133,34 @@ class CourtAPITests(CourtAPITestCase):
         self.assertIsNone(response.data["minimum_slot_price"])
         self.assertIsNone(response.data["maximum_slot_price"])
 
+    def test_court_can_be_created_with_phone_number(self):
+        self.authenticate_platform_admin()
+
+        response = self.post_court(self.club, phone_number="+201011112222")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        court = Court.objects.get(name="Court 1")
+        self.assertEqual(str(court.phone_number), "+201011112222")
+        self.assertEqual(response.data["phone_number"], "+201011112222")
+
+    def test_court_can_exist_without_phone_number(self):
+        self.authenticate_platform_admin()
+
+        response = self.post_court(self.club)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        court = Court.objects.get(name="Court 1")
+        self.assertIsNone(court.phone_number)
+        self.assertIsNone(response.data["phone_number"])
+
+    def test_court_phone_number_uses_project_validation(self):
+        self.authenticate_platform_admin()
+
+        response = self.post_court(self.club, phone_number="invalid-phone-number")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("phone_number", response.data["field_errors"])
+
     def test_court_response_returns_pricing_summary(self):
         court = self.create_court(self.club, "Priced Court")
         working_hour = CourtWorkingHour.objects.create(
@@ -267,6 +295,39 @@ class CourtAPITests(CourtAPITestCase):
         court.refresh_from_db()
         self.assertEqual(court.name, "Owner Updated Court")
 
+    def test_owner_can_update_court_phone_number(self):
+        court = self.create_court(self.club, "Owner Phone Court")
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.patch(
+            self.court_detail_url(self.club, court),
+            {"phone_number": "+201022223333"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        court.refresh_from_db()
+        self.assertEqual(str(court.phone_number), "+201022223333")
+        self.assertEqual(response.data["phone_number"], "+201022223333")
+
+    def test_court_retrieve_and_list_expose_phone_number(self):
+        court = self.create_court(
+            self.club,
+            "Phone Court",
+            phone_number="+201033334444",
+        )
+        self.authenticate_platform_admin()
+
+        detail_response = self.client.get(self.court_detail_url(self.club, court))
+        list_response = self.client.get(self.court_list_url(self.club))
+
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data["phone_number"], "+201033334444")
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            list_response.data["results"][0]["phone_number"], "+201033334444"
+        )
+
     def test_staff_cannot_update_courts(self):
         court = self.create_court(self.club, "Staff Price Court")
         grant_staff_court(self.staff, court)
@@ -279,6 +340,21 @@ class CourtAPITests(CourtAPITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_staff_cannot_update_court_phone_number(self):
+        court = self.create_court(self.club, "Staff Phone Court")
+        grant_staff_court(self.staff, court)
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.patch(
+            self.court_detail_url(self.club, court),
+            {"phone_number": "+201044445555"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        court.refresh_from_db()
+        self.assertIsNone(court.phone_number)
 
     def test_staff_can_retrieve_only_assigned_court(self):
         assigned_court = self.create_court(self.club, "Assigned Detail Court")

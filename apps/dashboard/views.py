@@ -22,6 +22,8 @@ from apps.dashboard.serializers import (
     DashboardSummaryQuerySerializer,
     DashboardSummaryResponseSerializer,
     PublicAvailabilityResponseSerializer,
+    PublicCourtDiscoveryItemSerializer,
+    PublicCourtSearchQuerySerializer,
     RevenueQuerySerializer,
     RevenueSummarySerializer,
 )
@@ -33,6 +35,9 @@ from apps.dashboard.services import (
     get_dashboard_summary,
     get_public_court_availability,
     get_revenue_summary,
+    public_courts_matching_availability,
+    public_courts_queryset,
+    serialize_public_courts,
 )
 
 
@@ -134,6 +139,56 @@ class PublicCourtAvailabilityAPIView(GenericAPIView):
         )
         serializer = self.response_serializer_class(data)
         return Response(serializer.data)
+
+
+class PublicCourtDiscoveryAPIView(GenericAPIView):
+    permission_classes = (AllowAny,)
+    serializer_class = PublicCourtDiscoveryItemSerializer
+
+    @extend_schema(
+        tags=["Public"],
+        responses=PublicCourtDiscoveryItemSerializer(many=True),
+        description="Paginated active public Courts for homepage discovery.",
+    )
+    def get(self, request, *args, **kwargs):
+        page = self.paginate_queryset(public_courts_queryset())
+        serializer = self.get_serializer(serialize_public_courts(page), many=True)
+        return self.get_paginated_response(serializer.data)
+
+
+class PublicCourtSearchAPIView(GenericAPIView):
+    permission_classes = (AllowAny,)
+    query_serializer_class = PublicCourtSearchQuerySerializer
+    serializer_class = PublicCourtDiscoveryItemSerializer
+
+    @extend_schema(
+        tags=["Public"],
+        parameters=[PublicCourtSearchQuerySerializer],
+        responses=PublicCourtDiscoveryItemSerializer(many=True),
+        description=(
+            "Paginated active public Courts filtered by an optional Court, date, "
+            "and exact available slot starts."
+        ),
+    )
+    def get(self, request, *args, **kwargs):
+        query_serializer = self.query_serializer_class(data=request.query_params)
+        query_serializer.is_valid(raise_exception=True)
+        query = query_serializer.validated_data
+        courts = public_courts_queryset(court_id=query.get("court_id"))
+
+        if query.get("date"):
+            results = public_courts_matching_availability(
+                courts=courts,
+                date=query["date"],
+                requested_times=query.get("times", ()),
+            )
+            page = self.paginate_queryset(results)
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        page = self.paginate_queryset(courts)
+        serializer = self.get_serializer(serialize_public_courts(page), many=True)
+        return self.get_paginated_response(serializer.data)
 
 
 class ClubCalendarAPIView(DashboardAPIView):

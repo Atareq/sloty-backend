@@ -110,6 +110,43 @@ this host:
   using an atomic rename. A failed deploy leaves the previous file in place.
 - Responses use `Cache-Control: no-store`.
 
+## Court Images
+
+Court images use two immutable WebP objects stored in Cloudflare R2 and served
+directly by the public image CDN. PostgreSQL stores only `display_key` and
+`thumbnail_key`; Django derives their public URLs at response serialization and
+never proxies image bytes. A source upload is processed in memory and is never
+stored: JPEG, PNG, and WebP inputs are decoded, orientation-normalized,
+metadata-stripped, transparency-flattened to white, then emitted as:
+
+- **Display** — maximum 1920px long edge, WebP quality 84; use for galleries
+  and detail views.
+- **Thumbnail** — maximum 640px long edge, WebP quality 78; use for lists,
+  cards, and previews.
+
+Authenticated Court image endpoints follow normal Court scope:
+
+```text
+GET/POST    /api/v1/clubs/{club_slug}/courts/{court_id}/images/
+DELETE      /api/v1/clubs/{club_slug}/courts/{court_id}/images/{court_image_id}/
+PUT         /api/v1/clubs/{club_slug}/courts/{court_id}/images/reorder/
+```
+
+POST is multipart with one server-validated `image` file. Reorder accepts a
+complete JSON `image_ids` list and rewrites positions to `0..N-1` atomically.
+Admin/Owner manage images; Staff can read only the courts assigned to them.
+Upload failures never persist a database key for a missing R2 object. Removing
+a CourtImage detaches it first; its universal Image and both R2 objects are
+removed only when no Court bridge remains. Cleanup failure keeps the orphan row
+for a later retry.
+
+Production requires these host-local `prod.env` values (never commit real
+credentials): `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
+`R2_BUCKET_IMAGE`, and `IMAGES_PUBLIC_BASE_URL`. Test storage is faked/mocked and makes no R2
+network calls. Production also needs an R2 bucket, S3-compatible API
+credentials limited to that bucket, and a public Cloudflare/CDN custom-domain
+mapping for the configured base URL. See [the image pipeline guide](docs/image-pipeline.md).
+
 Keep `scripts/deploy-sloty-backend` as the canonical production executable.
 CI SSHs to the VPS and runs that file from the git worktree:
 
@@ -135,8 +172,12 @@ optional JWT and SQL-query-stat settings. `config.settings.production` refuses
 to start unless `DB_ENGINE` is PostgreSQL. Local and test settings still
 accept SQLite. `DEBUG` is read from the environment and is not forced off.
 No email-specific environment variables are currently consumed by this backend.
-Backup-only R2 settings are listed separately in `env/backup.env.example` and
-are not loaded by Gunicorn.
+R2 uses one shared `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, and
+`R2_SECRET_ACCESS_KEY` connection configuration. Bucket names remain
+purpose-specific: application images use `R2_BUCKET_IMAGE` in `prod.env`,
+while PostgreSQL backups use `R2_BUCKET_BACKUP` in `backup.env`. The shared
+credentials require Cloudflare token access to each intended bucket. Backup-only
+settings are not loaded by Gunicorn.
 
 On each trusted operator machine, secure local copies may use the same paths as
 the VPS. These files are private and are never part of Git:

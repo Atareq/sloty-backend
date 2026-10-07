@@ -1,7 +1,22 @@
+import re
 import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+R2_CONFIGURATION_FILES = (
+    ".env.example",
+    "AGENTS.md",
+    "README.md",
+    "apps/images/AGENTS.md",
+    "apps/images/storage.py",
+    "config/settings/base.py",
+    "docs/image-pipeline.md",
+    "env/backup.env.example",
+    "env/prod.env.example",
+    "scripts/backup-sloty-db",
+    "scripts/lib/sloty-db-backup.sh",
+    "scripts/restore-sloty-db",
+)
 
 
 def _env_values(path):
@@ -38,7 +53,18 @@ def test_production_env_template_matches_backend_configuration():
         "SQL_QUERY_STATS_MAX_QUERY_SAMPLES",
         "SQL_QUERY_STATS_MAX_SQL_LENGTH",
     } <= names
-    assert not any(name.startswith("R2_") for name in names)
+    assert {
+        "R2_ENDPOINT",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+        "R2_BUCKET_IMAGE",
+        "IMAGES_PUBLIC_BASE_URL",
+        "IMAGE_MAX_UPLOAD_BYTES",
+        "IMAGE_MAX_WIDTH",
+        "IMAGE_MAX_HEIGHT",
+        "IMAGE_MAX_PIXELS",
+    } <= names
+    assert "R2_BUCKET_BACKUP" not in names
     assert not any(name.startswith("EMAIL_") for name in names)
     assert all(
         values[name] == ""
@@ -52,22 +78,55 @@ def test_backup_env_template_contains_only_r2_configuration():
     names = set(values)
 
     assert names == {
-        "R2_ACCOUNT_ID",
+        "R2_ENDPOINT",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
-        "R2_BUCKET",
-        "R2_ENDPOINT",
+        "R2_BUCKET_BACKUP",
     }
     assert all(
         values[name] == ""
         for name in (
-            "R2_ACCOUNT_ID",
+            "R2_ENDPOINT",
             "R2_ACCESS_KEY_ID",
             "R2_SECRET_ACCESS_KEY",
-            "R2_ENDPOINT",
         )
     )
     assert "API_Token" not in template.read_text(encoding="utf-8")
+
+
+def test_r2_bucket_configuration_is_purpose_specific_and_isolated():
+    sources = {
+        relative_path: (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        for relative_path in R2_CONFIGURATION_FILES
+    }
+    forbidden_names = (
+        "R2_" + "BUCKET",
+        "SLOTY" + "_R2_",
+        "SLOTY" + "_IMAGES_",
+        "SLOTY" + "_IMAGE_",
+        "R2_" + "ACCOUNT_ID",
+    )
+
+    for source in sources.values():
+        for name in forbidden_names:
+            assert not re.search(r"(?<![A-Z_])" + name + r"(?![A-Z_])", source)
+
+    image_storage = sources["apps/images/storage.py"]
+    backup_sources = "\n".join(
+        sources[path]
+        for path in (
+            "scripts/backup-sloty-db",
+            "scripts/lib/sloty-db-backup.sh",
+            "scripts/restore-sloty-db",
+        )
+    )
+    assert "R2_BUCKET_IMAGE" in image_storage
+    assert "R2_BUCKET_BACKUP" not in image_storage
+    assert "R2_BUCKET_BACKUP" in backup_sources
+    assert "R2_BUCKET_IMAGE" not in backup_sources
+    for name in ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
+        assert name in image_storage
+        assert name in backup_sources
 
 
 def test_service_and_deploy_script_load_only_new_production_env():

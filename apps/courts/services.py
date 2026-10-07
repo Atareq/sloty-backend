@@ -1,10 +1,24 @@
+import logging
+from uuid import uuid4
+
 from django.db import transaction
+from django.db.models import Max
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers, status
 
 from apps.common.exceptions import SlotyAPIException
-from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
+from apps.courts.models import (
+    Court,
+    CourtImage,
+    CourtWorkingHour,
+    CourtWorkingHourPricePeriod,
+)
 from apps.courts.pricing import is_valid_period_bounds, normalized_pricing_periods
+from apps.images.models import Image
+from apps.images.processing import ImageProcessingError, process_image
+from apps.images.storage import ImageStorageError, get_image_storage
+
+logger = logging.getLogger(__name__)
 
 
 def format_time(value):
@@ -292,3 +306,150 @@ def replace_weekly_working_hours(*, court, working_hours):
                 )
         CourtWorkingHourPricePeriod.objects.bulk_create(periods)
     return saved
+
+
+def _image_keys():
+    asset_id = uuid4()
+    return (
+        f"images/{asset_id}/display.webp",
+        f"images/{asset_id}/thumbnail.webp",
+    )
+
+
+def _cleanup_uploaded_objects(storage, keys):
+    for key in keys:
+        try:
+            storage.delete_image_object(key)
+        except ImageStorageError:
+            logger.exception("Image cleanup failed for key %s.", key)
+
+
+def _image_storage_unavailable():
+    return SlotyAPIException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        code="IMAGE_STORAGE_UNAVAILABLE",
+        message=_("Image storage is temporarily unavailable."),
+    )
+
+
+def create_court_image(*, court, uploaded_file):
+    """Process one source upload, write immutable variants, then persist its bridge."""
+    try:
+        processed = process_image(uploaded_file)
+    except ImageProcessingError as exc:
+        raise SlotyAPIException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code=exc.code,
+            message=_(exc.message),
+        ) from exc
+
+    display_key, thumbnail_key = _image_keys()
+    try:
+        storage = get_image_storage()
+    except ImageStorageError as exc:
+        raise _image_storage_unavailable() from exc
+    try:
+        storage.upload_image_object(key=display_key, content=processed.display_bytes)
+    except ImageStorageError as exc:
+        raise _image_storage_unavailable() from exc
+
+    try:
+        storage.upload_image_object(
+            key=thumbnail_key,
+            content=processed.thumbnail_bytes,
+        )
+    except ImageStorageError as exc:
+        _cleanup_uploaded_objects(storage, (display_key,))
+        raise _image_storage_unavailable() from exc
+
+    try:
+        with transaction.atomic():
+            locked_court = Court.objects.select_for_update().get(pk=court.pk)
+            max_position = CourtImage.objects.filter(court=locked_court).aggregate(
+                max_position=Max("position")
+            )["max_position"]
+            next_position = 0 if max_position is None else max_position + 1
+            image = Image.objects.create(
+                display_key=display_key,
+                thumbnail_key=thumbnail_key,
+                width=processed.width,
+                height=processed.height,
+            )
+            return CourtImage.objects.create(
+                court=locked_court,
+                image=image,
+                position=next_position,
+            )
+    except Exception:
+        _cleanup_uploaded_objects(storage, (display_key, thumbnail_key))
+        raise
+
+
+def reorder_court_images(*, court, image_ids):
+    """Atomically apply a complete CourtImage ID ordering as contiguous positions."""
+    if len(image_ids) != len(set(image_ids)):
+        raise SlotyAPIException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_COURT_IMAGE_ORDER",
+            message=_("Each court image may appear only once in the order."),
+        )
+
+    with transaction.atomic():
+        locked_court = Court.objects.select_for_update().get(pk=court.pk)
+        court_images = list(
+            CourtImage.objects.select_for_update()
+            .filter(court=locked_court)
+            .order_by("id")
+        )
+        by_id = {court_image.id: court_image for court_image in court_images}
+        if set(image_ids) != set(by_id):
+            raise SlotyAPIException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="INVALID_COURT_IMAGE_ORDER",
+                message=_("The order must include exactly this court's images."),
+            )
+        ordered = [by_id[image_id] for image_id in image_ids]
+        for position, court_image in enumerate(ordered):
+            court_image.position = position
+        if ordered:
+            CourtImage.objects.bulk_update(ordered, ["position"])
+    return ordered
+
+
+def delete_court_image(*, court, court_image):
+    """Detach one Court image and clean a now-orphaned universal image when safe."""
+    with transaction.atomic():
+        locked_court = Court.objects.select_for_update().get(pk=court.pk)
+        locked_court_image = (
+            CourtImage.objects.select_for_update()
+            .select_related("image")
+            .get(pk=court_image.pk, court=locked_court)
+        )
+        image_id = locked_court_image.image_id
+        locked_court_image.delete()
+
+    return cleanup_orphan_image(image_id=image_id)
+
+
+def cleanup_orphan_image(*, image_id):
+    """Remove a no-longer-bridged image's objects and row; safe to retry."""
+    # The image row is locked while its remaining known bridges are checked and
+    # its immutable objects are removed.  A storage failure intentionally leaves
+    # the unattached Image row in place for a later retry.
+    with transaction.atomic():
+        image = Image.objects.select_for_update().get(pk=image_id)
+        if image.court_images.exists():
+            return False
+        try:
+            storage = get_image_storage()
+        except ImageStorageError:
+            logger.exception("Orphan image cleanup cannot initialize image storage.")
+            return False
+        try:
+            storage.delete_image_object(image.display_key)
+            storage.delete_image_object(image.thumbnail_key)
+        except ImageStorageError:
+            logger.exception("Orphan image cleanup failed for image %s.", image.pk)
+            return False
+        image.delete()
+    return True
