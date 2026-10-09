@@ -1,7 +1,19 @@
+from collections import defaultdict
 from datetime import timedelta
 from decimal import Decimal
 
-from django.db.models import Count, DecimalField, F, Min, Q, Sum, Value
+from django.conf import settings
+from django.db.models import (
+    Count,
+    DecimalField,
+    F,
+    Min,
+    OuterRef,
+    Q,
+    Subquery,
+    Sum,
+    Value,
+)
 from django.db.models.functions import Coalesce, TruncDate, TruncMonth, TruncWeek
 from django.utils import timezone
 from rest_framework import serializers
@@ -17,8 +29,9 @@ from apps.bookings.identity import (
 )
 from apps.bookings.models import Booking
 from apps.bookings.services import blocking_booking_queryset
+from apps.common.egypt_locations import get_location_payload
 from apps.common.weekdays import to_sloty_weekday
-from apps.courts.models import CourtWorkingHour
+from apps.courts.models import Court, CourtImage, CourtWorkingHour
 from apps.courts.pricing import working_hour_datetime_bounds
 from apps.dashboard.authorization import (
     can_access_court,
@@ -30,6 +43,7 @@ from apps.dashboard.authorization import (
     scoped_dashboard_settlements,
     scoped_dashboard_transactions,
 )
+from apps.images.storage import build_public_image_url
 from apps.profiles.models import Profile
 from apps.transactions.models import Transaction
 from apps.transactions.services import (
@@ -38,6 +52,7 @@ from apps.transactions.services import (
 )
 
 ZERO = Decimal("0.00")
+UNSET = object()
 
 
 def money(value):
@@ -52,15 +67,18 @@ def money_sum(expression, *, filter=None):
     )
 
 
-def build_court_availability_payload(*, club, court, date):
-    working_hour = (
-        CourtWorkingHour.objects.filter(
-            court=court,
-            weekday=to_sloty_weekday(date.weekday()),
+def build_court_availability_payload(
+    *, club, court, date, working_hour=UNSET, blocking_bookings=UNSET
+):
+    if working_hour is UNSET:
+        working_hour = (
+            CourtWorkingHour.objects.filter(
+                court=court,
+                weekday=to_sloty_weekday(date.weekday()),
+            )
+            .prefetch_related("pricing_periods")
+            .first()
         )
-        .prefetch_related("pricing_periods")
-        .first()
-    )
     base_response = {
         "club": {
             "id": club.id,
@@ -91,11 +109,11 @@ def build_court_availability_payload(*, club, court, date):
     base_response["is_closed"] = False
     slot_delta = timedelta(minutes=court.slot_duration_minutes)
 
-    blocking_bookings = list(
-        blocking_booking_queryset(court, opens_at, closes_at).order_by(
-            "start_time", "id"
-        )
-    )
+    if blocking_bookings is UNSET:
+        blocking_bookings = blocking_booking_queryset(
+            court, opens_at, closes_at
+        ).order_by("start_time", "id")
+    blocking_bookings = list(blocking_bookings)
 
     # Only configured intervals produce slots; gaps are closed time.
     for _period, period_start, period_end in pricing_intervals:
@@ -171,6 +189,129 @@ def get_public_court_availability(*, club, court, date):
         for slot in availability["slots"]
     ]
     return availability
+
+
+def public_courts_queryset(*, court_id=None):
+    primary_image_key = (
+        CourtImage.objects.filter(court_id=OuterRef("pk"))
+        .order_by("position", "id")
+        .values("image__display_key")[:1]
+    )
+    queryset = (
+        Court.objects.filter(club__is_active=True, is_active=True)
+        .select_related("club")
+        .annotate(public_image_display_key=Subquery(primary_image_key))
+        .order_by("club__name", "name", "id")
+    )
+    if court_id is not None:
+        queryset = queryset.filter(pk=court_id)
+    return queryset
+
+
+def _arabic_location_names():
+    location_payload = get_location_payload()
+    governorates = {
+        item["code"]: item["name_ar"] for item in location_payload["governorates"]
+    }
+    cities = {
+        city["code"]: city["name_ar"]
+        for governorate in location_payload["governorates"]
+        for city in governorate["cities"]
+    }
+    return governorates, cities
+
+
+def serialize_public_court(*, court, matching_times=None, location_names=None):
+    governorates, cities = location_names or _arabic_location_names()
+    image_url = None
+    if court.public_image_display_key and settings.IMAGES_PUBLIC_BASE_URL:
+        image_url = build_public_image_url(court.public_image_display_key)
+
+    data = {
+        "court_id": court.id,
+        "court_name": court.name,
+        "club_slug": court.club.slug,
+        "club_name": court.club.name,
+        "governorate": governorates.get(court.club.governorate),
+        "city": cities.get(court.club.city),
+        "address": court.club.address or None,
+        "image_url": image_url,
+    }
+    if matching_times is not None:
+        data["matching_times"] = matching_times
+    return data
+
+
+def serialize_public_courts(courts):
+    location_names = _arabic_location_names()
+    return [
+        serialize_public_court(court=court, location_names=location_names)
+        for court in courts
+    ]
+
+
+def public_courts_matching_availability(*, courts, date, requested_times):
+    """Return public Courts matching a date/time query with bounded queries."""
+    courts = list(courts)
+    if not courts:
+        return []
+
+    court_ids = [court.id for court in courts]
+    working_hours = CourtWorkingHour.objects.filter(
+        court_id__in=court_ids,
+        weekday=to_sloty_weekday(date.weekday()),
+    ).prefetch_related("pricing_periods")
+    working_hour_by_court_id = {hour.court_id: hour for hour in working_hours}
+
+    bounds_by_court_id = {}
+    for court in courts:
+        working_hour = working_hour_by_court_id.get(court.id)
+        if working_hour is None:
+            continue
+        bounds = working_hour_datetime_bounds(working_hour, date)
+        if bounds is not None:
+            bounds_by_court_id[court.id] = bounds[:2]
+
+    bookings_by_court_id = defaultdict(list)
+    if bounds_by_court_id:
+        earliest_open = min(bounds[0] for bounds in bounds_by_court_id.values())
+        latest_close = max(bounds[1] for bounds in bounds_by_court_id.values())
+        blocking_bookings = exclude_logically_expired_holds(
+            Booking.objects.filter(
+                court_id__in=bounds_by_court_id,
+                status__in=Booking.BLOCKING_STATUSES,
+                end_time__gt=earliest_open,
+                start_time__lt=latest_close,
+            ).order_by("court_id", "start_time", "id")
+        )
+        for booking in blocking_bookings:
+            bookings_by_court_id[booking.court_id].append(booking)
+
+    location_names = _arabic_location_names()
+    results = []
+    for court in courts:
+        availability = build_court_availability_payload(
+            club=court.club,
+            court=court,
+            date=date,
+            working_hour=working_hour_by_court_id.get(court.id),
+            blocking_bookings=bookings_by_court_id[court.id],
+        )
+        available_times = {
+            slot["start_time"].strftime("%H:%M")
+            for slot in availability["slots"]
+            if slot["is_available"]
+        }
+        matching_times = [time for time in requested_times if time in available_times]
+        if matching_times or (not requested_times and available_times):
+            results.append(
+                serialize_public_court(
+                    court=court,
+                    matching_times=matching_times if requested_times else None,
+                    location_names=location_names,
+                )
+            )
+    return results
 
 
 def get_calendar_items(*, access, date_from, date_to, court=None, status=None):

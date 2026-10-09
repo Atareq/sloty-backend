@@ -10,6 +10,7 @@ from rest_framework.mixins import (
     RetrieveModelMixin,
     UpdateModelMixin,
 )
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
@@ -18,17 +19,23 @@ from apps.common.authorization.permissions import SlotyBasePermission
 from apps.common.authorization.scopes import ResourceScope
 from apps.common.exceptions import SlotyAPIException
 from apps.courts.authorization import can_manage_working_hours
-from apps.courts.models import Court, CourtWorkingHour
+from apps.courts.models import Court, CourtImage, CourtWorkingHour
 from apps.courts.serializers import (
     CourtCreateSerializer,
     CourtDetailSerializer,
+    CourtImageReorderSerializer,
+    CourtImageSerializer,
+    CourtImageUploadSerializer,
     CourtListSerializer,
     CourtUpdateSerializer,
     CourtWeeklyWorkingHoursSerializer,
     CourtWorkingHourSerializer,
 )
 from apps.courts.services import (
+    create_court_image,
+    delete_court_image,
     pricing_configured_for_court,
+    reorder_court_images,
     replace_weekly_working_hours,
     serialize_weekly_working_hours,
 )
@@ -240,3 +247,70 @@ class CourtWeeklyWorkingHoursViewSet(SlotyScopedResourceMixin, GenericViewSet):
         )
         court = self.get_scoped_queryset().get(pk=court.pk)
         return Response(self.build_response_data(court))
+
+
+@extend_schema_view(
+    list=extend_schema(tags=["Courts"], responses=CourtImageSerializer),
+    create=extend_schema(
+        tags=["Courts"],
+        request=CourtImageUploadSerializer,
+        responses=CourtImageSerializer,
+    ),
+    destroy=extend_schema(tags=["Courts"], responses={204: None}),
+    reorder=extend_schema(
+        tags=["Courts"],
+        request=CourtImageReorderSerializer,
+        responses=CourtImageSerializer(many=True),
+    ),
+)
+class CourtImageViewSet(SlotyScopedResourceMixin, GenericViewSet):
+    """Court-scoped image management; image bytes are never served by Django."""
+
+    authorization_model = Court
+    authorization_scope = ResourceScope.COURT
+    permission_classes = (SlotyBasePermission,)
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
+    pagination_class = None
+    http_method_names = ("get", "post", "delete", "put", "head", "options")
+
+    def get_court(self):
+        return get_object_or_404(self.get_queryset(), pk=self.kwargs["court_id"])
+
+    def get_court_image(self, court):
+        return get_object_or_404(
+            CourtImage.objects.select_related("image").filter(court=court),
+            pk=self.kwargs["court_image_id"],
+        )
+
+    def list(self, request, *args, **kwargs):
+        court = self.get_court()
+        court_images = CourtImage.objects.filter(court=court).select_related("image")
+        return Response(CourtImageSerializer(court_images, many=True).data)
+
+    def create(self, request, *args, **kwargs):
+        court = self.get_court()
+        serializer = CourtImageUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        court_image = create_court_image(
+            court=court,
+            uploaded_file=serializer.validated_data["image"],
+        )
+        court_image = CourtImage.objects.select_related("image").get(pk=court_image.pk)
+        return Response(
+            CourtImageSerializer(court_image).data, status=status.HTTP_201_CREATED
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        court = self.get_court()
+        delete_court_image(court=court, court_image=self.get_court_image(court))
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def reorder(self, request, *args, **kwargs):
+        court = self.get_court()
+        serializer = CourtImageReorderSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reordered = reorder_court_images(
+            court=court,
+            image_ids=serializer.validated_data["image_ids"],
+        )
+        return Response(CourtImageSerializer(reordered, many=True).data)

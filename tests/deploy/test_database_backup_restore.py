@@ -130,11 +130,10 @@ esac
             "DB_HOST": "127.0.0.1",
             "DB_PORT": "5432",
             "DB_SSLMODE": "",
-            "R2_ACCOUNT_ID": "account123",
             "R2_ACCESS_KEY_ID": "access-key-canary",
             "R2_SECRET_ACCESS_KEY": "r2-secret-canary",
-            "R2_BUCKET": "sloty-prod-backups",
-            "R2_ENDPOINT": "",
+            "R2_BUCKET_BACKUP": "sloty-prod-backups",
+            "R2_ENDPOINT": "https://account123.r2.cloudflarestorage.com",
             "STUB_EXPECTED_R2_SECRET": "r2-secret-canary",
             "STUB_REMOTE_SIZE": str(len(ARCHIVE_CONTENT)),
             "STUB_REMOTE_NAME": BACKUP_NAME,
@@ -181,6 +180,22 @@ def test_backup_validates_env_and_commands_without_printing_credentials(harness)
     assert missing_env.returncode != 0
     assert "R2_SECRET_ACCESS_KEY" in missing_env.stderr
     assert "r2-secret-canary" not in missing_env.stdout + missing_env.stderr
+
+    missing_bucket = _run(
+        BACKUP_SCRIPT,
+        harness,
+        env_overrides={"R2_BUCKET_BACKUP": ""},
+    )
+    assert missing_bucket.returncode != 0
+    assert "R2_BUCKET_BACKUP" in missing_bucket.stderr
+
+    missing_endpoint = _run(
+        BACKUP_SCRIPT,
+        harness,
+        env_overrides={"R2_ENDPOINT": ""},
+    )
+    assert missing_endpoint.returncode != 0
+    assert "R2_ENDPOINT" in missing_endpoint.stderr
 
     empty_path = harness["tmp_path"] / "empty-path"
     empty_path.mkdir()
@@ -449,11 +464,10 @@ def test_backup_systemd_timer_installer_and_templates_are_repository_owned():
     )
     assert "OnCalendar=*-*-* 09:00:00 Africa/Cairo" in timer
     assert "Persistent=true" in timer
-    assert "R2_ACCOUNT_ID=" in backup_template
+    assert "R2_ENDPOINT=" in backup_template
     assert "R2_ACCESS_KEY_ID=" in backup_template
     assert "R2_SECRET_ACCESS_KEY=" in backup_template
-    assert "R2_BUCKET=sloty-prod-backups" in backup_template
-    assert "R2_ENDPOINT=" in backup_template
+    assert "R2_BUCKET_BACKUP=sloty-prod-backups" in backup_template
     assert "API_Token" not in backup_template
     assert "rclone" in installer
     assert "PACKAGES+=(rclone)" in installer

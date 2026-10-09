@@ -234,4 +234,22 @@ BACKEND_RELEASE_METADATA_PATH = os.environ.get(
     "/etc/sloty/backend-release.json",
 )
 
+# Public court-image delivery is served directly by Cloudflare/R2.  These
+# settings intentionally do not configure Django media storage or proxy bytes.
+R2_ENDPOINT = os.environ.get("R2_ENDPOINT", "").strip()
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "").strip()
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "").strip()
+R2_BUCKET_IMAGE = os.environ.get("R2_BUCKET_IMAGE", "").strip()
+IMAGES_PUBLIC_BASE_URL = (
+    os.environ.get("IMAGES_PUBLIC_BASE_URL", "").strip().rstrip("/")
+)
+
+# Upload limits apply to decoded source images before the two permanent WebP
+# variants are generated.  They are configurable for operations but centralized
+# so API and processing code do not carry divergent magic numbers.
+IMAGE_MAX_UPLOAD_BYTES = env_int("IMAGE_MAX_UPLOAD_BYTES", 10 * 1024 * 1024)
+IMAGE_MAX_WIDTH = env_int("IMAGE_MAX_WIDTH", 8192)
+IMAGE_MAX_HEIGHT = env_int("IMAGE_MAX_HEIGHT", 8192)
+IMAGE_MAX_PIXELS = env_int("IMAGE_MAX_PIXELS", 40_000_000)
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

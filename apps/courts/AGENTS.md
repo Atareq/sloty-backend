@@ -31,6 +31,9 @@
 ## Important Models & Fields
 
 - [`Court`](file:///home/tarek/Desktop/sloty/sloty-backend/apps/courts/models.py):
+  - `phone_number`: Optional court contact number. Use the shared
+    `django-phonenumber-field` model/serializer fields; it is not an identity
+    field.
   - `slot_duration_minutes`: Grid interval for slots (default 60).
   - `requires_digital_payment_reference`: Policy flag requiring reference for digital payments.
   - `minimum_deposit`: Minimum required first payment and late-cancellation retained amount. Must not exceed the court's lowest working-hour price once pricing exists (see Domain Invariants).
@@ -45,7 +48,21 @@
 
 ## Court Images
 
-`CourtImage` is the explicit bridge from Court to `images.Image`. It uses `SlotyCreatedModel`; its `position` is the sole arrangement source of truth and retrieval is ordered by `(position, id)`. Attached images use `PROTECT`; deleting a bridge detaches only and does not delete the Image.
+`CourtImage` is the explicit bridge from Court to `images.Image`. It uses `SlotyCreatedModel`; its `position` is the sole arrangement source of truth and retrieval is ordered by `(position, id)`. Attached images use `PROTECT`.
+
+The Court-owned image API is `/api/v1/clubs/{club_slug}/courts/{court_id}/images/`
+with multipart POST (`image` only), ordered GET, relation DELETE, and PUT to
+`images/reorder/` with a complete `image_ids` list. It is Court-scoped through
+the Authorization Spine: Admin/Owner may upload, delete, and reorder; Staff
+may read assigned-court images only. The response derives public display and
+thumbnail URLs from `Image` keys; Django never streams image bytes.
+
+`create_court_image()` appends under a locked Court after successful R2 uploads
+and atomic `Image`/`CourtImage` persistence. Deletion always removes the bridge;
+if the Image has no remaining Court bridge, it deletes both immutable objects
+and only then deletes the orphan row. A storage cleanup failure leaves the
+orphan Image for retry through `cleanup_orphan_image()` and never harms an
+image still bridged elsewhere.
 
 ## Service Layer
 

@@ -1,10 +1,11 @@
-from datetime import time, timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
 import yaml
 from django.core.management import call_command
 from django.db import connection
+from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
@@ -15,7 +16,13 @@ from apps.accounts.models import User
 from apps.audit.models import AuditLog
 from apps.bookings.models import Booking
 from apps.clubs.models import Club
-from apps.courts.models import Court, CourtWorkingHour, CourtWorkingHourPricePeriod
+from apps.courts.models import (
+    Court,
+    CourtImage,
+    CourtWorkingHour,
+    CourtWorkingHourPricePeriod,
+)
+from apps.images.models import Image
 from apps.profiles.models import Profile, StaffProfile
 from apps.settlements.models import Settlement, SettlementTransaction
 from apps.transactions.models import Transaction
@@ -428,6 +435,170 @@ class AvailabilityTests(DashboardDataMixin, DashboardAPITestCase):
                 self.availability_url(self.club, free_court), {"date": "2026-07-06"}
             )
         self.assertTrue(all(slot["available"] for slot in historical_day.data["slots"]))
+
+
+@override_settings(IMAGES_PUBLIC_BASE_URL="https://images.sloty.test")
+class PublicCourtDiscoveryTests(DashboardAPITestCase):
+    def setUp(self):
+        self.club = self.create_club("Discovery Club", "discovery-club")
+        self.court = self.create_court(self.club, "Alpha Court")
+        self.create_working_hours(self.court)
+
+    def discovery_url(self):
+        return reverse("public-court-discovery")
+
+    def search_url(self):
+        return reverse("public-court-search")
+
+    def create_image(self, court, *, key, position):
+        image = Image.objects.create(
+            display_key=f"images/{key}/display.webp",
+            thumbnail_key=f"images/{key}/thumbnail.webp",
+            width=1200,
+            height=800,
+        )
+        return CourtImage.objects.create(court=court, image=image, position=position)
+
+    def test_discovery_is_anonymous_paginated_public_and_stably_ordered(self):
+        self.create_image(self.court, key="first", position=1)
+        self.create_image(self.court, key="later", position=2)
+        second = self.create_court(self.club, "Bravo Court")
+        self.create_working_hours(second)
+        inactive_court = self.create_court(self.club, "Hidden Court", is_active=False)
+        inactive_club = self.create_club("Hidden Club", "hidden-club", is_active=False)
+        self.create_court(inactive_club, "Hidden Club Court")
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get(self.discovery_url(), {"page": 1})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(queries), 2)
+        self.assertEqual(response.data["count"], 2)
+        self.assertIsNone(response.data["next"])
+        self.assertEqual(response.data["previous"], None)
+        self.assertEqual(
+            [item["court_name"] for item in response.data["results"]],
+            ["Alpha Court", "Bravo Court"],
+        )
+        item = response.data["results"][0]
+        self.assertEqual(
+            set(item),
+            {
+                "court_id",
+                "court_name",
+                "club_slug",
+                "club_name",
+                "governorate",
+                "city",
+                "address",
+                "image_url",
+            },
+        )
+        self.assertEqual(item["club_slug"], self.club.slug)
+        self.assertEqual(item["governorate"], "أسيوط")
+        self.assertEqual(item["city"], "مركز أسيوط")
+        self.assertEqual(
+            item["image_url"], "https://images.sloty.test/images/first/display.webp"
+        )
+        self.assertNotIn(
+            inactive_court.id,
+            {item["court_id"] for item in response.data["results"]},
+        )
+
+    def test_search_court_only_hides_inactive_or_unknown_courts(self):
+        active = self.client.get(self.search_url(), {"court_id": self.court.id})
+        self.assertEqual(active.status_code, status.HTTP_200_OK)
+        self.assertEqual(active.data["count"], 1)
+        self.assertEqual(active.data["results"][0]["court_id"], self.court.id)
+
+        self.court.is_active = False
+        self.court.save(update_fields=["is_active"])
+        hidden = self.client.get(self.search_url(), {"court_id": self.court.id})
+        unknown = self.client.get(self.search_url(), {"court_id": 999999})
+        self.assertEqual(hidden.status_code, status.HTTP_200_OK)
+        self.assertEqual(unknown.status_code, status.HTTP_200_OK)
+        self.assertEqual(hidden.data["results"], [])
+        self.assertEqual(unknown.data["results"], [])
+
+    def test_discovery_uses_standard_pagination_without_repeating_courts(self):
+        for index in range(20):
+            self.create_court(self.club, f"Court {index:02}")
+
+        first_page = self.client.get(self.discovery_url(), {"page": 1})
+        last_page = self.client.get(self.discovery_url(), {"page": 2})
+
+        self.assertEqual(first_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(last_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_page.data["count"], 21)
+        self.assertIsNotNone(first_page.data["next"])
+        self.assertIsNone(last_page.data["next"])
+        self.assertEqual(
+            set(item["court_id"] for item in first_page.data["results"])
+            & set(item["court_id"] for item in last_page.data["results"]),
+            set(),
+        )
+
+    def test_discovery_returns_null_image_url_when_the_cdn_is_not_configured(self):
+        self.create_image(self.court, key="without-cdn", position=0)
+
+        with override_settings(IMAGES_PUBLIC_BASE_URL=""):
+            response = self.client.get(self.discovery_url())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["results"][0]["image_url"])
+
+    def test_search_reuses_exact_slot_availability_and_returns_requested_matches(self):
+        today = timezone.localdate()
+        second = self.create_court(
+            self.club,
+            "Ninety Minute Court",
+            slot_duration_minutes=90,
+        )
+        self.create_working_hours(second, opens_at=time(8), closes_at=time(11))
+        booking_start = timezone.make_aware(
+            datetime.combine(today, time(10)), timezone.get_current_timezone()
+        )
+        self.create_booking(
+            self.court,
+            start_time=booking_start,
+            end_time=booking_start + timedelta(hours=1),
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get(
+                self.search_url(),
+                {"date": today.isoformat(), "times": "09:00,10:00,11:00"},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertLessEqual(len(queries), 4)
+        results = {item["court_id"]: item for item in response.data["results"]}
+        self.assertEqual(results[self.court.id]["matching_times"], ["09:00", "11:00"])
+        self.assertNotIn(second.id, results)
+
+        day_only = self.client.get(self.search_url(), {"date": today.isoformat()})
+        self.assertEqual(day_only.status_code, status.HTTP_200_OK)
+        day_only_results = {item["court_id"]: item for item in day_only.data["results"]}
+        self.assertIn(self.court.id, day_only_results)
+        self.assertNotIn("matching_times", day_only_results[self.court.id])
+
+    def test_search_rejects_invalid_public_parameters(self):
+        today = timezone.localdate().isoformat()
+        cases = (
+            {"court_id": "not-an-id"},
+            {"date": today, "times": "09:00,10:00,11:00,12:00,13:00,14:00"},
+            {"date": today, "times": "9:00"},
+            {"times": "10:00"},
+            {"date": (timezone.localdate() + timedelta(days=31)).isoformat()},
+        )
+        for params in cases:
+            with self.subTest(params=params):
+                response = self.client.get(self.search_url(), params)
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assert_field_error(
+                    response,
+                    next(iter(response.data["field_errors"])),
+                )
 
 
 class CalendarTests(DashboardDataMixin, DashboardAPITestCase):

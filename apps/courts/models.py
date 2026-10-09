@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models, transaction
+from phonenumber_field.modelfields import PhoneNumberField
 
 from apps.clubs.models import Club
 from apps.common.models import SlotyCreatedModel, SlotyTimeStampedModel
@@ -28,6 +29,7 @@ class Court(SlotyTimeStampedModel):
         ],
     )
     name = models.CharField(max_length=255)
+    phone_number = PhoneNumberField(blank=True, null=True)
     sport_type = models.CharField(
         max_length=32,
         choices=SportType.choices,

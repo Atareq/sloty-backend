@@ -94,7 +94,7 @@ if [[ -n "$REMOTE_NAME" ]]; then
 
   printf 'Downloading selected R2 backup...\n'
   : > "$PARTIAL_PATH"
-  sloty_rclone copyto "sloty:${R2_BUCKET}/db/${REMOTE_NAME}" "$PARTIAL_PATH"
+  sloty_rclone copyto "sloty:${R2_BUCKET_BACKUP}/db/${REMOTE_NAME}" "$PARTIAL_PATH"
   printf 'Validating backup...\n'
   pg_restore --list "$PARTIAL_PATH" >/dev/null
   mv -- "$PARTIAL_PATH" "$DOWNLOADED_PATH"

@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, time, timedelta
 
 from django.utils import timezone
@@ -78,6 +79,37 @@ class AccessScopedCourtMixin:
 
 class AvailabilityQuerySerializer(serializers.Serializer):
     date = serializers.DateField(required=True)
+
+
+class PublicCourtSearchQuerySerializer(serializers.Serializer):
+    court_id = serializers.IntegerField(required=False, min_value=1)
+    date = serializers.DateField(required=False)
+    times = serializers.CharField(required=False, allow_blank=False)
+
+    def validate_date(self, value):
+        today = timezone.localdate()
+        if value < today or value > today + timedelta(days=30):
+            raise serializers.ValidationError(
+                "Date must be between today and 30 days from today."
+            )
+        return value
+
+    def validate_times(self, value):
+        times = value.split(",")
+        if len(times) > 5 or any(
+            not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", item) for item in times
+        ):
+            raise serializers.ValidationError(
+                "times must contain at most five HH:MM values."
+            )
+        if len(set(times)) != len(times):
+            raise serializers.ValidationError("times must not contain duplicates.")
+        return sorted(times)
+
+    def validate(self, attrs):
+        if attrs.get("times") and not attrs.get("date"):
+            raise serializers.ValidationError({"times": "times requires a date."})
+        return attrs
 
 
 class CalendarQuerySerializer(AccessScopedCourtMixin, serializers.Serializer):
@@ -370,6 +402,21 @@ class PublicAvailabilityResponseSerializer(serializers.Serializer):
     closes_at = serializers.TimeField(allow_null=True)
     slot_duration_minutes = serializers.IntegerField()
     slots = PublicAvailabilitySlotSerializer(many=True)
+
+
+class PublicCourtDiscoveryItemSerializer(serializers.Serializer):
+    court_id = serializers.IntegerField(min_value=1)
+    court_name = serializers.CharField()
+    club_slug = serializers.CharField()
+    club_name = serializers.CharField()
+    governorate = serializers.CharField(allow_null=True)
+    city = serializers.CharField(allow_null=True)
+    address = serializers.CharField(allow_null=True)
+    image_url = serializers.URLField(allow_null=True)
+    matching_times = serializers.ListField(
+        child=serializers.RegexField(r"^(?:[01]\d|2[0-3]):[0-5]\d$"),
+        required=False,
+    )
 
 
 class CalendarItemSerializer(serializers.Serializer):

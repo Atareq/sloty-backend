@@ -48,11 +48,10 @@ sloty_require_backup_database() {
 }
 
 sloty_configure_rclone() {
-  sloty_require_env R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET
-  [[ "$R2_BUCKET" == "sloty-prod-backups" ]] ||
-    sloty_die "R2_BUCKET must be sloty-prod-backups"
+  sloty_require_env R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET_BACKUP
+  [[ "$R2_BUCKET_BACKUP" == "sloty-prod-backups" ]] ||
+    sloty_die "R2_BUCKET_BACKUP must be sloty-prod-backups"
 
-  R2_ENDPOINT="${R2_ENDPOINT:-https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com}"
   [[ "$R2_ENDPOINT" == https://* ]] ||
     sloty_die "R2_ENDPOINT must use HTTPS"
 
