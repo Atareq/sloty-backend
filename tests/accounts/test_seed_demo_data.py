@@ -1,5 +1,5 @@
-from django.core.management import call_command
-from django.test import TestCase
+from django.core.management import CommandError, call_command
+from django.test import TestCase, override_settings
 
 from apps.accounts.models import User
 from apps.accounts.services import find_orphan_business_users
@@ -70,6 +70,13 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertTrue(
             SettlementTransaction.objects.filter(settlement__club=club).exists()
         )
+
+    @override_settings(SETTINGS_MODULE="config.settings.production")
+    def test_seed_demo_data_refuses_production_settings(self):
+        with self.assertRaises(CommandError):
+            self.run_seed_command()
+
+        self.assertFalse(User.objects.exists())
 
     def test_seed_demo_data_is_idempotent(self):
         self.run_seed_command()
