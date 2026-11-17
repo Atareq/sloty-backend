@@ -22,7 +22,8 @@ PASSWORD = "test-pass-123"
 def _phone_seq_start():
     worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
     digits = "".join(ch for ch in worker if ch.isdigit()) or "0"
-    return 1 + int(digits) * 1_000_000
+    # Seven digits follow +20109, so this stride fits up to 99 workers.
+    return 1 + int(digits) * 100_000
 
 
 _PHONE_SEQ = itertools.count(_phone_seq_start())
