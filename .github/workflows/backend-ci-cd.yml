@@ -64,9 +64,61 @@ jobs:
         run: |
           pytest
 
+  postgresql:
+    name: PostgreSQL Concurrency
+    runs-on: ubuntu-latest
+
+    # SQLite ignores select_for_update, so the row-lock tests only prove
+    # anything against PostgreSQL. Matches the production major version.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: sloty
+          POSTGRES_USER: sloty
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sloty"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      SECRET_KEY: ci-only-secret-key
+      DB_ENGINE: postgresql
+      DB_NAME: sloty
+      DB_USER: sloty
+      DB_PASSWORD: ci-only-password
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/dev.txt
+
+      - name: Run PostgreSQL concurrency tests
+        run: |
+          pytest tests/test_postgresql_concurrency.py
+
   prepare-release:
     name: Calculate Production Release
-    needs: test
+    needs:
+      - test
+      - postgresql
 
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
 
