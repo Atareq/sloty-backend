@@ -62,7 +62,7 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest
+          pytest -n auto
 
   postgresql:
     name: PostgreSQL Concurrency
