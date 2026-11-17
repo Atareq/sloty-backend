@@ -77,6 +77,9 @@ BOOKING_COMPLETION_REQUIRES_FULL_PAYMENT_MESSAGE = _(
 PREVIOUS_BOOKING_ATTEMPT_REJECTED_MESSAGE = _(
     "This booking request was previously rejected."
 )
+LOCKED_BOOKING_EDIT_MESSAGE = _(
+    "Completed, cancelled, no-show, and expired bookings cannot be edited."
+)
 PRICING_NOT_CONFIGURED_LABEL = _("Pricing not configured")
 BOOKING_NOT_IN_CLUB_MESSAGE = _("Booking must belong to the selected club.")
 BOOKING_CLUB_PLAYER_MISMATCH_MESSAGE = _(
@@ -1285,9 +1288,7 @@ def update_booking(*, booking, updated_by=None, **validated_data):
             .get(pk=booking.pk)
         )
         if locked_booking.status in Booking.LOCKED_STATUSES:
-            raise serializers.ValidationError(
-                "This booking status cannot be edited in Sprint 3."
-            )
+            raise serializers.ValidationError(LOCKED_BOOKING_EDIT_MESSAGE)
 
         identity_fields = {"customer_name", "customer_phone"}
         identity_requested = bool(identity_fields.intersection(validated_data))

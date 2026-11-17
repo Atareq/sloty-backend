@@ -10,6 +10,7 @@ from apps.bookings.identity import booking_customer_display_name
 from apps.bookings.models import Booking, BookingAttempt
 from apps.bookings.services import (
     FREE_SLOT_STATUS,
+    LOCKED_BOOKING_EDIT_MESSAGE,
     MAX_SLOT_PERIOD_DAYS,
     RECURRING_RESERVED_SLOT_STATUS,
     UNAVAILABLE_SLOT_STATUS,
@@ -750,9 +751,7 @@ class BookingUpdateSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         if self.instance.status in Booking.LOCKED_STATUSES:
-            raise serializers.ValidationError(
-                "This booking status cannot be edited in Sprint 3."
-            )
+            raise serializers.ValidationError(LOCKED_BOOKING_EDIT_MESSAGE)
         return attrs
 
     def update(self, instance, validated_data):

@@ -20,6 +20,7 @@ from apps.accounts.models import User
 from apps.audit.models import AuditLog
 from apps.bookings.filters import BookingAttemptFilter, BookingFilter
 from apps.bookings.models import Booking, BookingAttempt
+from apps.bookings.services import LOCKED_BOOKING_EDIT_MESSAGE
 from apps.bookings.views import BookingAttemptViewSet, BookingViewSet
 from apps.clubs.models import Club
 from apps.common.middleware import SQLQueryStats
@@ -2879,6 +2880,9 @@ class BookingUpdateTests(BookingAPITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn(str(LOCKED_BOOKING_EDIT_MESSAGE), str(response.data))
+        self.booking.refresh_from_db()
+        self.assertNotEqual(self.booking.notes, "Should Not Change")
 
 
 class BookingLifecycleActionTests(BookingAPITestCase):
