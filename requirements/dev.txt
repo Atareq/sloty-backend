@@ -8,6 +8,7 @@ factory-boy==3.3.0
 pytest-mock==3.12.0
 faker==20.0.0
 pytest-freezegun==0.4.2
+pytest-xdist==3.8.0
 
 # Linters and formatters
 isort==5.13.2

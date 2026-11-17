@@ -55,6 +55,17 @@ def test_workflow_serializes_master_deployments():
     )
 
 
+def test_release_waits_for_postgresql_concurrency_tests():
+    jobs = yaml.safe_load(WORKFLOW_TEXT)["jobs"]
+    postgresql = jobs["postgresql"]
+
+    assert postgresql["services"]["postgres"]["image"] == "postgres:17"
+    assert postgresql["env"]["DB_ENGINE"] == "postgresql"
+    run = "\n".join(step.get("run", "") for step in postgresql["steps"])
+    assert "pytest tests/test_postgresql_concurrency.py" in run
+    assert jobs["prepare-release"]["needs"] == ["test", "postgresql"]
+
+
 def test_workflow_validates_bash_syntax():
     assert "bash -n scripts/deploy-sloty-backend" in WORKFLOW_TEXT
     assert "bash -n scripts/write-backend-release-metadata" in WORKFLOW_TEXT

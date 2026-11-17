@@ -1,7 +1,8 @@
 from datetime import time, timedelta
 from decimal import Decimal
 
-from django.core.management.base import BaseCommand
+from django.conf import settings
+from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from apps.accounts.models import User
@@ -114,6 +115,9 @@ class Command(BaseCommand):
     help = "Create idempotent local/demo data for manual API testing."
 
     def handle(self, *args, **options):
+        # Demo users, including a superuser, share a published password.
+        if settings.SETTINGS_MODULE == "config.settings.production":
+            raise CommandError("seed_demo_data must not run with production settings.")
         users = self.create_users()
         profiles = self.create_admin_profiles(users)
         clubs = self.create_clubs(profiles)

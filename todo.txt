@@ -1,2 +1,0 @@
-* i need to let codex search on all the constants inside the project and leave in in a new files called constants inside every app ..
-onl if there is more than 5 lines of constants
